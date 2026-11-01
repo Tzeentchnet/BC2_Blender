@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Callable
+from typing import Callable, Iterable
 
 from .dbx import DbxDocument, DbxElement, parse_dbx
 from .errors import CorruptDataError, ExtractionError
@@ -27,6 +27,47 @@ TERRAIN_DECAL_TYPES = (
 
 PC_CHARACTER_SHADER_ARCHIVE = "Dist/win32/levels/mp_001/level-00.fbrb"
 PC_CHARACTER_SHADER_PATH = "Levels/mp_001/shaders/Dx11_Single.res"
+
+
+def discover_pc_levels(archive_paths: Iterable[str]) -> tuple[str, ...]:
+    level_files: dict[str, tuple[str, set[str]]] = {}
+    for archive_path in archive_paths:
+        parts = archive_path.replace("\\", "/").split("/")
+        if (
+            len(parts) != 5
+            or [part.casefold() for part in parts[:3]]
+            != ["dist", "win32", "levels"]
+        ):
+            continue
+        filename = parts[4].casefold()
+        if filename not in {"level-00.fbrb", "terrain-00.fbrb"}:
+            continue
+        key = parts[3].casefold()
+        display_name, files = level_files.setdefault(
+            key,
+            (parts[3].upper(), set()),
+        )
+        files.add(filename)
+
+    required = {"level-00.fbrb", "terrain-00.fbrb"}
+    return tuple(
+        display_name
+        for _, (display_name, files) in sorted(level_files.items())
+        if required <= files
+    )
+
+
+def pc_level_archive_paths(
+    level_name: str,
+    *,
+    include_terrain: bool = True,
+) -> tuple[str, ...]:
+    level = level_name.casefold()
+    paths = [f"Dist/win32/levels/{level}/level-00.fbrb"]
+    if include_terrain:
+        paths.append(f"Dist/win32/levels/{level}/terrain-00.fbrb")
+    paths.append("Dist/win32/levels/mp_common/level-00.fbrb")
+    return tuple(paths)
 
 
 @dataclass(frozen=True)
@@ -237,12 +278,7 @@ def index_pc_level_archives(
 ) -> tuple[str, ...]:
     if repository.kind != "PC_ISO":
         raise ExtractionError("Whole-map import currently supports PC retail ISOs")
-    level = level_name.casefold()
-    archive_paths = (
-        f"Dist/win32/levels/{level}/level-00.fbrb",
-        f"Dist/win32/levels/{level}/terrain-00.fbrb",
-        "Dist/win32/levels/mp_common/level-00.fbrb",
-    )
+    archive_paths = pc_level_archive_paths(level_name)
     for index, path in enumerate(archive_paths, 1):
         repository.index_archive_path(path)
         repository.materialize_archive_payload(path)

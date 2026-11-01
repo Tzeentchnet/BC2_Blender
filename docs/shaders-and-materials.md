@@ -19,6 +19,28 @@ not equivalent to recovering arbitrary shader arithmetic: the MedKit
 `plastic` surface below remains the only path whose complete detail-normal
 calculation has been reproduced exactly.
 
+## Import material modes
+
+The Blender adapter implements three dependency policies. They do not change
+the parser's interpretation of source material records:
+
+- **Materials and Textures** is the implemented full path described in this
+  document. It resolves source surfaces, reads applicable DX11 shader
+  databases, converts referenced texture resources, and builds Blender graphs.
+- **Materials Only** resolves subset-to-surface identity and creates named
+  materials with source-reference metadata, but does not read shader databases
+  to resolve texture bindings and does not load or convert texture images.
+  Terrain material-map names may be retained as metadata, but the terrain uses
+  a simple material rather than an image-driven layer graph.
+- **Simple Placeholders** bypasses source surface and terrain-material
+  resolution and creates neutral materials. Geometry, UVs, source part
+  metadata, and transforms are unchanged.
+
+Direct import of an `ITexture`, `XenonTexture`, or `Ps3Texture` remains an
+explicit image operation and is not disabled by the mesh/map material mode.
+Only **Materials and Textures** should be used when validating the shader and
+texture behavior documented below.
+
 ## PC DX11 shader database
 
 The implemented reader parses parameter groups, material keys, texture binding

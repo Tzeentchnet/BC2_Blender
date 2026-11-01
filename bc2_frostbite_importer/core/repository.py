@@ -23,6 +23,7 @@ from .source import DiscSource, detect_source
 
 
 ProgressCallback = Callable[[int, int, str], None]
+CancelCallback = Callable[[], bool]
 
 
 class AssetRepository:
@@ -50,7 +51,11 @@ class AssetRepository:
             or self.catalog.meta("source_kind") != self.kind
         )
 
-    def scan(self, progress: ProgressCallback | None = None):
+    def scan(
+        self,
+        progress: ProgressCallback | None = None,
+        cancelled: CancelCallback | None = None,
+    ):
         archives = self.source.list_archives()
         self._archive_info_cache.clear()
         self._payload_path_cache.clear()
@@ -65,6 +70,8 @@ class AssetRepository:
         total = len(archive_ids)
         failures: list[tuple[str, str]] = []
         for position, archive_id in enumerate(archive_ids, 1):
+            if cancelled and cancelled():
+                break
             row = self.catalog.archive(archive_id)
             try:
                 self.index_archive(archive_id)
@@ -91,6 +98,50 @@ class AssetRepository:
             info.payload_size,
         )
         return sum(not entry.deleted for entry in info.entries)
+
+    def index_all_archives(
+        self,
+        progress: ProgressCallback | None = None,
+        cancelled: CancelCallback | None = None,
+    ) -> list[tuple[str, str]]:
+        archives = self.catalog.unindexed_archives()
+        total = len(archives)
+        failures: list[tuple[str, str]] = []
+        for position, archive in enumerate(archives, 1):
+            if cancelled and cancelled():
+                break
+            try:
+                self.index_archive(int(archive["id"]))
+            except (BC2Error, OSError) as exc:
+                message = str(exc)
+                self.catalog.set_archive_error(int(archive["id"]), message)
+                failures.append((str(archive["path"]), message))
+            if progress:
+                progress(position, total, str(archive["path"]))
+        return failures
+
+    def index_archive_paths(
+        self,
+        paths: tuple[str, ...],
+        progress: ProgressCallback | None = None,
+        cancelled: CancelCallback | None = None,
+    ) -> list[tuple[str, str]]:
+        failures: list[tuple[str, str]] = []
+        total = len(paths)
+        for position, path in enumerate(paths, 1):
+            if cancelled and cancelled():
+                break
+            archive = self.catalog.archive_by_path(path)
+            try:
+                self.index_archive_path(path)
+            except (BC2Error, OSError) as exc:
+                message = str(exc)
+                if archive is not None:
+                    self.catalog.set_archive_error(int(archive["id"]), message)
+                failures.append((path, message))
+            if progress:
+                progress(position, total, path)
+        return failures
 
     def _archive_info(self, archive_id: int, stream):
         info = self._archive_info_cache.get(archive_id)

@@ -327,10 +327,13 @@ def _pc_skinned_uv_offsets(
     stride: int,
     palette: tuple[int, ...],
 ) -> tuple[int, ...]:
-    if mesh_type == 1 and stride == 64 and palette:
-        # Retail PC character declarations expose v6.xy, v3.xy, v6.zw,
-        # and v7.xy from these four byte offsets.
-        return 40, 16, 44, 48
+    if mesh_type == 1 and palette:
+        if stride == 48:
+            return 40, 44
+        if stride == 64:
+            # Retail PC character declarations expose v6.xy, v3.xy,
+            # v6.zw, and v7.xy from these four byte offsets.
+            return 40, 16, 44, 48
     return ()
 
 

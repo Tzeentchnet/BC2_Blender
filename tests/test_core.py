@@ -12,6 +12,8 @@ from pathlib import Path
 
 from bc2_frostbite_importer.core import texture
 from bc2_frostbite_importer.core.assembly import (
+    animation_tree_clip_references,
+    character_animation_links,
     modular_assembly,
     vehicle_part_state,
 )
@@ -26,7 +28,12 @@ from bc2_frostbite_importer.core.granny import (
     parse_granny_animation,
     parse_granny_model,
 )
-from bc2_frostbite_importer.core.level import FrostbiteTransform, LevelResolver
+from bc2_frostbite_importer.core.level import (
+    FrostbiteTransform,
+    LevelResolver,
+    discover_pc_levels,
+    pc_level_archive_paths,
+)
 from bc2_frostbite_importer.core.mesh import (
     _position_format,
     parse_composite_lod_part_names,
@@ -213,12 +220,28 @@ def make_granny_container(
     return bytes(granny)
 
 
-def granny_wrapper(strings: list[str], granny: bytes, *, animation: bool) -> bytes:
-    header = (
-        struct.pack("<III", 10, 0, len(strings))
-        if animation
-        else struct.pack("<II", 10, len(strings))
-    )
+def granny_wrapper(
+    strings: list[str],
+    granny: bytes,
+    *,
+    animation: bool,
+    additive_bone_indices: tuple[int, ...] = (),
+) -> bytes:
+    if animation:
+        header = bytearray(
+            struct.pack("<II", 10, len(additive_bone_indices))
+        )
+        if additive_bone_indices:
+            header.extend(
+                struct.pack(
+                    "<" + "I" * len(additive_bone_indices),
+                    *additive_bone_indices,
+                )
+            )
+            header.extend(struct.pack("<I", 0))
+        header.extend(struct.pack("<I", len(strings)))
+    else:
+        header = bytearray(struct.pack("<II", 10, len(strings)))
     result = bytearray(header)
     for value in strings:
         encoded = value.encode("latin-1")
@@ -272,7 +295,9 @@ def make_granny_model() -> bytes:
     )
 
 
-def make_granny_animation() -> bytes:
+def make_granny_animation(
+    additive_bone_indices: tuple[int, ...] = (),
+) -> bytes:
     strings = [
         "<file>",
         "root",
@@ -306,6 +331,77 @@ def make_granny_animation() -> bytes:
             (356, 6, 64),
             (360, 0, 424),
             (364, 6, 128),
+        ]
+    ] + [[] for _ in range(7)]
+    return granny_wrapper(
+        strings,
+        make_granny_container(sections, relocations),
+        animation=True,
+        additive_bone_indices=additive_bone_indices,
+    )
+
+
+def make_cubic_granny_animation() -> bytes:
+    strings = [
+        "<file>",
+        "root",
+        "group",
+        "CurveDataHeader_D4Constant32f",
+        "CurveDataHeader_D3I1K32fC32f",
+        "CurveDataHeader_DaIdentity",
+    ]
+    section = bytearray(760)
+    struct.pack_into("<I", section, 76, 1)
+    struct.pack_into("<I", section, 204, 2)
+    struct.pack_into("<I", section, 216, 1)
+    struct.pack_into("<II", section, 340, 1, 0)
+    struct.pack_into(
+        "<BBH4f",
+        section,
+        400,
+        5,
+        0,
+        0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    )
+    knots = tuple(float(index) for index in range(7))
+    controls = tuple(float(value) for value in range(0, 70, 10))
+    struct.pack_into("<BBH", section, 424, 2, 3, 0)
+    struct.pack_into("<3f", section, 428, 1.0, 0.0, 0.0)
+    struct.pack_into("<3f", section, 440, 0.0, 0.0, 0.0)
+    struct.pack_into("<I", section, 452, len(knots) + len(controls))
+    struct.pack_into("<14f", section, 480, *(knots + controls))
+    struct.pack_into(
+        "<IfffI",
+        section,
+        704,
+        0,
+        6.0,
+        1.0,
+        1.0,
+        1,
+    )
+    type_section = bytearray(160)
+    struct.pack_into("<II", type_section, 0, 1, 3)
+    struct.pack_into("<II", type_section, 64, 1, 4)
+    struct.pack_into("<II", type_section, 128, 1, 5)
+    sections = [bytes(section)] + [b""] * 5 + [bytes(type_section), b""]
+    relocations = [
+        [
+            (80, 0, 700),
+            (700, 0, 704),
+            (724, 0, 728),
+            (728, 0, 204),
+            (220, 0, 340),
+            (348, 6, 0),
+            (352, 0, 400),
+            (356, 6, 64),
+            (360, 0, 424),
+            (364, 6, 128),
+            (456, 0, 480),
         ]
     ] + [[] for _ in range(7)]
     return granny_wrapper(
@@ -912,6 +1008,86 @@ class MeshTests(unittest.TestCase):
             subset.additional_uvs[1][2][1], 0.8, places=3
         )
 
+    def test_pc_skinned_stride_48_uses_declared_uv_channels(self):
+        metadata = bytearray(struct.pack("<IHB", 1, 0, 1))
+        metadata.extend(b"bird\0")
+        metadata.extend(
+            struct.pack(
+                "<IIIIBBBBH",
+                1,
+                3,
+                0,
+                0,
+                48,
+                3,
+                4,
+                1,
+                1,
+            )
+        )
+        metadata.extend(struct.pack("<H", 7))
+        primary_uvs = ((0.0, 0.0), (1.0, 0.0), (0.0, 1.0))
+        secondary_uvs = ((0.2, 0.3), (0.8, 0.3), (0.2, 0.9))
+        positions = (
+            (0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+        )
+        vertices = bytearray()
+        for position, primary_uv, secondary_uv in zip(
+            positions,
+            primary_uvs,
+            secondary_uvs,
+        ):
+            vertex = bytearray(48)
+            struct.pack_into("<eee", vertex, 0, *position)
+            vertex[12] = 255
+            struct.pack_into(
+                "<eeee",
+                vertex,
+                24,
+                -1.0,
+                0.5,
+                0.25,
+                1.0,
+            )
+            struct.pack_into(
+                "<eeee",
+                vertex,
+                32,
+                0.75,
+                -0.5,
+                0.1,
+                1.0,
+            )
+            struct.pack_into(
+                "<eeee",
+                vertex,
+                40,
+                *primary_uv,
+                *secondary_uv,
+            )
+            vertices.extend(vertex)
+        indices = struct.pack("<3H", 0, 1, 2)
+        metadata.extend(
+            struct.pack("<III", len(vertices), len(indices), 0)
+        )
+
+        subset = parse_meshdata(
+            bytes(metadata + vertices + indices),
+            "pc",
+        ).subsets[0]
+
+        self.assertEqual(subset.uv_offsets, (40, 44))
+        self.assertEqual(subset.uvs, primary_uvs)
+        for actual, expected in zip(
+            subset.secondary_uvs,
+            secondary_uvs,
+        ):
+            self.assertAlmostEqual(actual[0], expected[0], places=3)
+            self.assertAlmostEqual(actual[1], expected[1], places=3)
+        self.assertEqual(subset.additional_uvs, ())
+
     def test_selects_one_position_format_for_related_subsets(self):
         half_data = bytearray()
         for position in (
@@ -975,6 +1151,27 @@ class GrannyTests(unittest.TestCase):
         self.assertEqual(
             track.translation.evaluate(0.5), (1.0, 2.0, 3.0)
         )
+
+    def test_parses_additive_animation_bone_indices(self):
+        animation = parse_granny_animation(
+            make_granny_animation((0,)), "pc", "Additive"
+        )
+
+        self.assertEqual(animation.additive_bone_indices, (0,))
+        self.assertEqual(
+            tuple(track.name for track in animation.tracks),
+            ("root",),
+        )
+
+    def test_parses_and_evaluates_cubic_animation_curve(self):
+        animation = parse_granny_animation(
+            make_cubic_granny_animation(), "pc", "Cubic"
+        )
+        curve = animation.tracks[0].translation
+        self.assertEqual(curve.degree, 3)
+        self.assertEqual(curve.evaluate(0.0), (0.0, 0.0, 0.0))
+        self.assertEqual(curve.evaluate(6.0), (60.0, 0.0, 0.0))
+        self.assertAlmostEqual(curve.evaluate(3.5)[0], 25.0)
 
     def test_rejects_truncated_granny_container(self):
         with self.assertRaises(CorruptDataError):
@@ -1136,6 +1333,143 @@ class TerrainTests(unittest.TestCase):
 
 
 class DbxTests(unittest.TestCase):
+    def test_character_animation_links_exclude_shared_tree(self):
+        mesh = element(
+            "complex",
+            element(
+                "field",
+                name="Mesh",
+                ref="Characters/Jap/Jap_Mesh/MESH-GUID",
+            ),
+        )
+        entity = element(
+            "instance",
+            element("array", mesh, name="Meshes3p"),
+            element("field", name="AnimTree3p", ref="TREE"),
+            guid="ROOT",
+            type="GameSharedResources.SoldierEntityData",
+            id="JapaneseInfantry",
+        )
+        tree = element(
+            "instance",
+            element("field", name="FacialAnimations", ref="FACIAL"),
+            element(
+                "field",
+                name="KitJointsAnimTree",
+                ref="Characters/AnimTree/JapKit/KIT-GUID",
+            ),
+            element("field", name="ReviveAnimTree", ref="null"),
+            element(
+                "field",
+                name="StaticPose",
+                ref="Characters/Jap/Jap_SkeletonPose/POSE-GUID",
+            ),
+            element(
+                "field",
+                name="Shared",
+                ref="Characters/AnimTree/Shared/SHARED-GUID",
+            ),
+            guid="TREE",
+            type="GameSharedResources.SoldierAnimationTreeData",
+        )
+        facial = element(
+            "instance",
+            element(
+                "field",
+                name="AnimTree",
+                ref="Characters/AnimTree/JapFacial/FACIAL-GUID",
+            ),
+            guid="FACIAL",
+            type="GameSharedResources.IndexedAnimationData",
+        )
+        document = DbxDocument(
+            element(
+                "partition",
+                entity,
+                tree,
+                facial,
+                guid="PARTITION",
+                primaryInstance="ROOT",
+            )
+        )
+
+        links = character_animation_links(
+            document,
+            "characters/jap/jap_mesh.res",
+        )
+
+        self.assertIsNotNone(links)
+        self.assertEqual(
+            links.animation_references,
+            ("Characters/Jap/Jap_SkeletonPose/POSE-GUID",),
+        )
+        self.assertEqual(
+            links.animation_tree_references,
+            (
+                "Characters/AnimTree/JapKit/KIT-GUID",
+                "Characters/AnimTree/JapFacial/FACIAL-GUID",
+            ),
+        )
+        self.assertIsNone(
+            character_animation_links(
+                document,
+                "Characters/Jap/Other_Mesh.res",
+            )
+        )
+        assembly = modular_assembly(
+            document,
+            "Objects/Soldiers/JapaneseInfantry.dbx",
+        )
+        self.assertEqual(assembly.animation_links, links)
+
+    def test_animation_tree_clips_use_explicit_lists(self):
+        result = element(
+            "instance",
+            element(
+                "array",
+                element(
+                    "item",
+                    ref="Animations/Faces/DeadPose/DEAD-GUID",
+                ),
+                element(
+                    "item",
+                    ref="Characters/Jap/FacePose/FACE-GUID",
+                ),
+                name="AnimationList",
+            ),
+            element(
+                "array",
+                element(
+                    "item",
+                    ref="Animations/Faces/DeadPose/DEAD-GUID",
+                ),
+                name="ReplacmentAnimations",
+            ),
+            element(
+                "field",
+                name="Skeleton",
+                ref="Characters/Skeletons/ske01/SKELETON-GUID",
+            ),
+            guid="RESULT",
+            type="Animation.ResultAnimTreeData",
+        )
+        document = DbxDocument(
+            element(
+                "partition",
+                result,
+                guid="PARTITION",
+                primaryInstance="RESULT",
+            )
+        )
+
+        self.assertEqual(
+            animation_tree_clip_references(document),
+            (
+                "Animations/Faces/DeadPose/DEAD-GUID",
+                "Characters/Jap/FacePose/FACE-GUID",
+            ),
+        )
+
     def test_character_modular_assembly_uses_meshes3p(self):
         body = element(
             "complex",
@@ -1682,7 +2016,144 @@ class LevelTests(unittest.TestCase):
             resolver._group_placements(level, group)
 
 
+class LevelDiscoveryTests(unittest.TestCase):
+    def test_discovers_only_complete_pc_level_archive_pairs(self):
+        levels = discover_pc_levels(
+            (
+                "Dist/win32/levels/mp_002/terrain-00.fbrb",
+                "Dist/win32/levels/mp_001/level-00.fbrb",
+                "Dist/win32/levels/mp_common/level-00.fbrb",
+                r"Dist\win32\levels\mp_002\level-00.fbrb",
+                "Dist/win32/levels/mp_001/terrain-00.fbrb",
+                "Dist/win32/objects/level-00.fbrb",
+            )
+        )
+
+        self.assertEqual(levels, ("MP_001", "MP_002"))
+
+    def test_builds_targeted_object_archive_paths_without_terrain(self):
+        self.assertEqual(
+            pc_level_archive_paths("MP_001", include_terrain=False),
+            (
+                "Dist/win32/levels/mp_001/level-00.fbrb",
+                "Dist/win32/levels/mp_common/level-00.fbrb",
+            ),
+        )
+
+
 class RepositoryTests(unittest.TestCase):
+    def test_indexes_all_pending_archives_and_records_failures(self):
+        repository = object.__new__(AssetRepository)
+        repository.catalog = SimpleNamespace(
+            unindexed_archives=lambda: (
+                {"id": 1, "path": "Dist/Good.fbrb"},
+                {"id": 2, "path": "Dist/Bad.fbrb"},
+            ),
+            set_archive_error=mock.Mock(),
+        )
+        indexed = []
+
+        def index_archive(archive_id):
+            indexed.append(archive_id)
+            if archive_id == 2:
+                raise OSError("synthetic extraction failure")
+            return 1
+
+        repository.index_archive = index_archive
+        progress = []
+        failures = repository.index_all_archives(
+            lambda current, total, path: progress.append(
+                (current, total, path)
+            )
+        )
+
+        self.assertEqual(indexed, [1, 2])
+        self.assertEqual(
+            failures,
+            [("Dist/Bad.fbrb", "synthetic extraction failure")],
+        )
+        repository.catalog.set_archive_error.assert_called_once_with(
+            2,
+            "synthetic extraction failure",
+        )
+        self.assertEqual(
+            progress,
+            [
+                (1, 2, "Dist/Good.fbrb"),
+                (2, 2, "Dist/Bad.fbrb"),
+            ],
+        )
+
+    def test_archive_indexing_cancels_between_archives(self):
+        repository = object.__new__(AssetRepository)
+        repository.catalog = SimpleNamespace(
+            unindexed_archives=lambda: (
+                {"id": 1, "path": "Dist/First.fbrb"},
+                {"id": 2, "path": "Dist/Second.fbrb"},
+            ),
+            set_archive_error=mock.Mock(),
+        )
+        indexed = []
+        cancelled = [False]
+
+        def progress(current, total, path):
+            cancelled[0] = True
+
+        repository.index_archive = lambda archive_id: indexed.append(
+            archive_id
+        )
+        failures = repository.index_all_archives(
+            progress,
+            lambda: cancelled[0],
+        )
+
+        self.assertEqual(failures, [])
+        self.assertEqual(indexed, [1])
+
+    def test_indexes_only_requested_archive_paths(self):
+        repository = object.__new__(AssetRepository)
+        repository.catalog = SimpleNamespace(
+            archive_by_path=lambda path: {
+                "id": 1 if path == "Dist/Level.fbrb" else 2
+            },
+            set_archive_error=mock.Mock(),
+        )
+        indexed = []
+
+        def index_archive_path(path):
+            indexed.append(path)
+            if path == "Dist/Common.fbrb":
+                raise OSError("synthetic targeted failure")
+
+        repository.index_archive_path = index_archive_path
+        progress = []
+        failures = repository.index_archive_paths(
+            ("Dist/Level.fbrb", "Dist/Common.fbrb"),
+            lambda current, total, path: progress.append(
+                (current, total, path)
+            ),
+        )
+
+        self.assertEqual(
+            indexed,
+            ["Dist/Level.fbrb", "Dist/Common.fbrb"],
+        )
+        self.assertEqual(
+            failures,
+            [("Dist/Common.fbrb", "synthetic targeted failure")],
+        )
+        repository.catalog.set_archive_error.assert_called_once_with(
+            2,
+            "synthetic targeted failure",
+        )
+        self.assertEqual(
+            progress,
+            [
+                (1, 2, "Dist/Level.fbrb"),
+                (2, 2, "Dist/Common.fbrb"),
+            ],
+        )
+
     def test_xdvdfs_to_fbrb_to_mesh_end_to_end(self):
         meshdata = make_meshdata(">")
         archive = make_fbrb("Objects/Test/Test_Mesh_lod0_data.res", "MeshData", meshdata)

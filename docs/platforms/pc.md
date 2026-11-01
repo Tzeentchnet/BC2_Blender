@@ -74,8 +74,15 @@ The current extraction path:
 Consequences:
 
 - PC retail extraction currently requires Windows.
-- Scanning the disc only builds the archive list. An FbRB is extracted and
-  indexed when selected, avoiding full-DVD expansion.
+- The default background scan only builds the archive list. The add-on derives
+  its editable map picker from folders containing both `level-00.fbrb` and
+  `terrain-00.fbrb`; no bundled retail asset manifest is required.
+- An FbRB is extracted and indexed when selected. **Index Map Objects** targets
+  only the chosen level's `level-00` archive and `mp_common`, avoiding
+  full-DVD expansion.
+- Background cancellation is checked between archives. Windows
+  `expand.exe` is allowed to finish the active cabinet-member extraction
+  before the worker stops.
 - Cache files are derivatives and can be regenerated from the ISO.
 
 See [`source.py`](../../bc2_frostbite_importer/core/source.py).

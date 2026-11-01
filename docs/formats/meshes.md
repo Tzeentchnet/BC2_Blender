@@ -113,6 +113,20 @@ usable Blender preview:
   offset cannot be inferred independently. Padding at byte 44 is not exposed
   as a coordinate layer. Which layer is a color UV remains shader-specific;
   for AH60 Main, byte 28 is the nondegenerate base-color channel.
+- The implemented little-endian type-1, palette-backed stride-48 skinned
+  declaration exposes two half-float coordinate pairs:
+
+  | Mesh byte offset | Blender layer |
+  |---:|---|
+  | 40 | `UVMap` |
+  | 44 | `UV1` |
+
+  This layout is verified structurally on the retail Raven and Parrot LOD0
+  meshes and 50 inspected stride-48 character subsets. Raven's byte-40
+  `UVMap` has nonzero UV area on all 1,130 triangles. Bytes 24 through 39
+  contain packed tangent-frame data; applying the static stride-48
+  28/36/32/24 mapping to this skinned layout produces degenerate or `-1..1`
+  vector fields instead of texture coordinates.
 - The tested little-endian stride-64 skinned-character declaration is
   explicit rather than heuristic. It exposes four half-float shader-coordinate
   pairs:

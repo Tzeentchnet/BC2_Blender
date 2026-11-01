@@ -50,6 +50,10 @@ class GrannyCurve:
     def evaluate(self, time: float) -> tuple[float, ...]:
         if len(self.controls) == 1 or self.degree == 0:
             return self.controls[0]
+        if time <= self.knots[0]:
+            return self.controls[0]
+        if time >= self.knots[-1]:
+            return self.controls[-1]
         knot_index = bisect.bisect_right(self.knots, time)
         knot_index = min(knot_index, len(self.knots) - 1)
         if self.degree == 1 or len(self.knots) < 4:
@@ -112,6 +116,67 @@ class GrannyCurve:
                 + current_weight * current[axis]
                 for axis in range(self.dimension)
             )
+        if self.degree == 3:
+            center = knot_index
+
+            def knot(relative_index: int) -> float:
+                index = min(
+                    max(center + relative_index, 0),
+                    len(self.knots) - 1,
+                )
+                return self.knots[index]
+
+            def divide(numerator: float, denominator: float) -> float:
+                return (
+                    0.0
+                    if abs(denominator) < 1e-12
+                    else numerator / denominator
+                )
+
+            knot_3 = knot(-3)
+            knot_2 = knot(-2)
+            knot_1 = knot(-1)
+            current_knot = knot(0)
+            knot1 = knot(1)
+            knot2 = knot(2)
+            lower = divide(time - knot_1, current_knot - knot_1)
+            middle_1 = divide(time - knot_2, current_knot - knot_2)
+            middle_2 = divide(time - knot_1, knot1 - knot_1)
+            upper_1 = divide(time - knot_3, current_knot - knot_3)
+            upper_2 = divide(time - knot_2, knot1 - knot_2)
+            upper_3 = divide(time - knot_1, knot2 - knot_1)
+
+            inverse_lower = 1.0 - lower
+            inverse_middle_1 = 1.0 - middle_1
+            inverse_middle_2 = 1.0 - middle_2
+            inverse_upper_1 = 1.0 - upper_1
+            inverse_upper_2 = 1.0 - upper_2
+            inverse_upper_3 = 1.0 - upper_3
+            weights = (
+                inverse_lower * inverse_middle_1 * inverse_upper_1,
+                (
+                    inverse_lower * inverse_middle_1 * upper_1
+                    + inverse_lower * middle_1 * inverse_upper_2
+                    + lower * inverse_middle_2 * inverse_upper_2
+                ),
+                (
+                    inverse_lower * middle_1 * upper_2
+                    + lower * inverse_middle_2 * upper_2
+                    + lower * middle_2 * inverse_upper_3
+                ),
+                lower * middle_2 * upper_3,
+            )
+            control_indices = tuple(
+                min(max(center + offset, 0), len(self.controls) - 1)
+                for offset in (-3, -2, -1, 0)
+            )
+            return tuple(
+                sum(
+                    weight * self.controls[index][axis]
+                    for weight, index in zip(weights, control_indices)
+                )
+                for axis in range(self.dimension)
+            )
         return self.controls[min(knot_index, len(self.controls) - 1)]
 
 
@@ -121,7 +186,7 @@ class GrannyTransformTrack:
     flags: int
     rotation: GrannyCurve
     translation: GrannyCurve
-    scale_codec: str
+    scale_shear: GrannyCurve
 
     def rotation_at(self, time: float) -> tuple[float, float, float, float]:
         value = self.rotation.evaluate(time)
@@ -140,6 +205,7 @@ class GrannyAnimation:
     time_step: float
     oversampling: float
     tracks: tuple[GrannyTransformTrack, ...]
+    additive_bone_indices: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -181,25 +247,54 @@ def _parse_strings(
     data: bytes,
     *,
     animation: bool,
-) -> tuple[tuple[str, ...], int]:
+) -> tuple[tuple[str, ...], int, tuple[int, ...]]:
     reader = _Reader(data, "Frostbite Granny wrapper")
-    header_format = "<III" if animation else "<II"
-    values = reader.unpack(header_format, 0, "header")
-    version = values[0]
-    string_count = values[-1]
+    version = reader.unpack("<I", 0, "version")[0]
     if version != 10:
         raise UnsupportedFormatError(
             f"Unsupported Frostbite Granny wrapper version: {version}"
         )
-    if animation and values[1] != 0:
-        raise UnsupportedFormatError(
-            f"Unsupported Granny animation wrapper flags: {values[1]}"
-        )
+    position = 4
+    additive_bone_indices = ()
+    if animation:
+        additive_count = reader.unpack(
+            "<I", position, "additive bone count"
+        )[0]
+        position += 4
+        if additive_count > _MAX_BONES:
+            raise CorruptDataError(
+                "Unsafe Granny additive bone count: "
+                f"{additive_count:,}"
+            )
+        if additive_count:
+            additive_bone_indices = reader.unpack(
+                "<" + "I" * additive_count,
+                position,
+                "additive bone indices",
+            )
+            position += additive_count * 4
+            if (
+                len(set(additive_bone_indices)) != additive_count
+                or any(index >= _MAX_BONES for index in additive_bone_indices)
+            ):
+                raise CorruptDataError(
+                    "Granny additive bone indices are invalid"
+                )
+            reserved = reader.unpack(
+                "<I", position, "additive reserved field"
+            )[0]
+            position += 4
+            if reserved != 0:
+                raise UnsupportedFormatError(
+                    "Unsupported Granny additive wrapper marker: "
+                    f"{reserved}"
+                )
+    string_count = reader.unpack("<I", position, "string count")[0]
+    position += 4
     if string_count > _MAX_STRINGS:
         raise CorruptDataError(
             f"Unsafe Granny wrapper string count: {string_count:,}"
         )
-    position = struct.calcsize(header_format)
     strings = []
     for index in range(string_count):
         length = reader.unpack("<H", position, f"string {index} length")[0]
@@ -207,7 +302,7 @@ def _parse_strings(
         raw = reader.slice(position, length, f"string {index}")
         position += length
         strings.append(raw.decode("latin-1"))
-    return tuple(strings), position
+    return tuple(strings), position, additive_bone_indices
 
 
 def _parse_container(data: bytes, search_start: int) -> tuple[_Section, ...]:
@@ -334,7 +429,7 @@ def parse_granny_model(
     platform: str | None = "pc",
 ) -> GrannySkeleton:
     _require_pc(platform)
-    strings, strings_end = _parse_strings(data, animation=False)
+    strings, strings_end, _ = _parse_strings(data, animation=False)
     sections = _parse_container(data, strings_end)
     if not sections:
         raise CorruptDataError("Granny model has no sections")
@@ -517,7 +612,7 @@ class _AnimationDecoder:
         _, degree, _, _ = reader.unpack(
             "<4B", offset, "curve header"
         )
-        if degree > 2:
+        if degree > 3:
             raise UnsupportedFormatError(
                 f"Unsupported Granny curve degree {degree}"
             )
@@ -594,7 +689,7 @@ class _AnimationDecoder:
         _, degree, scale_entries = reader.unpack(
             "<BBH", offset, "header"
         )
-        if degree > 2:
+        if degree > 3:
             raise UnsupportedFormatError(
                 f"Unsupported Granny curve degree {degree}"
             )
@@ -682,6 +777,7 @@ class _AnimationDecoder:
                 codec, section_index, offset, 3
             )
         supported = {
+            "D3I1K32fC32f",
             "D3I1K8uC8u",
             "D3I1K16uC16u",
             "D3K8uC8u",
@@ -698,7 +794,7 @@ class _AnimationDecoder:
         _, degree, one_over_truncated = reader.unpack(
             "<BBH", offset, "header"
         )
-        if degree > 2:
+        if degree > 3:
             raise UnsupportedFormatError(
                 f"Unsupported Granny curve degree {degree}"
             )
@@ -724,21 +820,25 @@ class _AnimationDecoder:
             self.sections[value_section].data,
             f"Granny {codec} values",
         )
+        is_float = codec == "D3I1K32fC32f"
         is_16_bit = "16u" in codec
-        value_format = "H" if is_16_bit else "B"
+        value_format = "f" if is_float else ("H" if is_16_bit else "B")
         values = value_reader.unpack(
             "<" + value_format * count,
             value_offset,
             "values",
         )
-        one_over_knot_scale = struct.unpack(
-            "<f", struct.pack("<I", one_over_truncated << 16)
-        )[0]
-        knot_scale = (
-            1.0 / one_over_knot_scale
-            if one_over_knot_scale != 0.0
-            else 1.0
-        )
+        if is_float:
+            knot_scale = 1.0
+        else:
+            one_over_knot_scale = struct.unpack(
+                "<f", struct.pack("<I", one_over_truncated << 16)
+            )[0]
+            knot_scale = (
+                1.0 / one_over_knot_scale
+                if one_over_knot_scale != 0.0
+                else 1.0
+            )
         knot_count = count // divisor
         knots = tuple(
             knot_scale * value for value in values[:knot_count]
@@ -763,13 +863,56 @@ class _AnimationDecoder:
             )
         return _validated_curve(codec, degree, knots, controls)
 
-    def scale_codec(self, type_source: int) -> str:
-        codec, _, _ = self._reference(type_source)
-        if codec != "DaIdentity":
+    def scale_shear(self, type_source: int) -> GrannyCurve:
+        codec, section_index, offset = self._reference(type_source)
+        identity = (
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        )
+        if codec == "DaIdentity":
+            return GrannyCurve(codec, 0, (0.0,), (identity,))
+        if codec != "DaConstant32f":
             raise UnsupportedFormatError(
                 f"Unsupported Granny scale/shear codec: {codec}"
             )
-        return codec
+        reader = _Reader(
+            self.sections[section_index].data,
+            f"Granny {codec} curve",
+        )
+        _, degree, _, _ = reader.unpack("<4B", offset, "curve header")
+        if degree != 0:
+            raise UnsupportedFormatError(
+                f"Unsupported Granny constant curve degree {degree}"
+            )
+        control_count = reader.unpack(
+            "<I", offset + 4, "control count"
+        )[0]
+        if control_count != 9:
+            raise CorruptDataError(
+                f"{codec} has {control_count} scale/shear controls, expected 9"
+            )
+        control_section, control_offset = _target(
+            self.sections,
+            section_index,
+            offset + 8,
+            f"{codec} controls",
+        )
+        control_reader = _Reader(
+            self.sections[control_section].data,
+            f"Granny {codec} controls",
+        )
+        controls = _finite(
+            control_reader.unpack("<9f", control_offset, "values"),
+            f"{codec} controls",
+        )
+        return GrannyCurve(codec, 0, (0.0,), (controls,))
 
 
 def _validated_curve(
@@ -801,7 +944,9 @@ def parse_granny_animation(
     name: str = "Animation",
 ) -> GrannyAnimation:
     _require_pc(platform)
-    strings, strings_end = _parse_strings(data, animation=True)
+    strings, strings_end, additive_bone_indices = _parse_strings(
+        data, animation=True
+    )
     sections = _parse_container(data, strings_end)
     section = sections[0]
     reader = _Reader(section.data, "Granny animation section 0")
@@ -912,7 +1057,7 @@ def parse_granny_animation(
                     flags=flags,
                     rotation=decoder.rotation(offset + 8),
                     translation=decoder.translation(offset + 16),
-                    scale_codec=decoder.scale_codec(offset + 24),
+                    scale_shear=decoder.scale_shear(offset + 24),
                 )
             )
             track_names.add(track_name)
@@ -924,4 +1069,5 @@ def parse_granny_animation(
         time_step=time_step,
         oversampling=oversampling,
         tracks=tuple(tracks),
+        additive_bone_indices=additive_bone_indices,
     )

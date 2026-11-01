@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-from __future__ import annotations
-
 import json
 import os
+import queue
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -32,7 +32,10 @@ from mathutils import Matrix, Quaternion
 from .core.assembly import (
     AssemblyComponent,
     AssemblyPart,
+    CharacterAnimationLinks,
     ModularAssembly,
+    animation_tree_clip_references,
+    character_animation_links,
     modular_assembly,
     vehicle_part_state,
 )
@@ -51,8 +54,10 @@ from .core.level import (
     MeshDefinition,
     PC_CHARACTER_SHADER_PATH,
     SurfaceShader,
+    discover_pc_levels,
     index_pc_character_shader_archive,
     index_pc_level_archives,
+    pc_level_archive_paths,
 )
 from .core.mesh import (
     CompositePart,
@@ -90,6 +95,8 @@ ADDON_ID = (
     else __package__
 )
 RESULTS_PER_PAGE = 150
+_MAX_RELATED_ANIMATIONS = 64
+_MAX_CHARACTER_ANIMATION_DESCRIPTORS = 256
 _PC_MODULAR_SHADER_FALLBACKS = (
     (
         "Dist/win32/levels/mp_004/level-00.fbrb",
@@ -119,12 +126,33 @@ class _ImportedAssemblyComponent:
 
 
 @dataclass(frozen=True)
+class _RelatedAnimationImport:
+    enabled: bool
+    actions: tuple[object, ...] = ()
+    issues: tuple[str, ...] = ()
+    indexed_archive_count: int = 0
+    total_archive_count: int = 0
+
+    @property
+    def catalog_complete(self) -> bool:
+        return self.indexed_archive_count == self.total_archive_count
+
+
+@dataclass(frozen=True)
+class _CharacterAnimationSource:
+    links: CharacterAnimationLinks
+    archive_path: str
+    descriptor_path: str
+
+
+@dataclass(frozen=True)
 class _ImportedAssembly:
     definition: ModularAssembly
     root_collection: object
     armature: object | None
     components: tuple[_ImportedAssemblyComponent, ...]
-    diagnostics_text: object
+    diagnostics_text: object | None
+    related_animations: _RelatedAnimationImport | None = None
 
 
 CATEGORIES = (
@@ -140,15 +168,103 @@ CATEGORIES = (
     ("OTHER", "Other", "Other Frostbite resources", "FILE", 9),
 )
 
+_ASSET_TYPE_ICONS = {
+    "AimAnimation": "ANIM_DATA",
+    "AnimTreeInfo": "ANIM_DATA",
+    "BinkMemory": "FILE_MOVIE",
+    "CompositeMeshSet": "OUTLINER_COLLECTION",
+    "DeltaAnimation": "ANIM_DATA",
+    "Dx9ShaderDatabase": "SHADING_TEXTURE",
+    "GrannyAnimation": "ANIM_DATA",
+    "GrannyModel": "ARMATURE_DATA",
+    "HavokPhysicsData": "PHYSICS",
+    "ImpulseResponse": "SOUND",
+    "ITexture": "IMAGE_DATA",
+    "IrradianceVolume": "WORLD_DATA",
+    "MeshData": "MESH_DATA",
+    "OccluderMesh": "MESH_DATA",
+    "Ps3Texture": "IMAGE_DATA",
+    "RagdollResource": "PHYSICS",
+    "RigidMeshSet": "OUTLINER_OB_MESH",
+    "SkinnedMeshSet": "MOD_ARMATURE",
+    "SootMesh": "MESH_DATA",
+    "SwfMovie": "FILE_MOVIE",
+    "Terrain": "MESH_GRID",
+    "TerrainHeightfield": "RNDCURVE",
+    "TerrainMaterialMap": "IMAGE_DATA",
+    "TreeMeshSet": "OUTLINER_OB_CURVES",
+    "VisualTerrain": "MESH_GRID",
+    "VisualWater": "WORLD_DATA",
+    "WaterMesh": "MESH_DATA",
+    "Wave": "SOUND",
+    "WeatherSystem": "WORLD_DATA",
+    "XenonTexture": "IMAGE_DATA",
+}
+
+MATERIAL_MODES = (
+    (
+        "FULL",
+        "Materials and Textures",
+        "Resolve source surfaces, shader bindings, and texture images",
+    ),
+    (
+        "MATERIALS_ONLY",
+        "Materials Only",
+        "Create source-named materials without loading texture images",
+    ),
+    (
+        "PLACEHOLDER",
+        "Simple Placeholders",
+        "Create neutral materials without source material or texture lookup",
+    ),
+)
+
+COMPOSITE_VISIBILITY_MODES = (
+    (
+        "DEFAULT_STATE",
+        "Default State",
+        "Hide damaged, destroyed, blurred, and verified wreck variants",
+    ),
+    (
+        "SHOW_ALL",
+        "Show All Imported Parts",
+        "Keep every imported composite part visible while retaining state metadata",
+    ),
+)
 
 def _default_cache_directory() -> str:
     root = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()))
     return str(root / "BC2Blender" / "Cache")
 
 
+def _repository_preference_updated(self, context):
+    cancel_event = globals().get("_active_scan_cancel")
+    if cancel_event is not None:
+        cancel_event.set()
+    close_repository = globals().get("_close_repository")
+    if close_repository is not None:
+        close_repository()
+    window_manager = getattr(context, "window_manager", None)
+    settings = getattr(window_manager, "bc2_settings", None)
+    if settings is None:
+        return
+    settings.source_kind = ""
+    settings.status = "Source or cache changed; scan the disc"
+    settings.archives.clear()
+    settings.assets.clear()
+    settings.total_results = 0
+    settings.indexed_asset_count = 0
+
+
 class BC2AddonPreferences(AddonPreferences):
     bl_idname = ADDON_ID
 
+    source_path: StringProperty(
+        name="Last disc image",
+        description="Battlefield: Bad Company 2 PC or Xbox 360 ISO",
+        subtype="FILE_PATH",
+        update=_repository_preference_updated,
+    )
     cache_directory: StringProperty(
         name="Asset cache",
         description=(
@@ -157,10 +273,87 @@ class BC2AddonPreferences(AddonPreferences):
         ),
         subtype="DIR_PATH",
         default=_default_cache_directory(),
+        update=_repository_preference_updated,
+    )
+    default_axis_conversion: BoolProperty(
+        name="Convert Y-up to Blender Z-up",
+        default=True,
+    )
+    default_flip_v: BoolProperty(
+        name="Flip texture V",
+        description="Convert DirectX UV orientation to Blender orientation",
+        default=True,
+    )
+    default_unit_scale: FloatProperty(
+        name="Scale",
+        default=1.0,
+        min=0.0001,
+        max=10000.0,
+    )
+    default_include_z_only: BoolProperty(
+        name="Include Z-only subsets",
+        description="Import shadow/depth-only geometry in addition to visible subsets",
+        default=False,
+    )
+    default_terrain_resolution: IntProperty(
+        name="Terrain mesh resolution",
+        description=(
+            "Maximum vertices per terrain edge; 1024 preserves the source "
+            "resolution of the MP_001 playable heightfield"
+        ),
+        default=1024,
+        min=16,
+        max=1024,
+    )
+    default_material_mode: EnumProperty(
+        name="Material mode",
+        items=MATERIAL_MODES,
+        default="FULL",
+    )
+    default_composite_visibility: EnumProperty(
+        name="Composite visibility",
+        items=COMPOSITE_VISIBILITY_MODES,
+        default="DEFAULT_STATE",
+    )
+    default_import_related_animations: BoolProperty(
+        name="Import related animations",
+        description=(
+            "With a rigged PC mesh, import exact-folder clips and clips "
+            "explicitly listed by character-specific animation trees after "
+            "verifying that each clip references that exact skeleton"
+        ),
+        default=True,
+    )
+    create_diagnostics: BoolProperty(
+        name="Create detailed diagnostics Text datablocks",
+        description=(
+            "Create JSON Text datablocks for material and map diagnostics; "
+            "warnings and errors are still reported when disabled"
+        ),
+        default=False,
     )
 
     def draw(self, context):
-        self.layout.prop(self, "cache_directory")
+        source = self.layout.box()
+        source.label(text="Source and Cache", icon="DISK_DRIVE")
+        source.prop(self, "source_path")
+        source.prop(self, "cache_directory")
+        source.operator("bc2.open_cache_directory", icon="FILE_FOLDER")
+
+        defaults = self.layout.box()
+        defaults.label(text="Import Defaults", icon="PREFERENCES")
+        defaults.prop(self, "default_axis_conversion")
+        defaults.prop(self, "default_flip_v")
+        defaults.prop(self, "default_unit_scale")
+        defaults.prop(self, "default_include_z_only")
+        defaults.prop(self, "default_terrain_resolution")
+        defaults.prop(self, "default_material_mode")
+        defaults.prop(self, "default_composite_visibility")
+        defaults.prop(self, "default_import_related_animations")
+
+        diagnostics = self.layout.box()
+        diagnostics.label(text="Diagnostics", icon="INFO")
+        diagnostics.prop(self, "create_diagnostics")
 
 
 class BC2AssetListItem(PropertyGroup):
@@ -180,14 +373,16 @@ class BC2ArchiveListItem(PropertyGroup):
     error: StringProperty()
 
 
+class BC2MapListItem(PropertyGroup):
+    name: StringProperty()
+
+
 class BC2Settings(PropertyGroup):
-    source_path: StringProperty(
-        name="Disc image",
-        description="Battlefield: Bad Company 2 PC or Xbox 360 ISO",
-        subtype="FILE_PATH",
-    )
     source_kind: StringProperty(name="Detected source")
     status: StringProperty(name="Status", default="Select a disc image, then scan")
+    defaults_initialized: BoolProperty(default=False, options={"HIDDEN"})
+    diagnostic_count: IntProperty(default=0, min=0, options={"HIDDEN"})
+    scan_in_progress: BoolProperty(default=False, options={"HIDDEN"})
     category: EnumProperty(name="Asset type", items=CATEGORIES, default="MESH")
     search: StringProperty(name="Search", description="Filter paths and resource types")
     archive_search: StringProperty(
@@ -195,10 +390,17 @@ class BC2Settings(PropertyGroup):
     )
     page: IntProperty(default=0, min=0)
     total_results: IntProperty(default=0, min=0)
+    indexed_asset_count: IntProperty(default=0, min=0)
+    show_asset_sizes: BoolProperty(
+        name="Sizes",
+        description="Show file sizes in the asset list",
+        default=False,
+    )
     assets: CollectionProperty(type=BC2AssetListItem)
     active_asset_index: IntProperty(default=0)
     archives: CollectionProperty(type=BC2ArchiveListItem)
     active_archive_index: IntProperty(default=0)
+    available_maps: CollectionProperty(type=BC2MapListItem)
     axis_conversion: BoolProperty(
         name="Convert Y-up to Blender Z-up",
         default=True,
@@ -224,31 +426,99 @@ class BC2Settings(PropertyGroup):
         min=16,
         max=1024,
     )
-    map_name: StringProperty(
-        name="PC map",
-        description="Retail PC level name, for example MP_001",
-        default="MP_001",
+    material_mode: EnumProperty(
+        name="Material mode",
+        items=MATERIAL_MODES,
+        default="FULL",
     )
-    map_import_materials: BoolProperty(
-        name="Resolve map materials and textures",
+    composite_visibility: EnumProperty(
+        name="Composite visibility",
+        items=COMPOSITE_VISIBILITY_MODES,
+        default="DEFAULT_STATE",
+    )
+    import_related_animations: BoolProperty(
+        name="Import related animations",
         description=(
-            "Read the level DX11 shader database, load referenced textures, "
-            "and build conservative Blender materials"
+            "Import indexed exact-folder and character-tree clips when they "
+            "reference that exact skeleton"
         ),
         default=True,
+    )
+    map_name: StringProperty(
+        name="Level name",
+        description=(
+            "Retail PC level discovered from the archive catalog or entered manually"
+        ),
+        default="MP_001",
     )
 
 
 _repository: AssetRepository | None = None
 _repository_key: tuple[str, str] | None = None
+_active_scan_cancel: threading.Event | None = None
+_active_scan_thread: threading.Thread | None = None
 
 
 def _preferences(context) -> BC2AddonPreferences:
     return context.preferences.addons[ADDON_ID].preferences
 
 
+def _apply_preference_defaults(
+    settings: BC2Settings,
+    preferences: BC2AddonPreferences,
+    *,
+    force: bool = False,
+):
+    if settings.defaults_initialized and not force:
+        return
+    settings.axis_conversion = preferences.default_axis_conversion
+    settings.flip_v = preferences.default_flip_v
+    settings.unit_scale = preferences.default_unit_scale
+    settings.include_z_only = preferences.default_include_z_only
+    settings.terrain_resolution = preferences.default_terrain_resolution
+    settings.material_mode = preferences.default_material_mode
+    settings.composite_visibility = preferences.default_composite_visibility
+    settings.import_related_animations = (
+        preferences.default_import_related_animations
+    )
+    settings.defaults_initialized = True
+
+
 def _settings(context) -> BC2Settings:
-    return context.scene.bc2_settings
+    settings = context.window_manager.bc2_settings
+    _apply_preference_defaults(settings, _preferences(context))
+    return settings
+
+
+def _material_mode(settings) -> str:
+    value = getattr(settings, "material_mode", None)
+    if value in {"FULL", "MATERIALS_ONLY", "PLACEHOLDER"}:
+        return value
+    if hasattr(settings, "map_import_materials"):
+        return "FULL" if settings.map_import_materials else "PLACEHOLDER"
+    if hasattr(settings, "import_textures"):
+        return "FULL" if settings.import_textures else "MATERIALS_ONLY"
+    return "FULL"
+
+
+def _uses_source_materials(settings) -> bool:
+    return _material_mode(settings) != "PLACEHOLDER"
+
+
+def _loads_source_textures(settings) -> bool:
+    return _material_mode(settings) == "FULL"
+
+
+def _shows_all_composite_parts(settings) -> bool:
+    return getattr(settings, "composite_visibility", "DEFAULT_STATE") == "SHOW_ALL"
+
+
+def _detailed_diagnostics_enabled(context, settings=None) -> bool:
+    explicit = getattr(settings, "create_diagnostics", None)
+    if explicit is not None:
+        return bool(explicit)
+    addon = context.preferences.addons.get(ADDON_ID)
+    return bool(addon and addon.preferences.create_diagnostics)
 
 
 def _close_repository():
@@ -262,10 +532,11 @@ def _close_repository():
 def _get_repository(context, require_scan: bool = True) -> AssetRepository:
     global _repository, _repository_key
     settings = _settings(context)
-    source_path = bpy.path.abspath(settings.source_path)
+    preferences = _preferences(context)
+    source_path = bpy.path.abspath(preferences.source_path)
     if not source_path:
         raise BC2Error("Select a PC or Xbox 360 disc image first")
-    cache_path = bpy.path.abspath(_preferences(context).cache_directory)
+    cache_path = bpy.path.abspath(preferences.cache_directory)
     key = (str(Path(source_path).resolve()), str(Path(cache_path).resolve()))
     if _repository is None or _repository_key != key:
         _close_repository()
@@ -281,10 +552,21 @@ def _basename(path: str) -> str:
     return PurePosixPath(path).name
 
 
+def _asset_type_icon(asset_type: str, path: str) -> str:
+    if asset_type == "<non-resource>":
+        suffix = PurePosixPath(path).suffix.casefold()
+        if suffix in {".dbx", ".dbmanifest", ".xml"}:
+            return "FILE_TEXT"
+        if suffix in {".bik", ".bk2"}:
+            return "FILE_MOVIE"
+        return "FILE"
+    return _ASSET_TYPE_ICONS.get(asset_type, "FILE")
+
+
 def _load_archives(context):
     settings = _settings(context)
     repository = _get_repository(context)
-    rows = repository.catalog.archives(settings.archive_search, limit=500)
+    rows = repository.catalog.archives(settings.archive_search, limit=1000)
     settings.archives.clear()
     for row in rows:
         item = settings.archives.add()
@@ -297,11 +579,18 @@ def _load_archives(context):
     settings.active_archive_index = min(
         settings.active_archive_index, max(0, len(settings.archives) - 1)
     )
+    all_archives = repository.catalog.archives(limit=10000)
+    settings.available_maps.clear()
+    for level_name in discover_pc_levels(
+        str(row["path"]) for row in all_archives
+    ):
+        settings.available_maps.add().name = level_name
 
 
 def _load_assets(context, reset_page: bool = False):
     settings = _settings(context)
     repository = _get_repository(context)
+    settings.indexed_asset_count = repository.catalog.asset_count()
     if reset_page:
         settings.page = 0
     settings.total_results = repository.catalog.asset_count(
@@ -326,6 +615,183 @@ def _load_assets(context, reset_page: bool = False):
     settings.active_asset_index = min(
         settings.active_asset_index, max(0, len(settings.assets) - 1)
     )
+
+
+def _scan_repository(repository, progress, cancelled=None):
+    if not repository.needs_scan():
+        return (), False
+    return tuple(repository.scan(progress, cancelled)), True
+
+
+def _scan_source_worker(
+    source_path: str,
+    cache_path: str,
+    index_all_pc: bool,
+    events: queue.Queue,
+    cancel_event: threading.Event,
+    target_archives: tuple[str, ...] = (),
+):
+    repository = None
+    terminal = (
+        "error",
+        "Background indexing ended unexpectedly; see the system console",
+    )
+    try:
+        repository = AssetRepository(source_path, cache_path)
+
+        def scan_progress(current, total, label):
+            events.put(
+                (
+                    "progress",
+                    "Scanning archive catalog",
+                    current,
+                    total,
+                    label,
+                )
+            )
+
+        failures, scanned = _scan_repository(
+            repository,
+            scan_progress,
+            cancel_event.is_set,
+        )
+        failures = list(failures)
+
+        should_index_pending = not target_archives and (
+            (repository.kind == "PC_ISO" and index_all_pc)
+            or (repository.kind == "XBOX360_ISO" and not scanned)
+        )
+        processed_archives = 0
+        if (
+            not cancel_event.is_set()
+            and target_archives
+            and repository.kind != "PC_ISO"
+        ):
+            raise BC2Error("Map object indexing requires a PC retail ISO")
+        if not cancel_event.is_set() and (target_archives or should_index_pending):
+            def index_progress(current, total, label):
+                nonlocal processed_archives
+                processed_archives = current
+                events.put(
+                    (
+                        "progress",
+                        (
+                            "Indexing selected archive"
+                            if target_archives
+                            else "Indexing archive"
+                        ),
+                        current,
+                        total,
+                        label,
+                    )
+                )
+
+            if target_archives:
+                failures.extend(
+                    repository.index_archive_paths(
+                        target_archives,
+                        index_progress,
+                        cancel_event.is_set,
+                    )
+                )
+            else:
+                failures.extend(
+                    repository.index_all_archives(
+                        index_progress,
+                        cancel_event.is_set,
+                    )
+                )
+
+        result = {
+            "source_path": source_path,
+            "cache_path": cache_path,
+            "kind": repository.kind,
+            "scanned": scanned,
+            "index_all_pc": index_all_pc,
+            "target_archives": target_archives,
+            "processed_archives": processed_archives,
+            "failures": tuple(failures),
+        }
+        if cancel_event.is_set():
+            terminal = ("cancelled", result)
+        else:
+            terminal = ("complete", result)
+    except (BC2Error, OSError, RuntimeError, ValueError) as exc:
+        terminal = ("error", str(exc))
+    finally:
+        if repository is not None:
+            repository.close()
+        events.put(terminal)
+
+
+def _apply_scan_result(context, operator, result, *, cancelled: bool):
+    settings = _settings(context)
+    preferences = _preferences(context)
+    source_path = str(Path(bpy.path.abspath(preferences.source_path)).resolve())
+    cache_path = str(Path(bpy.path.abspath(preferences.cache_directory)).resolve())
+    if (
+        source_path != result["source_path"]
+        or cache_path != result["cache_path"]
+    ):
+        settings.source_kind = ""
+        settings.status = "Source or cache changed; scan the current source"
+        operator.report({"WARNING"}, settings.status)
+        return
+
+    settings.source_kind = result["kind"]
+    repository = _get_repository(context)
+    _load_archives(context)
+    _load_assets(context, reset_page=True)
+    summary = (
+        f"{result['kind']}: "
+        f"{repository.catalog.archive_count():,} archives, "
+        f"{settings.indexed_asset_count:,} indexed assets"
+    )
+    if result["kind"] == "PC_ISO":
+        summary += f", {len(settings.available_maps):,} discovered maps"
+    if not result["scanned"]:
+        summary += "; existing catalog preserved"
+    if result["target_archives"]:
+        summary += (
+            f"; {result['processed_archives']:,}/"
+            f"{len(result['target_archives']):,} targeted archives processed"
+        )
+    failures = result["failures"]
+    if cancelled:
+        settings.status = f"{summary}; indexing cancelled"
+        operator.report({"WARNING"}, settings.status)
+    elif failures:
+        settings.status = f"{summary}; {len(failures)} archive(s) failed"
+        operator.report({"WARNING"}, settings.status)
+    else:
+        if (
+            result["kind"] == "PC_ISO"
+            and result["index_all_pc"]
+            and not result["target_archives"]
+        ):
+            summary += "; all archives indexed"
+        elif (
+            result["kind"] == "PC_ISO"
+            and not settings.indexed_asset_count
+        ):
+            summary += (
+                "; select a discovered map or index a relevant archive "
+                "to populate object assets"
+            )
+        settings.status = summary
+        operator.report({"INFO"}, settings.status)
+
+
+def _validated_level_name(value: str) -> str:
+    level_name = value.strip().upper()
+    if not level_name or any(
+        not (character.isalnum() or character == "_")
+        for character in level_name
+    ):
+        raise BC2Error(
+            "Map name may contain only letters, digits, and underscores"
+        )
+    return level_name
 
 
 def _selected_asset(settings: BC2Settings) -> BC2AssetListItem:
@@ -576,6 +1042,7 @@ def _create_mesh_objects(
         part.name.casefold(): part
         for part in part_states
     }
+    show_all_parts = _shows_all_composite_parts(settings)
     unresolved_part_subsets = 0
 
     def target_collection(part_index: int):
@@ -611,8 +1078,8 @@ def _create_mesh_objects(
             if part_state is not None
             else "part_name"
         )
-        target.hide_viewport = state != "DEFAULT"
-        target.hide_render = state != "DEFAULT"
+        target.hide_viewport = state != "DEFAULT" and not show_all_parts
+        target.hide_render = state != "DEFAULT" and not show_all_parts
         if record is not None:
             if record.bounds is not None:
                 target["bc2_part_bounds"] = json.dumps(
@@ -729,13 +1196,14 @@ def _create_mesh_objects(
         )
         obj["bc2_geometry_wreck_name_count"] = wreck_name_count
         if wreck_named:
-            obj.hide_viewport = True
-            obj.hide_render = True
-            obj.hide_set(True)
             obj["bc2_geometry_state"] = "DESTROYED"
             obj["bc2_geometry_visibility_source"] = (
                 "name_contains_wreck_twice"
             )
+            if not show_all_parts:
+                obj.hide_viewport = True
+                obj.hide_render = True
+                obj.hide_set(True)
         if part_index is not None:
             record = part_records.get(part_index)
             if record is not None and record.transform is not None:
@@ -791,6 +1259,9 @@ def _create_mesh_objects(
                 )
             )
     if split_parts:
+        collection["bc2_composite_visibility"] = (
+            "SHOW_ALL" if show_all_parts else "DEFAULT_STATE"
+        )
         collection["bc2_part_collection_count"] = len(
             [
                 part_index
@@ -1026,8 +1497,25 @@ def _resource_partition(path: str) -> str:
 
 def _reference_resource_path(reference: str) -> str:
     if not reference or reference.casefold() == "null" or "/" not in reference:
-        raise BC2Error("DBX skeleton reference is missing or invalid")
+        raise BC2Error("DBX resource reference is missing or invalid")
     return reference.rsplit("/", 1)[0] + ".res"
+
+
+def _reference_descriptor_path(reference: str) -> str:
+    if not reference or reference.casefold() == "null" or "/" not in reference:
+        raise BC2Error("DBX descriptor reference is missing or invalid")
+    return reference.rsplit("/", 1)[0] + ".dbx"
+
+
+def _skeleton_path_for_document(document, descriptor_path: str) -> str:
+    instance = document.primary_instance
+    if instance is None:
+        raise BC2Error(
+            f"DBX descriptor has no primary instance: {descriptor_path}"
+        )
+    field = instance.child("field", "Skeleton")
+    reference = field.attribute("ref") if field is not None else None
+    return _reference_resource_path(reference or "")
 
 
 def _skeleton_path_for_resource(repository, resource_asset) -> str:
@@ -1043,12 +1531,7 @@ def _skeleton_path_for_resource(repository, resource_asset) -> str:
     _, raw = repository.read_asset(
         int(descriptor["id"]), max_size=256 << 20
     )
-    instance = parse_dbx(raw).primary_instance
-    if instance is None:
-        raise BC2Error(f"DBX descriptor has no primary instance: {descriptor_path}")
-    field = instance.child("field", "Skeleton")
-    reference = field.attribute("ref") if field is not None else None
-    return _reference_resource_path(reference or "")
+    return _skeleton_path_for_document(parse_dbx(raw), descriptor_path)
 
 
 def _read_referenced_skeleton(repository, resource_asset):
@@ -1146,27 +1629,38 @@ def _create_character(
         subset_materials=subset_materials,
     )
     _bind_meshes_to_armature(objects, armature_obj)
-    diagnostics_text = bpy.data.texts.new(
-        f"BC2_{Path(mesh_set_asset['path']).stem}_"
-        "Material_Diagnostics.json"
+    diagnostic_count = len(material_diagnostics)
+    diagnostics_text = _create_diagnostics_text(
+        context,
+        settings,
+        (
+            f"BC2_{Path(mesh_set_asset['path']).stem}_"
+            "Material_Diagnostics.json"
+        ),
+        {
+            "summary": material_summary,
+            "issues": material_diagnostics,
+        },
     )
-    diagnostics_text.write(
-        json.dumps(
-            {
-                "summary": material_summary,
-                "issues": material_diagnostics,
-            },
-            indent=2,
-            sort_keys=True,
-        )
-    )
-    armature_obj["bc2_material_diagnostics_text"] = diagnostics_text.name
+    root_collection["bc2_diagnostic_count"] = diagnostic_count
+    armature_obj["bc2_diagnostic_count"] = diagnostic_count
+    if diagnostics_text is not None:
+        armature_obj["bc2_material_diagnostics_text"] = diagnostics_text.name
     armature_obj["bc2_resolved_material_count"] = material_summary[
         "resolved_materials"
     ]
     context.view_layer.objects.active = armature_obj
     armature_obj.select_set(True)
-    return armature_obj, objects
+    related_animations = _import_related_animations(
+        context,
+        repository,
+        mesh_set_asset,
+        skeleton_asset,
+        skeleton,
+        armature_obj,
+        settings,
+    )
+    return armature_obj, objects, related_animations
 
 
 def _mesh_component_assets(
@@ -1281,23 +1775,24 @@ def _create_mesh_set_import(
         split_parts=split_parts,
         composite_parts=composite_parts,
     )
-    diagnostics_text = bpy.data.texts.new(
-        f"BC2_{Path(mesh_set_asset['path']).stem}_"
-        "Material_Diagnostics.json"
+    diagnostic_count = len(material_context.diagnostics)
+    diagnostics_text = _create_diagnostics_text(
+        context,
+        settings,
+        (
+            f"BC2_{Path(mesh_set_asset['path']).stem}_"
+            "Material_Diagnostics.json"
+        ),
+        {
+            "summary": material_summary,
+            "issues": material_context.diagnostics,
+        },
     )
-    diagnostics_text.write(
-        json.dumps(
-            {
-                "summary": material_summary,
-                "issues": material_context.diagnostics,
-            },
-            indent=2,
-            sort_keys=True,
+    root_collection["bc2_diagnostic_count"] = diagnostic_count
+    if diagnostics_text is not None:
+        root_collection["bc2_material_diagnostics_text"] = (
+            diagnostics_text.name
         )
-    )
-    root_collection["bc2_material_diagnostics_text"] = (
-        diagnostics_text.name
-    )
     root_collection["bc2_resolved_material_count"] = material_summary[
         "resolved_materials"
     ]
@@ -1369,6 +1864,7 @@ def _create_modular_assembly(
 
     armature_obj = None
     skeleton = None
+    skeleton_asset = None
     if assembly.kind == "CHARACTER":
         skeleton_paths = tuple(
             _skeleton_path_for_resource(repository, mesh_set_asset)
@@ -1481,41 +1977,67 @@ def _create_modular_assembly(
             )
         )
 
-    diagnostics_text = bpy.data.texts.new(
-        f"BC2_{assembly.name}_Assembly_Diagnostics.json"
-    )
-    diagnostics_text.write(
-        json.dumps(
-            {
-                "assembly": {
-                    "name": assembly.name,
-                    "kind": assembly.kind,
-                    "path": assembly.source_path,
-                },
-                "components": component_summaries,
-                "issues": material_context.diagnostics,
+    diagnostic_count = len(material_context.diagnostics)
+    diagnostics_text = _create_diagnostics_text(
+        context,
+        settings,
+        f"BC2_{assembly.name}_Assembly_Diagnostics.json",
+        {
+            "assembly": {
+                "name": assembly.name,
+                "kind": assembly.kind,
+                "path": assembly.source_path,
             },
-            indent=2,
-            sort_keys=True,
-        )
+            "components": component_summaries,
+            "issues": material_context.diagnostics,
+        },
     )
-    root_collection["bc2_material_diagnostics_text"] = diagnostics_text.name
+    root_collection["bc2_diagnostic_count"] = diagnostic_count
+    if diagnostics_text is not None:
+        root_collection["bc2_material_diagnostics_text"] = diagnostics_text.name
     root_collection["bc2_resolved_material_count"] = (
         resolved_material_count
     )
     if armature_obj is not None:
-        armature_obj["bc2_material_diagnostics_text"] = diagnostics_text.name
+        armature_obj["bc2_diagnostic_count"] = diagnostic_count
+        if diagnostics_text is not None:
+            armature_obj["bc2_material_diagnostics_text"] = diagnostics_text.name
         armature_obj["bc2_resolved_material_count"] = (
             resolved_material_count
         )
         context.view_layer.objects.active = armature_obj
         armature_obj.select_set(True)
+    related_animations = None
+    if (
+        armature_obj is not None
+        and skeleton is not None
+        and skeleton_asset is not None
+    ):
+        related_animations = _import_related_animations(
+            context,
+            repository,
+            loaded[0][1],
+            skeleton_asset,
+            skeleton,
+            armature_obj,
+            settings,
+            (
+                _CharacterAnimationSource(
+                    links=assembly.animation_links,
+                    archive_path=str(assembly_asset["archive_path"]),
+                    descriptor_path=str(assembly_asset["path"]),
+                )
+                if assembly.animation_links is not None
+                else None
+            ),
+        )
     return _ImportedAssembly(
         definition=assembly,
         root_collection=root_collection,
         armature=armature_obj,
         components=tuple(imported_components),
         diagnostics_text=diagnostics_text,
+        related_animations=related_animations,
     )
 
 
@@ -1572,6 +2094,36 @@ def _create_animation_action(
             + ", ".join(missing[:8])
         )
 
+    additive = bool(animation.additive_bone_indices)
+    if additive:
+        invalid_indices = tuple(
+            index
+            for index in animation.additive_bone_indices
+            if index >= len(skeleton.bones)
+        )
+        if invalid_indices:
+            raise BC2Error(
+                "Additive animation bone indices exceed the selected "
+                f"skeleton: {invalid_indices[:8]}"
+            )
+        indexed_names = {
+            skeleton.bones[index].name
+            for index in animation.additive_bone_indices
+        }
+        track_names = {track.name for track in animation.tracks}
+        if indexed_names != track_names:
+            missing = sorted(indexed_names - track_names)
+            unexpected = sorted(track_names - indexed_names)
+            details = []
+            if missing:
+                details.append("missing " + ", ".join(missing[:8]))
+            if unexpected:
+                details.append("unexpected " + ", ".join(unexpected[:8]))
+            raise BC2Error(
+                "Additive animation bone-index metadata does not match its "
+                "transform tracks: " + "; ".join(details)
+            )
+
     source_fps = max(1, round(1.0 / animation.time_step))
     interval_count = max(1, round(animation.duration / animation.time_step))
     sample_count = interval_count + 1
@@ -1598,17 +2150,34 @@ def _create_animation_action(
         pose_bone.rotation_mode = "QUATERNION"
         locations = []
         rotations = []
+        scales = []
         previous_rotation = None
         for time in times:
             animated_local = _convert_skeleton_matrix(
                 _source_transform_matrix(
                     track.translation.evaluate(time),
                     track.rotation_at(time),
+                    track.scale_shear.evaluate(time),
                 ),
                 settings,
             )
-            basis = rest_by_name[track.name].inverted_safe() @ animated_local
-            location, rotation, _ = basis.decompose()
+            basis = (
+                animated_local
+                if additive
+                else rest_by_name[track.name].inverted_safe() @ animated_local
+            )
+            location, rotation, scale = basis.decompose()
+            reconstructed = Matrix.LocRotScale(location, rotation, scale)
+            residual = max(
+                abs(basis[row][column] - reconstructed[row][column])
+                for row in range(4)
+                for column in range(4)
+            )
+            if residual >= 1e-5:
+                raise BC2Error(
+                    f"Animation track {track.name!r} contains scale/shear "
+                    "that Blender pose channels cannot represent"
+                )
             if (
                 previous_rotation is not None
                 and rotation.dot(previous_rotation) < 0.0
@@ -1616,9 +2185,11 @@ def _create_animation_action(
                 rotation.negate()
             locations.append(tuple(location))
             rotations.append(tuple(rotation))
+            scales.append(tuple(scale))
             previous_rotation = rotation.copy()
         location_path = pose_bone.path_from_id("location")
         rotation_path = pose_bone.path_from_id("rotation_quaternion")
+        scale_path = pose_bone.path_from_id("scale")
         for axis in range(3):
             _add_action_curve(
                 channelbag,
@@ -1637,11 +2208,24 @@ def _create_animation_action(
                 frames,
                 tuple(value[axis] for value in rotations),
             )
+        for axis in range(3):
+            _add_action_curve(
+                channelbag,
+                scale_path,
+                axis,
+                track.name,
+                frames,
+                tuple(value[axis] for value in scales),
+            )
 
     action["bc2_duration_seconds"] = animation.duration
     action["bc2_time_step_seconds"] = animation.time_step
     action["bc2_source_fps"] = source_fps
     action["bc2_track_count"] = len(animation.tracks)
+    action["bc2_additive"] = additive
+    action["bc2_additive_bone_count"] = len(
+        animation.additive_bone_indices
+    )
     armature_obj.animation_data_create()
     armature_obj.animation_data.action = action
     context.scene.render.fps = source_fps
@@ -1652,11 +2236,243 @@ def _create_animation_action(
     return action
 
 
-def _import_granny_animation(
-    context,
+def _character_animation_sources(
     repository,
     resource_asset,
+    preferred_archives: tuple[str, ...],
+    known_source: _CharacterAnimationSource | None,
+) -> tuple[tuple[_CharacterAnimationSource, ...], tuple[str, ...]]:
+    if known_source is not None:
+        return (known_source,), ()
+    if str(resource_asset["platform"]).casefold() != "pc":
+        return (), ()
+
+    preferred = {path.casefold() for path in preferred_archives}
+    candidates = tuple(
+        row
+        for row in repository.catalog.assets_with_prefix(
+            "Objects/Soldiers/"
+        )
+        if str(row["path"]).casefold().endswith(".dbx")
+        and str(row["archive_path"]).casefold() in preferred
+    )
+    if len(candidates) > _MAX_CHARACTER_ANIMATION_DESCRIPTORS:
+        return (
+            (),
+            (
+                f"The preferred archives contain {len(candidates):,} soldier "
+                "descriptors; the automatic character-link limit is "
+                f"{_MAX_CHARACTER_ANIMATION_DESCRIPTORS:,}",
+            ),
+        )
+
+    issues = []
+    by_archive = {}
+    for candidate in candidates:
+        by_archive.setdefault(str(candidate["archive_path"]), []).append(
+            candidate
+        )
+    for archive_path, rows in by_archive.items():
+        if len(rows) < 2:
+            continue
+        try:
+            repository.materialize_archive_payload(archive_path)
+        except (BC2Error, OSError, ValueError) as exc:
+            issues.append(
+                f"Could not cache {archive_path} for character animation "
+                f"discovery: {exc}"
+            )
+
+    resource_partition = _resource_partition(
+        str(resource_asset["path"])
+    ).casefold().encode("utf-8")
+    sources = []
+    for candidate in candidates:
+        try:
+            _, raw = repository.read_asset(
+                int(candidate["id"]),
+                max_size=256 << 20,
+            )
+            if resource_partition not in raw.lower():
+                continue
+            links = character_animation_links(
+                parse_dbx(raw),
+                str(resource_asset["path"]),
+            )
+        except (BC2Error, OSError, ValueError) as exc:
+            issues.append(f"{candidate['path']}: {exc}")
+            continue
+        if links is not None:
+            sources.append(
+                _CharacterAnimationSource(
+                    links=links,
+                    archive_path=str(candidate["archive_path"]),
+                    descriptor_path=str(candidate["path"]),
+                )
+            )
+    return tuple(sources), tuple(issues)
+
+
+def _character_linked_animation_paths(
+    repository,
+    sources: tuple[_CharacterAnimationSource, ...],
+    skeleton_path: str,
+    preferred_archives: tuple[str, ...],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    paths = {}
+    tree_sources = {}
+    issues = []
+    for source in sources:
+        for reference in source.links.animation_references:
+            try:
+                path = _reference_resource_path(reference)
+            except BC2Error as exc:
+                issues.append(f"{source.descriptor_path}: {exc}")
+                continue
+            paths.setdefault(path.casefold(), path)
+        for reference in source.links.animation_tree_references:
+            try:
+                path = _reference_descriptor_path(reference)
+            except BC2Error as exc:
+                issues.append(f"{source.descriptor_path}: {exc}")
+                continue
+            tree_sources.setdefault(
+                path.casefold(),
+                (path, source.archive_path),
+            )
+
+    for path, source_archive in sorted(
+        tree_sources.values(),
+        key=lambda item: item[0].casefold(),
+    ):
+        preferred = tuple(
+            dict.fromkeys((source_archive, *preferred_archives))
+        )
+        tree_asset = repository.catalog.find_asset(path, preferred)
+        if tree_asset is None:
+            issues.append(f"Character animation tree is not indexed: {path}")
+            continue
+        try:
+            _, raw = repository.read_asset(
+                int(tree_asset["id"]),
+                max_size=256 << 20,
+            )
+            document = parse_dbx(raw)
+            tree_skeleton = _skeleton_path_for_document(document, path)
+            if tree_skeleton.casefold() != skeleton_path.casefold():
+                issues.append(
+                    f"{path}: tree skeleton {tree_skeleton} does not match "
+                    f"{skeleton_path}"
+                )
+                continue
+            references = animation_tree_clip_references(document)
+        except (BC2Error, OSError, ValueError) as exc:
+            issues.append(f"{path}: {exc}")
+            continue
+        for reference in references:
+            try:
+                clip_path = _reference_resource_path(reference)
+            except BC2Error as exc:
+                issues.append(f"{path}: {exc}")
+                continue
+            paths.setdefault(clip_path.casefold(), clip_path)
+    return (
+        tuple(sorted(paths.values(), key=str.casefold)),
+        tuple(issues),
+    )
+
+
+def _related_animation_assets(
+    repository,
+    resource_asset,
+    skeleton_asset,
+    preferred_archives: tuple[str, ...],
+    known_source: _CharacterAnimationSource | None = None,
+) -> tuple[tuple[object, ...], tuple[str, ...], int, int]:
+    skeleton_path = str(skeleton_asset["path"])
+    folders = tuple(
+        sorted(
+            {
+                PurePosixPath(str(resource_asset["path"])).parent.as_posix(),
+                PurePosixPath(skeleton_path).parent.as_posix(),
+            },
+            key=str.casefold,
+        )
+    )
+    rows = tuple(
+        row
+        for folder in folders
+        for row in repository.catalog.assets_with_prefix(
+            folder.rstrip("/") + "/",
+            "GrannyAnimation",
+        )
+    )
+    folded_folders = {folder.casefold() for folder in folders}
+    folder_paths = {
+        str(row["path"]).casefold(): str(row["path"])
+        for row in rows
+        if PurePosixPath(str(row["path"])).parent.as_posix().casefold()
+        in folded_folders
+    }
+    sources, source_issues = _character_animation_sources(
+        repository,
+        resource_asset,
+        preferred_archives,
+        known_source,
+    )
+    graph_paths, graph_issues = _character_linked_animation_paths(
+        repository,
+        sources,
+        skeleton_path,
+        preferred_archives,
+    )
+    paths = dict(folder_paths)
+    for path in graph_paths:
+        paths.setdefault(path.casefold(), path)
+    ordered_paths = tuple(sorted(paths.values(), key=str.casefold))
+    indexed_count, total_count = repository.catalog.archive_index_counts()
+    issues = [*source_issues, *graph_issues]
+    if len(ordered_paths) > _MAX_RELATED_ANIMATIONS:
+        return (
+            (),
+            (
+                *issues,
+                f"Related discovery found {len(ordered_paths):,} indexed "
+                "animation paths; "
+                f"the automatic limit is {_MAX_RELATED_ANIMATIONS:,}",
+            ),
+            indexed_count,
+            total_count,
+        )
+
+    assets = []
+    graph_path_keys = {path.casefold() for path in graph_paths}
+    for path in ordered_paths:
+        asset = repository.catalog.find_asset(path, preferred_archives)
+        if asset is None:
+            issues.append(f"Indexed related animation disappeared: {path}")
+            continue
+        try:
+            referenced_path = _skeleton_path_for_resource(repository, asset)
+        except (BC2Error, OSError, ValueError) as exc:
+            issues.append(f"{path}: {exc}")
+            continue
+        if referenced_path.casefold() == skeleton_path.casefold():
+            assets.append(asset)
+        elif path.casefold() in graph_path_keys:
+            issues.append(
+                f"{path}: clip skeleton {referenced_path} does not match "
+                f"{skeleton_path}"
+            )
+    return tuple(assets), tuple(issues), indexed_count, total_count
+
+
+def _create_animation_action_from_resource(
+    context,
+    resource_asset,
     raw: bytes,
+    armature_obj,
+    skeleton: GrannySkeleton,
     settings: BC2Settings,
 ):
     animation = parse_granny_animation(
@@ -1664,6 +2480,96 @@ def _import_granny_animation(
         resource_asset["platform"],
         Path(resource_asset["path"]).stem,
     )
+    action = _create_animation_action(
+        context,
+        armature_obj,
+        skeleton,
+        animation,
+        settings,
+    )
+    action["bc2_asset_path"] = resource_asset["path"]
+    action["bc2_archive_path"] = resource_asset["archive_path"]
+    return action
+
+
+def _import_related_animations(
+    context,
+    repository,
+    resource_asset,
+    skeleton_asset,
+    skeleton: GrannySkeleton,
+    armature_obj,
+    settings: BC2Settings,
+    known_source: _CharacterAnimationSource | None = None,
+) -> _RelatedAnimationImport:
+    if not settings.import_related_animations:
+        armature_obj["bc2_related_animation_count"] = 0
+        return _RelatedAnimationImport(enabled=False)
+
+    preferred_archives = tuple(
+        dict.fromkeys(
+            (
+                str(resource_asset["archive_path"]),
+                str(skeleton_asset["archive_path"]),
+                *(
+                    (known_source.archive_path,)
+                    if known_source is not None
+                    else ()
+                ),
+            )
+        )
+    )
+    assets, discovery_issues, indexed_count, total_count = (
+        _related_animation_assets(
+            repository,
+            resource_asset,
+            skeleton_asset,
+            preferred_archives,
+            known_source,
+        )
+    )
+    actions = []
+    issues = list(discovery_issues)
+    for asset in assets:
+        try:
+            resource, raw = repository.read_asset(
+                int(asset["id"]),
+                max_size=256 << 20,
+            )
+            actions.append(
+                _create_animation_action_from_resource(
+                    context,
+                    resource,
+                    raw,
+                    armature_obj,
+                    skeleton,
+                    settings,
+                )
+            )
+        except (BC2Error, OSError, ValueError) as exc:
+            issues.append(f"{asset['path']}: {exc}")
+
+    armature_obj["bc2_related_animation_count"] = len(actions)
+    armature_obj["bc2_related_animation_catalog_complete"] = (
+        indexed_count == total_count
+    )
+    armature_obj["bc2_related_animation_issue_count"] = len(issues)
+    return _RelatedAnimationImport(
+        enabled=True,
+        actions=tuple(actions),
+        issues=tuple(issues),
+        indexed_archive_count=indexed_count,
+        total_archive_count=total_count,
+    )
+
+
+def _import_granny_animation(
+    context,
+    repository,
+    resource_asset,
+    raw: bytes,
+    settings: BC2Settings,
+):
     skeleton_asset, skeleton = _read_referenced_skeleton(
         repository, resource_asset
     )
@@ -1675,15 +2581,14 @@ def _import_granny_animation(
             skeleton_asset,
             settings,
         )
-    action = _create_animation_action(
+    action = _create_animation_action_from_resource(
         context,
+        resource_asset,
+        raw,
         armature_obj,
         skeleton,
-        animation,
         settings,
     )
-    action["bc2_asset_path"] = resource_asset["path"]
-    action["bc2_archive_path"] = resource_asset["archive_path"]
     return armature_obj, action
 
 
@@ -3189,7 +4094,9 @@ def _surface_material(
     material_cache[cache_key] = material
 
     if not import_textures:
-        material["bc2_material_status"] = "texture resolution disabled"
+        material["bc2_material_status"] = (
+            "resolved source material without textures"
+        )
         return material
     if shader_database is None:
         material["bc2_material_status"] = "shader database unavailable"
@@ -3489,7 +4396,7 @@ def _source_material_context(
     preferred_archives,
     settings: BC2Settings,
 ) -> _SourceMaterialContext:
-    import_textures = getattr(settings, "import_textures", True)
+    import_textures = _loads_source_textures(settings)
     material_archives = tuple(preferred_archives)
     shader_database = None
     shader_database_path = None
@@ -3670,6 +4577,29 @@ def _resolve_mesh_subset_materials(
     shader_set_override: str | None = None,
     material_context: _SourceMaterialContext | None = None,
 ):
+    if not _uses_source_materials(settings):
+        materials = []
+        for subset in parsed.subsets:
+            material = bpy.data.materials.new(
+                f"BC2 Placeholder {PurePosixPath(subset.name).name}"
+            )
+            material.diffuse_color = (0.8, 0.8, 0.8, 1.0)
+            material["bc2_material_status"] = "placeholder material"
+            materials.append(material)
+        return (
+            tuple(materials),
+            (),
+            {
+                "mesh_reference": "",
+                "shader_set_reference": "",
+                "shader_database": "",
+                "subsets": len(parsed.subsets),
+                "source_surfaces": 0,
+                "resolved_materials": 0,
+                "source_images": 0,
+                "diagnostics": 0,
+            },
+        )
     created_context = material_context is None
     material_context = material_context or _source_material_context(
         repository,
@@ -3870,11 +4800,34 @@ def _terrain_material(
     image_cache: dict[str, tuple[object, object]],
     diagnostics: list[dict[str, str]],
     terrain_bounds: tuple[float, float, float, float],
+    *,
+    import_textures: bool = True,
 ):
     material_map = parse_material_map(
         material_map_raw,
         platform=material_map_asset["platform"],
     )
+    if not import_textures:
+        material = _simple_material(
+            f"BC2 {level_scene.name} Terrain",
+            (0.22, 0.32, 0.16, 1.0),
+            roughness=0.9,
+        )
+        material["bc2_material_status"] = (
+            "resolved terrain material names without textures"
+        )
+        material["bc2_terrain_material_map"] = material_map_asset["path"]
+        material["bc2_terrain_material_side"] = material_map.side
+        material["bc2_terrain_material_endian"] = material_map.endian
+        material["bc2_terrain_layers"] = json.dumps(
+            [
+                {"index": index, "name": name, "texture": ""}
+                for index, name in enumerate(material_map.names)
+            ],
+            separators=(",", ":"),
+        )
+        return material, material_map
+
     material = bpy.data.materials.new(
         f"BC2 {level_scene.name} Terrain"
     )
@@ -4127,6 +5080,14 @@ def _deduplicate_diagnostics(diagnostics):
     return unique
 
 
+def _create_diagnostics_text(context, settings, name: str, payload):
+    if not _detailed_diagnostics_enabled(context, settings):
+        return None
+    text = bpy.data.texts.new(name)
+    text.write(json.dumps(payload, indent=2, sort_keys=True))
+    return text
+
+
 def _create_level_scene(
     context,
     repository,
@@ -4135,6 +5096,9 @@ def _create_level_scene(
     settings: BC2Settings,
     progress=None,
 ):
+    material_mode = _material_mode(settings)
+    use_source_materials = material_mode != "PLACEHOLDER"
+    load_source_textures = material_mode == "FULL"
     root = bpy.data.collections.new(f"BC2_{level_scene.name}")
     context.scene.collection.children.link(root)
     collections = {
@@ -4153,8 +5117,12 @@ def _create_level_scene(
         ),
         "terrain": _child_collection(root, "Terrain"),
         "water": _child_collection(root, "Water"),
-        "diagnostics": _child_collection(root, "Diagnostics"),
     }
+    if _detailed_diagnostics_enabled(context, settings):
+            collections["diagnostics"] = _child_collection(
+                root,
+                "Diagnostics",
+            )
     diagnostics = [
         {
             "code": issue.code,
@@ -4165,7 +5133,7 @@ def _create_level_scene(
     ]
 
     shader_database = None
-    if settings.map_import_materials and level_scene.shader_database_path:
+    if load_source_textures and level_scene.shader_database_path:
         if progress:
             progress(0.01, "Reading level shader database")
         _, raw = repository.read_asset_path(
@@ -4226,13 +5194,28 @@ def _create_level_scene(
             if "bc2_shader_set_reference" in mesh:
                 del mesh["bc2_shader_set_reference"]
 
-        assignments = _surface_assignments(parsed, definition)
+        assignments = (
+            _surface_assignments(parsed, definition)
+            if use_source_materials
+            else tuple((None, "placeholder") for _ in parsed.subsets)
+        )
         assignment_records = []
         for subset_index, (subset, assignment) in enumerate(
             zip(parsed.subsets, assignments)
         ):
             surface, match_method = assignment
-            if surface is None:
+            if not use_source_materials:
+                placeholder_key = (
+                    f"placeholder|{definition.key}|{subset_index}"
+                )
+                material = _simple_material(
+                    f"BC2 Placeholder {subset.name}",
+                    (0.8, 0.8, 0.8, 1.0),
+                )
+                material["bc2_material_status"] = "placeholder material"
+                material_cache[placeholder_key] = material
+                shader_key = ""
+            elif surface is None:
                 message = (
                     f"No shader surface matched subset {subset.name!r} in "
                     f"{definition.name}"
@@ -4260,7 +5243,7 @@ def _create_level_scene(
                     material_cache,
                     image_cache,
                     diagnostics,
-                    settings.map_import_materials,
+                    load_source_textures,
                 )
                 shader_key = surface.database_key
             mesh.materials.append(material)
@@ -4356,7 +5339,7 @@ def _create_level_scene(
     terrain_material = None
     terrain_material_map = None
     if (
-        settings.map_import_materials
+        use_source_materials
         and level_scene.terrain_material_map_path
     ):
         material_map_asset, material_map_raw = repository.read_asset_path(
@@ -4374,6 +5357,7 @@ def _create_level_scene(
             image_cache,
             diagnostics,
             terrain_bounds,
+            import_textures=load_source_textures,
         )
         root["bc2_terrain_material_map_path"] = (
             level_scene.terrain_material_map_path
@@ -4391,7 +5375,7 @@ def _create_level_scene(
         )
         terrain_material["bc2_material_status"] = (
             "terrain material resolution disabled"
-            if not settings.map_import_materials
+            if not use_source_materials
             else "terrain material map unavailable"
         )
     terrain_objects = []
@@ -4498,32 +5482,33 @@ def _create_level_scene(
         ),
         "diagnostics": len(diagnostics),
     }
-    text = bpy.data.texts.new(f"BC2_{level_scene.name}_Diagnostics.json")
-    text.write(
-        json.dumps(
-            {
-                "summary": summary,
-                "issues": diagnostics,
-            },
-            indent=2,
-            sort_keys=True,
+    text = _create_diagnostics_text(
+        context,
+        settings,
+        f"BC2_{level_scene.name}_Diagnostics.json",
+        {
+            "summary": summary,
+            "issues": diagnostics,
+        },
+    )
+    if text is not None:
+        diagnostic_object = bpy.data.objects.new(
+            f"{level_scene.name}_Import_Diagnostics",
+            None,
         )
-    )
-    diagnostic_object = bpy.data.objects.new(
-        f"{level_scene.name}_Import_Diagnostics",
-        None,
-    )
-    collections["diagnostics"].objects.link(diagnostic_object)
-    diagnostic_object["bc2_diagnostics_text"] = text.name
-    for key, value in summary.items():
-        diagnostic_object[f"bc2_{key}"] = value
+        collections["diagnostics"].objects.link(diagnostic_object)
+        diagnostic_object["bc2_diagnostics_text"] = text.name
+        for key, value in summary.items():
+            diagnostic_object[f"bc2_{key}"] = value
 
     root["bc2_level"] = level_scene.name
     root["bc2_placement_count"] = len(created_objects)
     root["bc2_mesh_variant_count"] = len(mesh_by_key)
     root["bc2_unique_mesh_count"] = len(geometry_cache)
     root["bc2_heightfield_count"] = len(terrain_objects)
-    root["bc2_diagnostics_text"] = text.name
+    root["bc2_diagnostic_count"] = len(diagnostics)
+    if text is not None:
+        root["bc2_diagnostics_text"] = text.name
     if level_scene.terrain_transform is not None:
         root["bc2_source_terrain_translation"] = (
             level_scene.terrain_transform.blender_translation(
@@ -4545,14 +5530,64 @@ def _create_level_scene(
     }
 
 
+def _report_import_result(
+    operator,
+    settings: BC2Settings,
+    message: str,
+    diagnostic_count: int = 0,
+    warning: str = "",
+):
+    settings.diagnostic_count = diagnostic_count
+    details = []
+    if diagnostic_count:
+        details.append(f"{diagnostic_count:,} diagnostic(s)")
+    if warning:
+        details.append(warning)
+    if details:
+        settings.status = f"{message}; " + "; ".join(details)
+        operator.report({"WARNING"}, settings.status)
+    else:
+        settings.status = message
+        operator.report({"INFO"}, message)
+
+
+def _related_animation_warning(
+    result: _RelatedAnimationImport,
+) -> str:
+    if not result.enabled:
+        return ""
+    warnings = []
+    if result.issues:
+        first = result.issues[0]
+        suffix = (
+            f" (+{len(result.issues) - 1:,} more)"
+            if len(result.issues) > 1
+            else ""
+        )
+        warnings.append(f"Related animation issue: {first}{suffix}")
+    if not result.catalog_complete:
+        unindexed = (
+            result.total_archive_count - result.indexed_archive_count
+        )
+        warnings.append(
+            f"{unindexed:,} archive(s) remain unindexed; related animation "
+            "discovery may be incomplete (use Index All (Slow) for full coverage)"
+        )
+    return "; ".join(warnings)
+
+
 class BC2_UL_assets(UIList):
     def draw_item(
         self, context, layout, data, item, icon, active_data, active_property, index
     ):
         row = layout.row(align=True)
-        row.label(text=_basename(item.path), icon="FILE")
-        row.label(text=item.asset_type)
-        row.label(text=f"{item.size / 1024:.1f} KiB")
+        row.label(text=_basename(item.path))
+        row.label(
+            text="",
+            icon=_asset_type_icon(item.asset_type, item.path),
+        )
+        if data.show_asset_sizes:
+            row.label(text=f"{item.size / 1024:.1f} KiB")
 
 
 class BC2_UL_archives(UIList):
@@ -4571,16 +5606,65 @@ class BC2_UL_archives(UIList):
 class BC2_OT_choose_source(Operator, ImportHelper):
     bl_idname = "bc2.choose_source"
     bl_label = "Choose Bad Company 2 Disc"
-    bl_description = "Select a PC or Xbox 360 Battlefield: Bad Company 2 ISO"
+    bl_description = (
+        "Select and automatically scan a PC or Xbox 360 Battlefield: "
+        "Bad Company 2 ISO"
+    )
 
     filename_ext = ".iso"
     filter_glob: StringProperty(default="*.iso", options={"HIDDEN"})
 
     def execute(self, context):
         settings = _settings(context)
-        settings.source_path = self.filepath
-        settings.status = "Disc selected; click Scan Disc"
+        _preferences(context).source_path = self.filepath
+        settings.source_kind = ""
+        settings.archives.clear()
+        settings.assets.clear()
+        settings.total_results = 0
+        settings.indexed_asset_count = 0
+        settings.status = "Disc selected; scanning"
         _close_repository()
+        result = bpy.ops.bc2.scan_source("EXEC_DEFAULT")
+        if "RUNNING_MODAL" in result:
+            return {"FINISHED"}
+        return {"CANCELLED"}
+
+
+class BC2_OT_open_cache_directory(Operator):
+    bl_idname = "bc2.open_cache_directory"
+    bl_label = "Open Cache Folder"
+    bl_description = "Open the configured BC2 asset cache in the system file browser"
+
+    def execute(self, context):
+        try:
+            raw_path = bpy.path.abspath(_preferences(context).cache_directory)
+            if not raw_path:
+                raise BC2Error("Configure an asset cache directory first")
+            path = Path(raw_path).resolve()
+            path.mkdir(parents=True, exist_ok=True)
+            result = bpy.ops.wm.path_open(filepath=str(path))
+            if "FINISHED" not in result:
+                raise BC2Error(f"Could not open the cache folder: {path}")
+            return {"FINISHED"}
+        except (BC2Error, OSError, RuntimeError) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+
+class BC2_OT_reset_import_options(Operator):
+    bl_idname = "bc2.reset_import_options"
+    bl_label = "Reset to Preference Defaults"
+    bl_description = "Reset this Blender session's import options to add-on defaults"
+
+    def execute(self, context):
+        settings = _settings(context)
+        _apply_preference_defaults(
+            settings,
+            _preferences(context),
+            force=True,
+        )
+        settings.status = "Import options reset to add-on defaults"
+        self.report({"INFO"}, settings.status)
         return {"FINISHED"}
 
 
@@ -4588,43 +5672,168 @@ class BC2_OT_scan_source(Operator):
     bl_idname = "bc2.scan_source"
     bl_label = "Scan Disc"
     bl_description = (
-        "Catalog Frostbite archives; Xbox assets are indexed immediately, while PC "
-        "archives can be indexed on demand"
+        "Catalog Frostbite archives, or run an explicitly requested indexing job"
     )
 
-    def execute(self, context):
+    target_level: StringProperty(default="", options={"HIDDEN"})
+    target_archive: StringProperty(default="", options={"HIDDEN"})
+    index_all: BoolProperty(default=False, options={"HIDDEN"})
+
+    def _start(self, context):
+        global _active_scan_cancel, _active_scan_thread
         settings = _settings(context)
-        window_manager = context.window_manager
-        try:
-            repository = _get_repository(context, require_scan=False)
-            window_manager.progress_begin(0, 1000)
+        if (
+            _active_scan_thread is not None
+            and _active_scan_thread.is_alive()
+        ):
+            settings.scan_in_progress = True
+            self.report({"WARNING"}, "A disc scan is already running")
+            return {"CANCELLED"}
 
-            def progress(current, total, label):
-                fraction = current / max(1, total)
-                window_manager.progress_update(int(fraction * 1000))
-                settings.status = f"Scanning {current:,}/{total:,}: {label}"
+        preferences = _preferences(context)
+        source_path = bpy.path.abspath(preferences.source_path)
+        cache_path = bpy.path.abspath(preferences.cache_directory)
+        if not source_path:
+            self.report({"ERROR"}, "Select a PC or Xbox 360 disc image first")
+            return {"CANCELLED"}
+        if not cache_path:
+            self.report({"ERROR"}, "Configure an asset cache directory first")
+            return {"CANCELLED"}
 
-            failures = repository.scan(progress)
-            settings.source_kind = repository.kind
-            _load_archives(context)
-            _load_assets(context, reset_page=True)
-            summary = (
-                f"{repository.kind}: {repository.catalog.archive_count():,} archives, "
-                f"{settings.total_results:,} indexed assets"
+        source_path = str(Path(source_path).resolve())
+        cache_path = str(Path(cache_path).resolve())
+        index_all_pc = self.index_all
+        target_archives = ()
+        if self.target_level:
+            try:
+                level_name = _validated_level_name(self.target_level)
+            except BC2Error as exc:
+                self.report({"ERROR"}, str(exc))
+                return {"CANCELLED"}
+            target_archives = pc_level_archive_paths(
+                level_name,
+                include_terrain=False,
             )
-            if failures:
-                settings.status = f"{summary}; {len(failures)} archive(s) failed"
-                self.report({"WARNING"}, settings.status)
+            settings.map_name = level_name
+        elif self.target_archive:
+            target_archives = (self.target_archive,)
+        _close_repository()
+
+        self._events = queue.Queue()
+        self._cancel_event = threading.Event()
+        self._worker = threading.Thread(
+            target=_scan_source_worker,
+            args=(
+                source_path,
+                cache_path,
+                index_all_pc,
+                self._events,
+                self._cancel_event,
+                target_archives,
+            ),
+            name="BC2 asset indexer",
+            daemon=True,
+        )
+        _active_scan_cancel = self._cancel_event
+        _active_scan_thread = self._worker
+        settings.scan_in_progress = True
+        settings.status = (
+            f"Starting background object indexing for {settings.map_name}"
+            if self.target_level
+            else f"Starting background indexing for {self.target_archive}"
+            if self.target_archive
+            else "Starting background disc scan"
+        )
+        context.window_manager.progress_begin(0, 1000)
+        self._timer = context.window_manager.event_timer_add(
+            0.1,
+            window=context.window,
+        )
+        context.window_manager.modal_handler_add(self)
+        self._worker.start()
+        return {"RUNNING_MODAL"}
+
+    def _finish(self, context):
+        global _active_scan_cancel, _active_scan_thread
+        if getattr(self, "_timer", None) is not None:
+            context.window_manager.event_timer_remove(self._timer)
+            self._timer = None
+        context.window_manager.progress_end()
+        _settings(context).scan_in_progress = False
+        if _active_scan_thread is getattr(self, "_worker", None):
+            _active_scan_thread = None
+            _active_scan_cancel = None
+
+    def invoke(self, context, event):
+        return self._start(context)
+
+    def execute(self, context):
+        return self._start(context)
+
+    def modal(self, context, event):
+        settings = _settings(context)
+        if event.type == "ESC":
+            self._cancel_event.set()
+            settings.status = "Cancelling after the current archive"
+            return {"RUNNING_MODAL"}
+        if event.type != "TIMER":
+            return {"PASS_THROUGH"}
+
+        terminal = None
+        while True:
+            try:
+                message = self._events.get_nowait()
+            except queue.Empty:
+                break
+            if message[0] == "progress":
+                _, phase, current, total, label = message
+                fraction = current / max(1, total)
+                context.window_manager.progress_update(
+                    int(fraction * 1000)
+                )
+                settings.status = (
+                    f"{phase} {current:,}/{total:,}: {label}"
+                )
             else:
-                settings.status = summary
-                self.report({"INFO"}, settings.status)
-            return {"FINISHED"}
-        except (BC2Error, OSError) as exc:
+                terminal = message
+
+        if terminal is None:
+            return {"RUNNING_MODAL"}
+
+        self._finish(context)
+        kind, payload = terminal
+        if kind == "error":
+            settings.status = payload
+            self.report({"ERROR"}, payload)
+            return {"CANCELLED"}
+        try:
+            _apply_scan_result(
+                context,
+                self,
+                payload,
+                cancelled=kind == "cancelled",
+            )
+        except (BC2Error, OSError, RuntimeError, ValueError) as exc:
             settings.status = str(exc)
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
-        finally:
-            window_manager.progress_end()
+        return {"CANCELLED"} if kind == "cancelled" else {"FINISHED"}
+
+
+class BC2_OT_cancel_scan(Operator):
+    bl_idname = "bc2.cancel_scan"
+    bl_label = "Cancel Scan"
+    bl_description = "Stop after the archive currently being indexed"
+
+    def execute(self, context):
+        if _active_scan_cancel is None:
+            self.report({"WARNING"}, "No disc scan is running")
+            return {"CANCELLED"}
+        _active_scan_cancel.set()
+        settings = _settings(context)
+        settings.status = "Cancelling after the current archive"
+        self.report({"INFO"}, settings.status)
+        return {"FINISHED"}
 
 
 class BC2_OT_refresh_archives(Operator):
@@ -4635,7 +5844,7 @@ class BC2_OT_refresh_archives(Operator):
         try:
             _load_archives(context)
             return {"FINISHED"}
-        except (BC2Error, OSError) as exc:
+        except (BC2Error, OSError, RuntimeError) as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
 
@@ -4648,19 +5857,16 @@ class BC2_OT_index_archive(Operator):
     )
 
     def execute(self, context):
-        settings = _settings(context)
         try:
-            archive = _selected_archive(settings)
-            repository = _get_repository(context)
-            settings.status = f"Indexing {archive.path}"
-            count = repository.index_archive(archive.archive_id)
-            _load_archives(context)
-            _load_assets(context, reset_page=True)
-            settings.status = f"Indexed {count:,} assets from {archive.path}"
-            self.report({"INFO"}, settings.status)
-            return {"FINISHED"}
+            archive = _selected_archive(_settings(context))
+            result = bpy.ops.bc2.scan_source(
+                "EXEC_DEFAULT",
+                target_archive=archive.path,
+            )
+            if "RUNNING_MODAL" in result:
+                return {"FINISHED"}
+            return {"CANCELLED"}
         except (BC2Error, OSError) as exc:
-            settings.status = str(exc)
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
 
@@ -4677,15 +5883,10 @@ class BC2_OT_import_map(Operator):
     def execute(self, context):
         settings = _settings(context)
         window_manager = context.window_manager
-        level_name = settings.map_name.strip().upper()
-        if not level_name or any(
-            not (character.isalnum() or character == "_")
-            for character in level_name
-        ):
-            self.report(
-                {"ERROR"},
-                "Map name may contain only letters, digits, and underscores",
-            )
+        try:
+            level_name = _validated_level_name(settings.map_name)
+        except BC2Error as exc:
+            self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
 
         window_manager.progress_begin(0, 1000)
@@ -4741,20 +5942,15 @@ class BC2_OT_import_map(Operator):
                 create_progress,
             )
             summary = result["summary"]
-            settings.status = (
-                f"Imported {level_name}: {summary['placements']:,} objects, "
-                f"{summary['unique_mesh_resources']:,} unique meshes, "
-                f"{summary['heightfields']:,} terrain tiles"
-            )
-            severity = (
-                {"WARNING"} if summary["diagnostics"] else {"INFO"}
-            )
-            self.report(
-                severity,
+            _report_import_result(
+                self,
+                settings,
                 (
-                    f"{settings.status}; "
-                    f"{summary['diagnostics']:,} diagnostic(s)"
+                    f"Imported {level_name}: {summary['placements']:,} objects, "
+                    f"{summary['unique_mesh_resources']:,} unique meshes, "
+                    f"{summary['heightfields']:,} terrain tiles"
                 ),
+                summary["diagnostics"],
             )
             return {"FINISHED"}
         except (BC2Error, OSError, RuntimeError, ValueError) as exc:
@@ -4797,6 +5993,64 @@ class BC2_OT_change_page(Operator):
             return {"CANCELLED"}
 
 
+def _draw_asset_browser(layout, settings: BC2Settings, *, rows: int, list_id: str):
+    layout.prop(settings, "category")
+    row = layout.row(align=True)
+    row.prop(settings, "search", text="")
+    row.prop(settings, "show_asset_sizes")
+    refresh = row.operator(
+        BC2_OT_refresh_assets.bl_idname,
+        text="",
+        icon="FILE_REFRESH",
+    )
+    refresh.reset_page = True
+    layout.template_list(
+        BC2_UL_assets.__name__,
+        list_id,
+        settings,
+        "assets",
+        settings,
+        "active_asset_index",
+        rows=rows,
+    )
+    total_pages = max(
+        1,
+        (settings.total_results - 1) // RESULTS_PER_PAGE + 1,
+    )
+    paging = layout.row(align=True)
+    previous = paging.operator(
+        BC2_OT_change_page.bl_idname,
+        text="",
+        icon="TRIA_LEFT",
+    )
+    previous.delta = -1
+    paging.label(
+        text=f"Page {settings.page + 1}/{total_pages} "
+        f"({settings.total_results:,} assets)"
+    )
+    following = paging.operator(
+        BC2_OT_change_page.bl_idname,
+        text="",
+        icon="TRIA_RIGHT",
+    )
+    following.delta = 1
+
+
+def _draw_import_settings(layout, settings: BC2Settings):
+    layout.prop(settings, "material_mode")
+    layout.prop(settings, "composite_visibility")
+    layout.prop(settings, "import_related_animations")
+    layout.prop(settings, "axis_conversion")
+    layout.prop(settings, "flip_v")
+    layout.prop(settings, "unit_scale")
+    layout.prop(settings, "include_z_only")
+    layout.prop(settings, "terrain_resolution")
+    layout.operator(
+        BC2_OT_reset_import_options.bl_idname,
+        icon="LOOP_BACK",
+    )
+
+
 class BC2_OT_open_browser(Operator):
     bl_idname = "bc2.open_browser"
     bl_label = "Browse Bad Company 2 Assets"
@@ -4815,22 +6069,15 @@ class BC2_OT_open_browser(Operator):
     def draw(self, context):
         layout = self.layout
         settings = _settings(context)
-        row = layout.row(align=True)
-        row.prop(settings, "category")
-        row.prop(settings, "search", text="")
-        refresh = row.operator(
-            BC2_OT_refresh_assets.bl_idname, text="", icon="FILE_REFRESH"
-        )
-        refresh.reset_page = True
-        layout.template_list(
-            BC2_UL_assets.__name__,
-            "menu_browser",
+        _draw_asset_browser(
+            layout,
             settings,
-            "assets",
-            settings,
-            "active_asset_index",
             rows=14,
+            list_id="menu_browser",
         )
+        options = layout.box()
+        options.label(text="Import Settings", icon="PREFERENCES")
+        _draw_import_settings(options, settings)
         row = layout.row(align=True)
         row.operator(BC2_OT_import_selected.bl_idname, icon="IMPORT")
         row.operator(BC2_OT_extract_selected.bl_idname, icon="EXPORT")
@@ -4873,7 +6120,7 @@ class BC2_OT_import_selected(Operator):
                     asset_type == "SkinnedMeshSet"
                     and source_asset["platform"] == "pc"
                 ):
-                    armature, objects = _create_character(
+                    armature, objects, related_animations = _create_character(
                         context,
                         repository,
                         source_asset,
@@ -4881,13 +6128,23 @@ class BC2_OT_import_selected(Operator):
                         asset,
                         settings,
                     )
-                    self.report(
-                        {"INFO"},
+                    related_suffix = (
+                        f" and {len(related_animations.actions)} "
+                        "related animation(s)"
+                        if related_animations.enabled
+                        else ""
+                    )
+                    _report_import_result(
+                        self,
+                        settings,
                         f"Imported {len(objects)} skinned mesh object(s) "
-                        f"on {len(armature.data.bones)} bones",
+                        f"on {len(armature.data.bones)} bones"
+                        f"{related_suffix}",
+                        int(armature.get("bc2_diagnostic_count", 0)),
+                        _related_animation_warning(related_animations),
                     )
                 elif asset_type == "CompositeMeshSet":
-                    _, objects = _create_mesh_set_import(
+                    root_collection, objects = _create_mesh_set_import(
                         context,
                         repository,
                         source_asset,
@@ -4895,16 +6152,20 @@ class BC2_OT_import_selected(Operator):
                         asset,
                         settings,
                     )
-                    self.report(
-                        {"INFO"},
+                    _report_import_result(
+                        self,
+                        settings,
                         f"Imported {len(objects)} modular mesh object(s)",
+                        int(root_collection.get("bc2_diagnostic_count", 0)),
                     )
                 else:
                     objects = _create_mesh_objects(
                         context, parsed, asset, settings
                     )
-                    self.report(
-                        {"INFO"}, f"Imported {len(objects)} mesh object(s)"
+                    _report_import_result(
+                        self,
+                        settings,
+                        f"Imported {len(objects)} mesh object(s)",
                     )
             elif asset_type == "GrannyModel":
                 asset, raw = repository.read_asset(
@@ -4914,8 +6175,9 @@ class BC2_OT_import_selected(Operator):
                 armature = _create_armature_object(
                     context, skeleton, asset, settings
                 )
-                self.report(
-                    {"INFO"},
+                _report_import_result(
+                    self,
+                    settings,
                     f"Imported armature with {len(armature.data.bones)} bones",
                 )
             elif asset_type == "GrannyAnimation":
@@ -4929,8 +6191,9 @@ class BC2_OT_import_selected(Operator):
                     raw,
                     settings,
                 )
-                self.report(
-                    {"INFO"},
+                _report_import_result(
+                    self,
+                    settings,
                     f"Imported {action.name} on {armature.name} "
                     f"({int(action['bc2_track_count'])} tracks)",
                 )
@@ -4940,14 +6203,19 @@ class BC2_OT_import_selected(Operator):
                 )
                 parsed = parse_watermesh(raw, asset["platform"])
                 objects = _create_mesh_objects(context, parsed, asset, settings)
-                self.report({"INFO"}, f"Imported {len(objects)} water mesh object(s)")
+                _report_import_result(
+                    self,
+                    settings,
+                    f"Imported {len(objects)} water mesh object(s)",
+                )
             elif asset_type in {"ITexture", "XenonTexture", "Ps3Texture"}:
                 asset, raw = repository.read_asset(
                     selected.asset_id, max_size=1 << 30
                 )
                 _, _, converted = _import_texture(context, repository, asset, raw)
-                self.report(
-                    {"INFO"},
+                _report_import_result(
+                    self,
+                    settings,
                     f"Imported {converted.width}x{converted.height} {converted.format_name}",
                 )
             elif asset_type == "TerrainHeightfield":
@@ -4956,8 +6224,9 @@ class BC2_OT_import_selected(Operator):
                 )
                 parsed = parse_heightfield(raw, settings.terrain_resolution)
                 _create_terrain_object(context, parsed, asset, settings)
-                self.report(
-                    {"INFO"},
+                _report_import_result(
+                    self,
+                    settings,
                     f"Imported terrain preview from {parsed.source_resolution}x"
                     f"{parsed.source_resolution} samples",
                 )
@@ -4981,11 +6250,32 @@ class BC2_OT_import_selected(Operator):
                         len(component.objects)
                         for component in imported.components
                     )
-                    self.report(
-                        {"INFO"},
+                    related_animations = imported.related_animations
+                    related_suffix = ""
+                    related_warning = ""
+                    if related_animations is not None:
+                        related_suffix = (
+                            f" and {len(related_animations.actions)} "
+                            "related animation(s)"
+                            if related_animations.enabled
+                            else ""
+                        )
+                        related_warning = _related_animation_warning(
+                            related_animations
+                        )
+                    _report_import_result(
+                        self,
+                        settings,
                         f"Imported {assembly.kind.lower()} assembly with "
                         f"{len(imported.components)} component(s) and "
-                        f"{object_count} mesh object(s)",
+                        f"{object_count} mesh object(s){related_suffix}",
+                        int(
+                            imported.root_collection.get(
+                                "bc2_diagnostic_count",
+                                0,
+                            )
+                        ),
+                        related_warning,
                     )
                 else:
                     xml = dbx_to_xml(raw)
@@ -4995,13 +6285,18 @@ class BC2_OT_import_selected(Operator):
                     text.write(xml)
                     text["bc2_asset_path"] = asset["path"]
                     text["bc2_archive_path"] = asset["archive_path"]
-                    self.report(
-                        {"INFO"},
+                    _report_import_result(
+                        self,
+                        settings,
                         f"Imported DBX as text: {text.name}",
                     )
             else:
                 _, path = repository.extract_asset(selected.asset_id)
-                self.report({"INFO"}, f"Extracted unsupported resource to {path}")
+                _report_import_result(
+                    self,
+                    settings,
+                    f"Extracted unsupported resource to {path}",
+                )
             return {"FINISHED"}
         except (BC2Error, OSError, ValueError) as exc:
             settings.status = str(exc)
@@ -5047,8 +6342,8 @@ class BC2_MT_import(Menu):
             operator.category = category
 
 
-class BC2_PT_asset_browser(Panel):
-    bl_idname = "BC2_PT_asset_browser"
+class BC2_PT_tools(Panel):
+    bl_idname = "BC2_PT_tools"
     bl_label = "Bad Company 2 Assets"
     bl_category = "Frostbite"
     bl_space_type = "VIEW_3D"
@@ -5057,94 +6352,198 @@ class BC2_PT_asset_browser(Panel):
     def draw(self, context):
         layout = self.layout
         settings = _settings(context)
-
-        source = layout.box()
-        source.label(text="Source", icon="DISK_DRIVE")
-        source.prop(settings, "source_path", text="")
-        row = source.row(align=True)
-        row.operator(BC2_OT_choose_source.bl_idname, text="Choose", icon="FILE_FOLDER")
-        row.operator(BC2_OT_scan_source.bl_idname, text="Scan", icon="VIEWZOOM")
         if settings.source_kind:
-            source.label(text=settings.source_kind, icon="CHECKMARK")
-        source.label(text=settings.status)
-
-        if settings.source_kind == "PC_ISO":
-            map_box = layout.box()
-            map_box.label(text="Complete PC Map", icon="WORLD_DATA")
-            map_box.prop(settings, "map_name")
-            map_box.prop(settings, "map_import_materials")
-            map_box.prop(settings, "terrain_resolution")
-            map_box.operator(
-                BC2_OT_import_map.bl_idname,
-                text="Import Map",
-                icon="IMPORT",
+            layout.label(text=settings.source_kind, icon="CHECKMARK")
+            layout.label(
+                text=f"{settings.indexed_asset_count:,} indexed assets",
+                icon="ASSET_MANAGER",
+            )
+        else:
+            layout.label(text="Select and scan a disc image", icon="INFO")
+        if settings.diagnostic_count:
+            layout.label(
+                text=f"Last import: {settings.diagnostic_count:,} diagnostic(s)",
+                icon="ERROR",
             )
 
-            archives = layout.box()
-            archives.label(text="PC Frostbite Archives", icon="PACKAGE")
-            row = archives.row(align=True)
-            row.prop(settings, "archive_search", text="")
-            row.operator(
-                BC2_OT_refresh_archives.bl_idname, text="", icon="FILE_REFRESH"
-            )
-            archives.template_list(
-                BC2_UL_archives.__name__,
-                "",
-                settings,
-                "archives",
-                settings,
-                "active_archive_index",
-                rows=5,
-            )
-            archives.operator(
-                BC2_OT_index_archive.bl_idname,
-                text="Index Selected Archive",
-                icon="PACKAGE",
-            )
 
-        browser = layout.box()
-        browser.label(text="Indexed Assets", icon="ASSET_MANAGER")
-        browser.prop(settings, "category")
-        row = browser.row(align=True)
-        row.prop(settings, "search", text="")
-        refresh = row.operator(
-            BC2_OT_refresh_assets.bl_idname, text="", icon="FILE_REFRESH"
+class BC2_PT_source(Panel):
+    bl_idname = "BC2_PT_source"
+    bl_label = "Source"
+    bl_parent_id = BC2_PT_tools.bl_idname
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+
+    def draw(self, context):
+        layout = self.layout
+        settings = _settings(context)
+        preferences = _preferences(context)
+        layout.prop(preferences, "source_path", text="")
+        row = layout.row(align=True)
+        row.enabled = not settings.scan_in_progress
+        row.operator(
+            BC2_OT_choose_source.bl_idname,
+            text="Choose",
+            icon="FILE_FOLDER",
         )
-        refresh.reset_page = True
-        browser.template_list(
-            BC2_UL_assets.__name__,
+        row.operator(
+            BC2_OT_scan_source.bl_idname,
+            text="Scan",
+            icon="VIEWZOOM",
+        )
+        if settings.scan_in_progress:
+            layout.operator(
+                BC2_OT_cancel_scan.bl_idname,
+                text="Cancel After Current Archive",
+                icon="CANCEL",
+            )
+        if settings.source_kind:
+            layout.label(text=settings.source_kind, icon="CHECKMARK")
+        layout.label(text=settings.status)
+
+
+class BC2_PT_map(Panel):
+    bl_idname = "BC2_PT_map"
+    bl_label = "Complete PC Map"
+    bl_parent_id = BC2_PT_tools.bl_idname
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+
+    @classmethod
+    def poll(cls, context):
+        return _settings(context).source_kind == "PC_ISO"
+
+    def draw(self, context):
+        layout = self.layout
+        settings = _settings(context)
+        if settings.available_maps:
+            layout.label(
+                text=f"{len(settings.available_maps):,} maps found in the disc catalog.",
+                icon="WORLD_DATA",
+            )
+            layout.prop_search(
+                settings,
+                "map_name",
+                settings,
+                "available_maps",
+                text="Level",
+            )
+        else:
+            layout.label(
+                text="No level/terrain archive pairs were discovered.",
+                icon="INFO",
+            )
+            layout.prop(settings, "map_name", text="Level")
+        row = layout.row(align=True)
+        row.enabled = not settings.scan_in_progress
+        prepare = row.operator(
+            BC2_OT_scan_source.bl_idname,
+            text="Index Map Objects",
+            icon="PACKAGE",
+        )
+        prepare.target_level = settings.map_name
+        row.operator(
+            BC2_OT_import_map.bl_idname,
+            text="Import Map",
+            icon="IMPORT",
+        )
+
+
+class BC2_PT_archives(Panel):
+    bl_idname = "BC2_PT_archives"
+    bl_label = "PC Frostbite Archives"
+    bl_parent_id = BC2_PT_tools.bl_idname
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+
+    @classmethod
+    def poll(cls, context):
+        return _settings(context).source_kind == "PC_ISO"
+
+    def draw(self, context):
+        layout = self.layout
+        settings = _settings(context)
+        row = layout.row(align=True)
+        row.prop(settings, "archive_search", text="")
+        row.operator(
+            BC2_OT_refresh_archives.bl_idname,
+            text="",
+            icon="FILE_REFRESH",
+        )
+        layout.template_list(
+            BC2_UL_archives.__name__,
             "",
             settings,
-            "assets",
+            "archives",
             settings,
-            "active_asset_index",
-            rows=8,
+            "active_archive_index",
+            rows=5,
         )
-        total_pages = max(1, (settings.total_results - 1) // RESULTS_PER_PAGE + 1)
-        paging = browser.row(align=True)
-        previous = paging.operator(
-            BC2_OT_change_page.bl_idname, text="", icon="TRIA_LEFT"
+        row = layout.row()
+        row.enabled = not settings.scan_in_progress
+        row.operator(
+            BC2_OT_index_archive.bl_idname,
+            text="Index Selected Archive",
+            icon="PACKAGE",
         )
-        previous.delta = -1
-        paging.label(
-            text=f"Page {settings.page + 1}/{total_pages} "
-            f"({settings.total_results:,} assets)"
+        index_all = row.operator(
+            BC2_OT_scan_source.bl_idname,
+            text="Index All (Slow)",
+            icon="TIME",
         )
-        following = paging.operator(
-            BC2_OT_change_page.bl_idname, text="", icon="TRIA_RIGHT"
-        )
-        following.delta = 1
+        index_all.index_all = True
 
-        options = layout.box()
-        options.label(text="Import Options", icon="PREFERENCES")
-        options.prop(settings, "axis_conversion")
-        options.prop(settings, "flip_v")
-        options.prop(settings, "unit_scale")
-        options.prop(settings, "include_z_only")
-        options.prop(settings, "terrain_resolution")
-        row = layout.row(align=True)
+
+class BC2_PT_assets(Panel):
+    bl_idname = "BC2_PT_assets"
+    bl_label = "Indexed Assets"
+    bl_parent_id = BC2_PT_tools.bl_idname
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+
+    def draw(self, context):
+        layout = self.layout
+        settings = _settings(context)
+        if (
+            settings.source_kind == "PC_ISO"
+            and not settings.indexed_asset_count
+        ):
+            info = layout.box()
+            info.label(
+                text="PC scan catalogs maps and archives first.",
+                icon="INFO",
+            )
+            info.label(
+                text="Index a relevant archive or import a discovered map."
+            )
+        elif settings.source_kind and not settings.total_results:
+            layout.label(
+                text="No indexed assets match the current filter.",
+                icon="INFO",
+            )
+        content = layout.column()
+        content.enabled = bool(settings.source_kind)
+        _draw_asset_browser(
+            content,
+            settings,
+            rows=8,
+            list_id="sidebar_browser",
+        )
+        row = content.row(align=True)
         row.operator(BC2_OT_import_selected.bl_idname, icon="IMPORT")
         row.operator(BC2_OT_extract_selected.bl_idname, icon="EXPORT")
+
+
+class BC2_PT_import_settings(Panel):
+    bl_idname = "BC2_PT_import_settings"
+    bl_label = "Import Settings"
+    bl_parent_id = BC2_PT_tools.bl_idname
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        _draw_import_settings(self.layout, _settings(context))
 
 
 def _draw_import_menu(self, context):
@@ -5155,11 +6554,15 @@ CLASSES = (
     BC2AddonPreferences,
     BC2AssetListItem,
     BC2ArchiveListItem,
+    BC2MapListItem,
     BC2Settings,
     BC2_UL_assets,
     BC2_UL_archives,
     BC2_OT_choose_source,
+    BC2_OT_open_cache_directory,
+    BC2_OT_reset_import_options,
     BC2_OT_scan_source,
+    BC2_OT_cancel_scan,
     BC2_OT_refresh_archives,
     BC2_OT_index_archive,
     BC2_OT_import_map,
@@ -5169,20 +6572,27 @@ CLASSES = (
     BC2_OT_import_selected,
     BC2_OT_extract_selected,
     BC2_MT_import,
-    BC2_PT_asset_browser,
+    BC2_PT_tools,
+    BC2_PT_source,
+    BC2_PT_map,
+    BC2_PT_archives,
+    BC2_PT_assets,
+    BC2_PT_import_settings,
 )
 
 
 def register():
     for cls in CLASSES:
         bpy.utils.register_class(cls)
-    bpy.types.Scene.bc2_settings = PointerProperty(type=BC2Settings)
+    bpy.types.WindowManager.bc2_settings = PointerProperty(type=BC2Settings)
     bpy.types.TOPBAR_MT_file_import.append(_draw_import_menu)
 
 
 def unregister():
+    if _active_scan_cancel is not None:
+        _active_scan_cancel.set()
     _close_repository()
     bpy.types.TOPBAR_MT_file_import.remove(_draw_import_menu)
-    del bpy.types.Scene.bc2_settings
+    del bpy.types.WindowManager.bc2_settings
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)

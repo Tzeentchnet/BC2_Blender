@@ -27,6 +27,11 @@ deleted entries were included.
 
 The tested MSI exposed 625 unique extractable FbRB archives. Archive indexing
 was validated on demand, including the MedKit mesh and shader-related assets.
+The lightweight archive scan found 33 folders containing both
+`level-00.fbrb` and `terrain-00.fbrb`; these populate the map picker without
+extracting FbRB files. This is an implemented archive-name heuristic, not
+evidence that all 33 levels can be assembled. Complete-map behavior remains
+verified only for `MP_001`.
 
 ### PC `MP_001` complete-map foundation
 
@@ -139,6 +144,37 @@ texture-conversion, or unresolved-subset diagnostics.
   file-backed DDS images, four UV layers from verified offsets 40/16/44/48,
   corrected byte-44 routing for the collapsed LegStandard/MOLLE/pouches
   coordinate, and connected Base Color plus source-normal graphs where bound.
+- PC Raven and Parrot LOD0: type-1 palette-backed stride-48 vertices expose
+  `UVMap`/`UV1` at byte offsets 40/44. Raven's imported
+  `00_RavenLeftWingShape_Raven_Body` uses those two layers and its primary UV
+  is nondegenerate on all 1,130 triangles.
+- PC Raven animation: six unique clips were deduplicated from ten indexed
+  resource rows and verified against the exact 17-bone `skel_Raven` reference.
+  Every clip has 17 matching tracks, uses degree-3 rotation/translation
+  curves, and samples at 60 Hz to finite transforms. `CorpseEating` and
+  `Idle04` preserve the authored uniform 0.8 `exportAnimation` scale. A Blender
+  5.2.2 scene retained all six Actions after save/reopen.
+- PC Beach US Scout animation: the mesh resolves the shared 147-bone `ske01`
+  skeleton, while its two same-skeleton clips live beside the mesh rather than
+  the skeleton. Exact-folder discovery imports `FacePose` with 46 tracks and
+  `Us_Scout_SkeletonPose` with 147 tracks. The explicitly linked Scout facial
+  tree adds 4-track `DeltaBlink`, 6-track `DeltaEyeIdle`, and 21/14-track
+  dead-pose deltas. A Blender 5.2.2 scene retained all six Actions and all 11
+  skinned subsets after save/reopen.
+- PC Beach Japanese infantry animation: four regular soldier descriptors
+  explicitly connect `Jap_Infantry_Mesh` to its 147-track static pose, a
+  kit-joint tree, and `JapInfantryFacialAnimTree`. That tree lists the local
+  46-track `FacePose` and the same four facial deltas used by Scout. The
+  nonzero animation-wrapper tables contain 4, 6, 21, and 14 `ske01` bone
+  indices whose names exactly match their transform tracks. They are converted
+  as additive pose-basis Actions; `DeltaBlink` produced a maximum sampled
+  eyelid delta of about 0.1575. A Blender 5.2.2 scene retained all six Actions,
+  the 147-bone armature, and all eight mesh subsets after save/reopen.
+- PC Japanese `combat_pose`: the 46-track, one-frame pose is referenced by the
+  `SP_01` level/cutscene graphs, including Soldier Ambush and CS_02 trees, but
+  not by the regular soldier entity's facial/kit graph. It is intentionally
+  excluded from automatic normal-character discovery rather than inferred
+  from its folder name.
 - PC US Assault assembly: 13 body, three head, and seven headgear visible
   subsets; all 23 materials resolved; 56 unique file-backed DDS images; every
   module bound to the same 147-bone `ske01` armature.
@@ -207,8 +243,8 @@ Current tests cover:
 - the declared four-channel little-endian stride-64 skinned coordinate layout
   including constant declared channels, plus nondegenerate routing for
   LegStandard, MOLLE, and pouches;
-- bounded PC Granny wrapper, section, relocation, skeleton, and constant-curve
-  fixtures;
+- bounded PC Granny wrapper, section, relocation, skeleton, constant-curve,
+  and degree-3 `D3I1K32fC32f` fixtures;
 - PC L8-to-DDS conversion;
 - generated L8 DDS output for decoded material-index images;
 - Xbox tiled L8 conversion;
@@ -245,7 +281,20 @@ texture roles, layered OcRGB/detail construction, and the verified DXT5nm node
 graph. It also checks character texture-role selection, primary red/green
 normal decode, alpha/green cloth-detail decode, and the combined character
 normal graph. Composite smoke coverage verifies `Components/Parts` collection
-creation, source part names/metadata, and compact triangle geometry.
+creation, source part names/metadata, compact triangle geometry, verified
+default-state hiding, and the visibility-only Show All override. It also
+checks WindowManager session registration, preference-default copying, full,
+materials-only, and placeholder material policies, and diagnostics Text output
+enabled and disabled. It also checks compact asset-type icon classification
+and that the optional file-size column defaults to hidden. Scan-policy coverage
+verifies that a new source is
+cataloged while an already-valid catalog is reused without deleting its
+indexed assets. It also verifies that the default PC policy does not index
+unrelated archives, that map-object preparation targets only the selected
+level and `mp_common`, that explicit full indexing remains available, and that
+worker results repopulate Blender's map, archive, and asset collections. Core
+coverage verifies cancellation between archives and per-archive failure
+recording for both full and targeted indexing.
 
 An optional real-media integration runner performs a complete import, saves the
 blend, reopens it, and checks placement count, linked mesh count, exact child
@@ -314,9 +363,12 @@ These behaviors are useful but need broader format research:
 - Half-float versus float position scoring across all related subsets sharing
   a vertex stride.
 - UV offset selection from stride and value ranges outside the verified
-  48-byte static and 64-byte PC skinned declarations.
+  48-byte static, 48-byte PC skinned, and 64-byte PC skinned declarations.
 - Skinned vertex influence offsets.
-- PC Granny field locations and curve codecs outside the validated v7 samples.
+- PC Granny field locations and curve codecs outside the documented human and
+  Raven v7 samples.
+- PC additive animation wrapper semantics outside the four verified
+  `ske01` facial-delta samples.
 - Mesh-set-to-MeshData resolution by path.
 - Composite runtime pivots, parent hierarchy, automatic state switching, and
   animation. Type-2 membership, ordered LOD0 names, bounds, and mesh-set bind
@@ -341,7 +393,8 @@ naive alternative choose incorrectly.
 - Complete shader arithmetic, constants, swizzles, UV sources, and all texture
   semantics.
 - Xbox 360/PS3 Granny skeleton/model and animation conversion.
-- Granny vector tracks, animated scale/shear, and unimplemented curve codecs.
+- Granny vector tracks, time-varying or nondecomposable scale/shear, and
+  unimplemented curve codecs.
 - Full DBX type coverage and lossless round trip.
 - Nonstatic level systems such as effects, game logic, lights, sound,
   animation, destruction states, and collision.

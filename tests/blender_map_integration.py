@@ -679,7 +679,9 @@ def main():
         flip_v=True,
         include_z_only=False,
         terrain_resolution=args.terrain_resolution,
-        map_import_materials=not args.no_materials,
+        material_mode=("PLACEHOLDER" if args.no_materials else "FULL"),
+        composite_visibility="DEFAULT_STATE",
+        create_diagnostics=True,
     )
 
     started = time.perf_counter()

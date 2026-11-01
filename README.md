@@ -13,7 +13,7 @@ source-by-source audit of the external BF3/BF4 MaxScript references.
 ## Supported source media
 
 - **Xbox 360 ISO / XGD2**: pure-Python XDVDFS reader. A scan indexes the active entries in all Frostbite `.fbrb` archives.
-- **PC retail ISO**: ISO9660 reader plus Windows Installer metadata and Microsoft LZX cabinet extraction. The archive list is scanned immediately; individual archives are indexed on demand to avoid unpacking the entire DVD.
+- **PC retail ISO**: ISO9660 reader plus Windows Installer metadata and Microsoft LZX cabinet extraction. A background scan catalogs archive names and discovers map folders without unpacking the entire DVD; selected archives are indexed on demand.
 
 PC retail-disc extraction currently requires Windows because the installer database and `expand.exe` are used for the original cabinets. Xbox 360 disc reading is platform-independent.
 
@@ -29,13 +29,24 @@ For a source checkout, install the repository root as an extension or add `bc2_f
 ## Workflow
 
 1. Open **File > Import > Bad Company 2 / Frostbite 1**, or use the **Frostbite** tab in the 3D View sidebar.
-2. Select a PC or Xbox 360 ISO and click **Scan Disc**.
-3. For a PC ISO, filter the archive list and click **Index Selected Archive**. Cabinet files are staged in the configured cache only when needed.
-4. To assemble a complete supported PC map, enter its level name (currently
-   validated with `MP_001`) in **Complete PC Map** and click **Import Map**.
-   The add-on automatically indexes the level, terrain, and shared multiplayer
-   archives.
-5. For individual assets, filter the indexed asset list by type:
+2. Choose a PC or Xbox 360 ISO. The add-on immediately scans it in a background
+   worker. Blender remains interactive, progress appears in the status area,
+   and **Cancel After Current Archive** stops at the next safe archive
+   boundary. Xbox assets are indexed during that scan.
+3. The default PC scan reads installer metadata only. It populates the archive
+   list and an editable map picker from
+   folders containing both `level-00.fbrb` and `terrain-00.fbrb`; it does not
+   extract every cabinet member or build a bundled game-data manifest.
+   **Index All (Slow)** remains an explicit action in the archive panel.
+4. To browse objects associated with a PC map, choose a discovered level and
+   click **Index Map Objects**. Only that level's `level-00` archive and the
+   shared `mp_common` archive are indexed in the background. To assemble the
+   complete map instead, click **Import Map**; the importer also indexes the
+   terrain archive and resolves required materials and textures. Complete-map
+   behavior is currently validated with `MP_001`.
+5. For any other PC bundle, select it in **PC Frostbite Archives** and click
+   **Index Selected Archive**. This operation also runs in the background.
+6. For individual assets, filter the indexed asset list by type:
    - Meshes
    - Textures
    - Terrain
@@ -44,7 +55,50 @@ For a source checkout, install the repository root as an extension or add `bc2_f
    - Audio
    - UI / Video
    - Other data
-6. Select an asset and click **Import Selected**, or use **Extract Raw**.
+   Rows use a compact type icon so more of the asset name remains visible.
+   Enable **Sizes** beside the search field only when file sizes are needed.
+7. Select an asset and click **Import Selected**, or use **Extract Raw**.
+
+The map picker is derived locally from archive names and remains editable. It
+does not prove that every discovered level is supported: the validated PC
+retail sample exposes 33 level/terrain pairs, while complete assembly is
+currently verified only for `MP_001`. The manual **Scan Disc** action reapplies
+the lightweight catalog scan while preserving a valid source catalog and its
+previously indexed assets instead of resetting them.
+
+### Preferences and session settings
+
+Add-on Preferences store machine-wide configuration:
+
+- the last selected PC or Xbox 360 ISO;
+- the asset cache directory and an **Open Cache Folder** action;
+- default axis conversion, UV flip, scale, Z-only, terrain-resolution,
+  material, composite-visibility, and related-animation options;
+- whether detailed JSON diagnostics Text datablocks are created.
+
+The ISO path is no longer stored in new `.blend` scene settings. The
+**Frostbite** sidebar keeps filters, selections, map input, status, and current
+import-option overrides only for the Blender session. Use **Reset to Preference
+Defaults** in **Import Settings** to discard those overrides. The File > Import
+asset browser displays the same settings instead of bypassing them.
+
+Detailed diagnostics Text datablocks default to off. Importers still collect
+diagnostics and report warning/error counts in Blender and in the Frostbite
+status display. Enable the preference when a persistent JSON issue report is
+needed.
+
+Material mode controls dependency work:
+
+| Mode | Behavior |
+|---|---|
+| **Materials and Textures** | Resolves source surfaces, shader bindings, and texture images. This preserves the previous default behavior. |
+| **Materials Only** | Creates source-named materials and metadata without loading shader databases for texture bindings or converting images. |
+| **Simple Placeholders** | Skips source material lookup and creates neutral subset/terrain materials. |
+
+Directly importing a selected texture still creates an Image in every mode.
+**Composite Visibility** can preserve the verified default-state hiding rules
+or show every imported part while retaining the original state metadata. It
+does not implement runtime destruction-state selection.
 
 For a complete PC character, select its high-level soldier `.dbx` rather than
 an individual mesh set. The importer follows `Meshes3p`, creates one shared
@@ -55,11 +109,33 @@ named source-part collections with damaged, destroyed, and blurred
 alternatives hidden by default. Geometry whose individual source, object, or
 mesh name contains `Wreck` at least twice is also hidden independently of its
 part collection. A single occurrence does not hide either an object or its
-part collection.
-Direct
-`SkinnedMeshSet` and `CompositeMeshSet` imports remain focused component
-imports. Importing a `GrannyAnimation` adds an Action to the matching armature;
-if that armature is absent, the referenced skeleton is created automatically.
+part collection. The **Show All Imported Parts** option leaves these variants
+visible without changing their decoded state metadata.
+**Import related animations** defaults to enabled for direct PC
+`SkinnedMeshSet` imports and modular character `.dbx` imports. The importer
+searches the mesh's and referenced skeleton's exact parent folders. For a PC
+soldier mesh, it also reverse-matches bounded `Objects/Soldiers` descriptors
+through `Meshes3p`, then follows only the character-specific static, facial,
+kit-joint, and revive animation-tree links and their explicit clip lists. The
+broad shared locomotion tree and cutscene-only trees are deliberately excluded.
+Resource paths are deduplicated, and every tree and clip must reference the
+exact skeleton. This imports Raven's six verified clips and six bounded Actions
+for each validated Beach Scout/Japanese infantry mesh without loading the
+hundreds of clips that can share `ske01`. The four facial motion clips are
+additive Actions; they play over the rest pose directly and can be layered over
+another Action with Blender's NLA tools.
+
+Only indexed assets are searchable; Blender reports a warning when unindexed
+archives mean discovery may be incomplete. Direct soldier reverse lookup is
+limited to 256 descriptors and caches the selected compressed archive payload
+once before bounded random reads. **Index All (Slow)** provides full catalog
+coverage, while the session checkbox or its Add-on Preference default can
+disable automatic Action import. A combined 64-clip safety limit prevents
+unexpectedly broad discovery from locking Blender.
+
+Direct `CompositeMeshSet` imports remain focused component imports. Importing
+a selected `GrannyAnimation` adds one Action to the matching armature; if that
+armature is absent, the referenced skeleton is created automatically.
 
 The provided Xbox example indexes 630 Frostbite archives and 251,251 active assets. The provided PC example exposes 625 extractable Frostbite archives through the installer database.
 
@@ -70,20 +146,21 @@ The provided Xbox example indexes 630 Frostbite archives and 251,251 active asse
 | `MeshData` | Creates one Blender mesh object per visible subset, including UVs, materials, and available bone-weight vertex groups. PC little-endian and Xbox 360 big-endian layouts are supported. |
 | Rigid and tree mesh sets | Resolves a matching LOD `MeshData` resource when available, preferring LOD0. |
 | `CompositeMeshSet` | Resolves LOD0 geometry and source materials, corrects shared/global index streams, separates verified source part IDs into named collections, applies decoded mesh-set bind transforms, and hides decoded damaged/destroyed/blurred parts plus geometry or collections with two `Wreck` occurrences in one name by default. A single `Wreck` occurrence alone remains visible. |
-| PC `SkinnedMeshSet` | Resolves LOD0 geometry, the DBX skeleton reference, the default surface set, and source DX11 texture bindings; creates all source bones, four preserved shader-coordinate layers, nondegenerate character UV routing, named vertex groups, one material per visible subset, and Armature modifiers. Console mesh sets remain geometry-only. |
-| PC soldier entity `.dbx` | Resolves every `Meshes3p` body/head/headgear component at LOD0, applies per-component shader-set overrides, binds all modules to one verified skeleton, and creates modular component collections. |
+| PC `SkinnedMeshSet` | Resolves LOD0 geometry, the DBX skeleton reference, the default surface set, and source DX11 texture bindings; preserves declaration-specific UV layers (two for verified stride-48 assets and four for stride-64 characters), creates named vertex groups and source materials, adds Armature modifiers, and imports bounded exact-folder plus character-tree Actions when enabled. Console mesh sets remain geometry-only. |
+| PC soldier entity `.dbx` | Resolves every `Meshes3p` body/head/headgear component at LOD0, applies per-component shader-set overrides, binds all modules to one verified skeleton, creates modular component collections, and follows character-specific static/facial/kit/revive animation links while excluding the broad shared tree. |
 | PC vehicle entity `.dbx` | Resolves the linked composite LOD0 mesh, source-backed materials, ordered named part collections, mesh-set bind transforms, and DBX-backed default/damaged/alternate states without inventing runtime pivots, parenting, or an armature. Verified AH60 Main, glass, interior, cockpit-interior, and minigun shader relationships receive dedicated Blender graphs. |
 | PC `GrannyModel` | Creates a native Blender armature while preserving the complete source hierarchy, local transforms, source flags, and physics-joint metadata. |
-| PC `GrannyAnimation` | Creates a Blender 5.2 layered/slotted Action on the matching armature, sampled at the source time step with root motion and quaternion continuity. |
+| PC `GrannyAnimation` | Creates a Blender 5.2 layered/slotted Action on the matching armature, sampled at the source time step with root motion, quaternion continuity, and representable bone scale. Degrees 0-3 and the documented human/Raven codecs are implemented. |
 | `WaterMesh` | Creates native water geometry from every body using platform-endian 32-bit triangle indices. |
 | `ITexture` | Converts PC texture resources to DDS and creates an Image plus node material. |
 | `XenonTexture` | Untiles Xbox 360 surfaces, fixes compressed-block byte order, converts to DDS, and creates an Image plus node material. DXT1, DXT3, DXT5, ARGB8888, and L8 headers are recognized. Grouped, padded mip allocations import their base level so Blender can generate lower display mips. |
 | `TerrainHeightfield` | Creates a Blender terrain mesh with configurable sampling. The 1024-edge default preserves the complete `MP_001` playable heightfield; lower settings are explicit previews. |
 | Other binary `.dbx` | Converts the Frostbite binary document to XML in a Blender Text datablock. |
-| PC complete map | Resolves direct and compact-group placements into linked Blender objects; imports all level heightfields and water; combines mesh subsets; assigns surface materials through the level DX11 shader database; and creates a JSON diagnostics Text datablock. |
+| PC complete map | Resolves direct and compact-group placements into linked Blender objects; imports all level heightfields and water; combines mesh subsets; and applies the selected material mode. A JSON diagnostics Text datablock and diagnostic empty are created only when detailed diagnostics are enabled. |
 | Other resources | Extracts the original resource to the cache without pretending that a native import succeeded. |
 
-The axis option converts Frostbite Y-up coordinates to Blender Z-up coordinates. DirectX V coordinates can be flipped during mesh import.
+The axis option converts Frostbite Y-up coordinates to Blender Z-up
+coordinates. DirectX V coordinates can be flipped during mesh import.
 
 Blender's bundled NumPy is used when available for bulk mesh, topology, UV,
 terrain, and Xbox texture operations. The importer retains pure-Python
@@ -203,7 +280,8 @@ pivot, or parent hierarchy is fabricated.
 
 ## Cache behavior
 
-The cache location is configurable in the add-on preferences. It contains:
+The cache location is configurable in Add-on Preferences, where **Open Cache
+Folder** opens it without deleting or rebuilding any data. It contains:
 
 - the persistent SQLite asset catalog;
 - the extracted PC installer database;
@@ -212,7 +290,13 @@ The cache location is configurable in the add-on preferences. It contains:
 - decompressed map-archive payloads used for direct asset seeking;
 - raw resources and converted DDS textures.
 
-Cabinets can be large. They may be deleted from the cache when Blender is closed; the add-on recreates them from the ISO when needed.
+Cabinets and extracted archives can be large. **Index All (Slow)** may
+stage substantial data while all PC archives are inspected. Archive indexing
+runs in a background worker so Blender UI events continue to be processed.
+Cancellation takes effect between archives; an active `expand.exe` cabinet
+extraction is allowed to finish before the worker stops.
+Cached cabinets may be deleted when Blender is closed; the add-on recreates
+them from the ISO when needed.
 Complete-map payload caches are also substantial: the three verified
 `MP_001` payloads total about 730 MB. They are reusable, source-fingerprint
 scoped derivatives and may likewise be deleted when Blender is closed.
@@ -221,8 +305,10 @@ scoped derivatives and may likewise be deleted when Blender is closed.
 
 - Native Granny conversion is currently limited to validated PC little-endian
   v7 skeletons and transform animations. Xbox 360/PS3 Granny variants, vector
-  tracks, nonidentity animated scale/shear, and curve codecs outside the
-  documented set are rejected explicitly.
+  tracks, time-varying or nondecomposable scale/shear, and curve codecs outside
+  the documented set are rejected explicitly. Degree-0 `DaConstant32f`
+  scale/shear is supported when Blender location/rotation/scale channels can
+  represent it.
 - PC modular character materials are validated with the complete US Assault
   body/head/headgear set. Shared character bindings use `MP_001`'s duplicated
   DX11 database; standalone AH60 bindings fall back to the matching `MP_004`
@@ -323,7 +409,8 @@ bind records, modular DBX resolution and vehicle state classification,
 accelerated and fallback Xbox texture paths, DDS generation, terrain sampling,
 DBX conversion, an end-to-end
 synthetic XDVDFS -> FbRB -> MeshData path, bounded Granny skeleton/animation
-fixtures, the four-channel PC character shader declaration, degenerate
+fixtures including a degree-3 `D3I1K32fC32f` curve, bounded mesh/skeleton-folder
+related-clip discovery, the four-channel PC character shader declaration, degenerate
 coordinate routing regressions, character binding roles and packed-normal
 graphs, and Blender-native mesh, armature, Action, material, and image
 creation.
@@ -356,6 +443,48 @@ four source coordinate channels, corrected LegStandard/MOLLE/pouches UV
 routing, all 23 component materials, source-backed DDS images, Base Color and
 packed-normal graphs; then saves, reopens, and verifies the modular metadata,
 armature, skinned subsets, materials, modifiers, and Actions.
+
+The Raven mesh/animation integration check is:
+
+```powershell
+blender --background --factory-startup `
+  --python tests\blender_raven_integration.py -- `
+  --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
+  --output <OUTPUT_BLEND>
+```
+
+It targets only `sp_common` and `sp_003_B`, imports the stride-48 Raven with
+its 17-bone armature, discovers six unique exact-skeleton clips, verifies the
+authored 0.8 `exportAnimation` scale, and checks that all six Actions survive
+save/reopen.
+
+The shared-human-skeleton graph rule is checked with the Scout integration:
+
+```powershell
+blender --background --factory-startup `
+  --python tests\blender_scout_integration.py -- `
+  --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
+  --output <OUTPUT_BLEND>
+```
+
+It imports the 11-subset Scout on the 147-bone `ske01` rig. The mesh-folder
+`FacePose` and `Us_Scout_SkeletonPose` become 46- and 147-track Actions; the
+authored facial tree adds `DeltaBlink`, `DeltaEyeIdle`, and two dead-pose
+deltas with 4, 6, 21, and 14 tracks. All six survive save/reopen.
+
+The Japanese infantry graph and additive conversion check is:
+
+```powershell
+blender --background --factory-startup `
+  --python tests\blender_jap_infantry_integration.py -- `
+  --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
+  --output <OUTPUT_BLEND>
+```
+
+It imports eight Japanese infantry mesh subsets on the 147-bone `ske01` rig,
+resolves the regular soldier entity's facial and kit-joint trees, verifies the
+same six Action classes with Japanese-specific pose assets, measures nonzero
+eyelid motion from `DeltaBlink`, and checks save/reopen persistence.
 
 The equivalent AH60 vehicle integration check is:
 

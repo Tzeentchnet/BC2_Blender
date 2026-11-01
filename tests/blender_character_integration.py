@@ -53,7 +53,10 @@ def _settings():
             "unit_scale": 1.0,
             "flip_v": True,
             "include_z_only": False,
-            "import_textures": True,
+            "material_mode": "FULL",
+            "composite_visibility": "DEFAULT_STATE",
+            "create_diagnostics": True,
+            "import_related_animations": False,
         },
     )()
 
@@ -81,6 +84,7 @@ def _expected_pose_matrices(skeleton, animation, time, settings):
             local = blender_addon._source_transform_matrix(
                 track.translation.evaluate(time),
                 track.rotation_at(time),
+                track.scale_shear.evaluate(time),
             )
         local = blender_addon._convert_skeleton_matrix(local, settings)
         if bone.parent_index < 0:

@@ -165,6 +165,13 @@ graph. These previews are not an exporter-safe destruction specification.
 
 ## Required PC archives
 
+A PC level is offered in the add-on's map picker when the MSI archive catalog
+contains both `Dist/win32/levels/<name>/level-00.fbrb` and
+`terrain-00.fbrb`. This implemented discovery rule found 33 candidates on the
+validated retail disc without extracting their FbRB contents. It is only a
+selection heuristic; it does not establish that every candidate's DBX graph is
+supported.
+
 A multiplayer level is not self-contained. `MP_001` requires these indexed
 archives:
 

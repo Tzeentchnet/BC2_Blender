@@ -9,7 +9,11 @@ little-endian Granny resources validated here:
 - the `Characters/US/US_Models/US_01_Body` skinned body;
 - the linked `US_01_Head` and `US_01_Headgear` LOD0 modules;
 - the rifle third-person `StandIdle` and `RunForward` clips;
-- `US_01_SkeletonPose` as a rest-pose cross-check.
+- `US_01_SkeletonPose` as a rest-pose cross-check;
+- the 17-bone Raven skeleton, stride-48 skinned mesh, and six clips in
+  `Animations/Animals/Raven`;
+- the Beach US Scout and Japanese infantry pose assets, their explicit facial
+  and kit-joint animation trees, and four shared facial delta clips.
 
 The Frostbite wrappers and Granny v7 structures below are **implemented** with
 bounded reads and synthetic fixtures. Field meanings are **verified** where
@@ -44,7 +48,10 @@ Granny v7 file
 
 ```text
 uint32_le wrapper_version       // 10
-uint32_le wrapper_flags         // 0 in tested clips
+uint32_le additive_bone_count   // 0 for absolute clips
+if additive_bone_count > 0:
+    uint32_le[additive_bone_count] skeleton_bone_indices
+    uint32_le reserved           // 0 in verified clips
 uint32_le string_count
 repeat string_count:
     uint16_le byte_length
@@ -52,6 +59,19 @@ repeat string_count:
 padding
 Granny v7 file
 ```
+
+These offsets are relative to the start of the Frostbite wrapper. When
+`additive_bone_count` is zero, `string_count` is at byte 8. Otherwise the
+index array starts at byte 8, the reserved field follows the array, and
+`string_count` follows the reserved field. All fields are little-endian.
+
+The second field was previously treated as an unsupported flag. **Verified**
+PC retail facial clips use it as a sparse `ske01` bone-index table:
+`DeltaBlink` has 4 entries, `DeltaEyeIdle` has 6, and the two dead-pose deltas
+have 21 and 14. Each table maps to exactly the clip's transform-track name set.
+Their curves are identity/zero at time zero and encode pose-basis deltas. The
+parser bounds the count and indices, rejects duplicates/nonzero reserved
+markers, and retains the indices on the parsed animation.
 
 The PC Granny file starts with this 32-byte magic:
 
@@ -205,6 +225,7 @@ count/pointer at offsets 12/16.
 ### Translation
 
 - `D3Constant32f`
+- `D3I1K32fC32f`
 - `D3I1K8uC8u`
 - `D3I1K16uC16u`
 - `D3K8uC8u`
@@ -220,12 +241,36 @@ stored truncated reciprocal reconstruct the float knot scale.
 scale/offset pairs to that scalar. `D3K` stores three quantized control
 components per knot.
 
-The parser evaluates degree 0, 1, and 2 curves. Quaternion results are
-normalized. Unsupported codecs and degrees fail explicitly instead of
-producing identity motion.
+`D3I1K32fC32f` uses the same scalar-control reconstruction without
+quantization. Relative to its curve-data object, bytes 0/1 are the `uint8`
+format/degree, byte 2 is a `uint16` padding field, bytes 4/16 are three
+little-endian `float32` control scales/offsets, byte 28 is the `uint32` scalar
+count, and byte 32 is the relocated array pointer. The array stores `n`
+`float32` knots followed by `n` `float32` scalar controls.
 
-All selected clips use `DaIdentity` for scale/shear. Any nonidentity animated
-scale/shear codec is currently rejected.
+### Scale/shear
+
+- `DaIdentity`
+- degree-0 `DaConstant32f`
+
+`DaConstant32f` stores a `uint32` control count at object-relative byte 4 and
+a relocated pointer at byte 8. The validated scale/shear form has exactly nine
+little-endian `float32` controls in row-major 3 x 3 order. Raven's
+`CorpseEating` and `Idle04` use a verified uniform 0.8 matrix on
+`exportAnimation`; the other Raven tracks use identity.
+
+The parser evaluates degrees 0, 1, 2, and 3. A degree-3 interval uses the first
+knot strictly greater than the sample time as index `i`, controls `i-3..i`,
+and knots `i-3..i+2`, with endpoint indices clamped. The four weights are the
+bounded cubic de Boor recurrence. This convention is **implemented** with a
+synthetic `D3I1K32fC32f` fixture and **verified** by finite source-step samples
+from all six Raven clips. Quaternion results are normalized. Unsupported
+codecs and degrees fail explicitly instead of producing identity motion.
+
+Time-varying scale/shear codecs remain unsupported. Blender Actions key the
+decomposed scale for representable constant matrices and reject transforms
+with a reconstruction residual of `1e-5` or greater rather than silently
+discarding shear.
 
 ## Blender conversion
 
@@ -260,9 +305,53 @@ nondegenerate UV routing correction where the byte-16 field collapses. See
 Animation import samples from time zero through the inclusive duration at the
 source time step. Rest-local versus animated-local transforms are converted to
 Blender pose-bone deltas. The Blender 5.2 Action uses a slot, a keyframe layer,
-and a channel bag. Translation and quaternion F-Curves use linear interpolation
-between native samples, and quaternion signs are made continuous. Root motion
-is retained.
+and a channel bag. Translation, quaternion, and scale F-Curves use linear
+interpolation between native samples, and quaternion signs are made continuous.
+Root motion is retained.
+
+For an animation with a nonempty wrapper bone-index table, the importer first
+requires the indexed skeleton-bone names to equal the transform-track names.
+It then treats each decoded transform as an additive pose-basis delta instead
+of subtracting the rest-local matrix a second time. Actions retain
+`bc2_additive` and `bc2_additive_bone_count` metadata. They produce the authored
+facial motion when played directly over the rest pose. Layering one over a
+separate locomotion Action remains a Blender NLA composition step; the add-on
+does not invent an NLA stack.
+
+Rigged PC mesh import can also create related Actions by default. Discovery is
+an **implemented bounded policy**, not a general animation-set specification:
+
+1. derive the mesh's exact referenced skeleton;
+2. search only indexed `GrannyAnimation` resources in the mesh's and
+   skeleton's exact parent folders;
+3. for a direct PC soldier mesh, inspect at most 256 `Objects/Soldiers` DBX
+   descriptors in the preferred archives and require an explicit matching
+   `Meshes3p` reference;
+4. follow the matched third-person `StaticPose`, `FacialAnimations`,
+   `KitJointsAnimTree`, and `ReviveAnimTree` links, but not `Shared`;
+5. read only explicit `AnimationList`, `AimAnimationList`, and replacement
+   arrays from those character-specific trees;
+6. require every tree and candidate clip to reference the exact skeleton;
+7. deduplicate resource paths using archive preference ordering and stop when
+   the combined folder/tree result exceeds 64 unique paths.
+
+The add-on warns when any candidate fails or when archives remain unindexed,
+because a lightweight catalog cannot prove that no additional related clips
+exist. The default can be disabled in Add-on Preferences or the session's
+Import Settings. For direct soldier reverse lookup, a compressed preferred
+archive with multiple candidate descriptors is materialized once in the
+fingerprint-scoped disposable cache rather than reinflated for every DBX.
+
+Searching the mesh folder remains required for characters such as
+`US_Scout_Mesh`: its verified `FacePose` and `Us_Scout_SkeletonPose` clips sit
+beside the mesh, while its shared `ske01` skeleton sits under
+`Characters/Skeletons`. Its soldier DBX explicitly links
+`USScoutFacialAnimTree`; Japanese infantry similarly links
+`JapInfantryFacialAnimTree` plus its kit-joint tree. Each imports six Actions:
+the two mesh-specific poses and four shared facial deltas. The Japanese
+`combat_pose` is **verified** as a static 46-track pose referenced by level and
+cutscene trees, not by the regular soldier's bounded graph, so it is not
+automatically included.
 
 ## MaxScript skeleton cross-check
 
@@ -300,6 +389,14 @@ validation. See the [external MaxScript audit](../maxscript-reference-audit.md).
 | transform tracks in each clip | 39 |
 | saved-scene bind deformation error | below `2.5e-7` Blender units |
 | maximum sampled pose-matrix error | below `3.8e-6` |
+| Raven skeleton / tracks per clip | 17 / 17 |
+| unique Raven clips / indexed catalog rows | 6 / 10 |
+| Raven duration range / sample rate | 4.7-6.67 s / 60 Hz |
+| Raven related Actions after save/reopen | 6 |
+| Scout skeleton / mesh subsets | 147 bones / 11 |
+| Scout bounded related Actions | 6: 46/147-track local poses plus 4/6/21/14-track additive facial clips |
+| Japanese infantry skeleton / mesh subsets | 147 bones / 8 |
+| Japanese infantry bounded related Actions | 6; `DeltaBlink` peak validation delta about 0.1575 |
 
 `US_01_SkeletonPose` has 64 transform tracks. Most evaluated controls agree
 with the skeleton local transforms to floating-point or quantization
@@ -314,7 +411,7 @@ would still need to:
 - preserve wrapper strings and unknown fields;
 - reproduce section layout, relocations, mixed marshalling, and CRC behavior;
 - preserve or deliberately regenerate each original curve codec;
-- establish quaternion quantization and degree-2 fitting error bounds;
+- establish quaternion quantization and degree-2/degree-3 fitting error bounds;
 - retain unsupported vector and scale/shear tracks;
 - verify game playback and byte-stable no-edit round trips.
 

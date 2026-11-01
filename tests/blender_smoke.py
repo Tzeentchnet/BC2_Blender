@@ -52,6 +52,432 @@ def _assert_vector(actual, expected):
         raise AssertionError(f"{tuple(actual)} != {tuple(expected)}")
 
 
+def _test_settings_registration(context):
+    blender_addon.register()
+    try:
+        if not hasattr(bpy.types.WindowManager, "bc2_settings"):
+            raise AssertionError("WindowManager session settings were not registered")
+        if hasattr(bpy.types.Scene, "bc2_settings"):
+            raise AssertionError("BC2 settings are still stored on Scene")
+        diagnostics_property = (
+            blender_addon.BC2AddonPreferences.bl_rna.properties[
+                "create_diagnostics"
+            ]
+        )
+        if diagnostics_property.default is not False:
+            raise AssertionError("Detailed diagnostics must default to disabled")
+        preference_animation_property = (
+            blender_addon.BC2AddonPreferences.bl_rna.properties[
+                "default_import_related_animations"
+            ]
+        )
+        session_animation_property = (
+            blender_addon.BC2Settings.bl_rna.properties[
+                "import_related_animations"
+            ]
+        )
+        if (
+            preference_animation_property.default is not True
+            or session_animation_property.default is not True
+        ):
+            raise AssertionError(
+                "Related animation import must default to enabled"
+            )
+        size_property = blender_addon.BC2Settings.bl_rna.properties[
+            "show_asset_sizes"
+        ]
+        if size_property.default is not False:
+            raise AssertionError("Asset file sizes must default to hidden")
+        if (
+            blender_addon._asset_type_icon("SkinnedMeshSet", "Mesh.res")
+            != "MOD_ARMATURE"
+            or blender_addon._asset_type_icon(
+                "<non-resource>",
+                "Levels/Test.dbx",
+            )
+            != "FILE_TEXT"
+        ):
+            raise AssertionError("Asset type icons were not classified")
+        scan_properties = bpy.ops.bc2.scan_source.get_rna_type().properties
+        if not {
+            "target_level",
+            "target_archive",
+            "index_all",
+        } <= {item.identifier for item in scan_properties}:
+            raise AssertionError("Background scan operator options were not registered")
+        indexing_property = scan_properties["index_all"]
+        if indexing_property.default is not False:
+            raise AssertionError("PC scans must not index every archive by default")
+
+        settings = context.window_manager.bc2_settings
+        source_path = str((ROOT / "Synthetic.iso").resolve())
+        cache_path = str((ROOT / "SyntheticCache").resolve())
+        preferences = SimpleNamespace(
+            source_path=source_path,
+            cache_directory=cache_path,
+            default_axis_conversion=False,
+            default_flip_v=False,
+            default_unit_scale=2.5,
+            default_include_z_only=True,
+            default_terrain_resolution=256,
+            default_material_mode="MATERIALS_ONLY",
+            default_composite_visibility="SHOW_ALL",
+            default_import_related_animations=False,
+        )
+        blender_addon._apply_preference_defaults(
+            settings,
+            preferences,
+            force=True,
+        )
+        if (
+            settings.axis_conversion is not False
+            or settings.flip_v is not False
+            or settings.unit_scale != 2.5
+            or settings.include_z_only is not True
+            or settings.terrain_resolution != 256
+            or settings.material_mode != "MATERIALS_ONLY"
+            or settings.composite_visibility != "SHOW_ALL"
+            or settings.import_related_animations is not False
+        ):
+            raise AssertionError("Preference defaults were not copied")
+        settings.unit_scale = 7.0
+        blender_addon._apply_preference_defaults(settings, preferences)
+        if settings.unit_scale != 7.0:
+            raise AssertionError("Initialized session overrides were overwritten")
+        blender_addon._apply_preference_defaults(
+            settings,
+            preferences,
+            force=True,
+        )
+        if settings.unit_scale != 2.5:
+            raise AssertionError("Forced default reset did not restore scale")
+
+        class SyntheticCatalog:
+            def archives(self, query="", limit=1000, offset=0):
+                test_archive = {
+                    "id": 1,
+                    "path": "Dist/Test.fbrb",
+                    "indexed": 1,
+                    "asset_count": 1,
+                    "size": 128,
+                    "error": "",
+                }
+                if query:
+                    return (test_archive,)
+                return (
+                    test_archive,
+                    {"path": "Dist/win32/levels/mp_001/level-00.fbrb"},
+                    {"path": "Dist/win32/levels/mp_001/terrain-00.fbrb"},
+                )
+
+            def asset_count(self, category="ALL", query=""):
+                return 1
+
+            def search_assets(self, category, query, limit, offset):
+                return (
+                    {
+                        "id": 1,
+                        "path": "Objects/Test.res",
+                        "asset_type": "MeshData",
+                        "archive_path": "Dist/Test.fbrb",
+                        "size": 64,
+                    },
+                )
+
+            def archive_count(self, query=""):
+                return 3
+
+        class SyntheticRepository:
+            kind = "PC_ISO"
+
+            def __init__(self):
+                self.catalog = SyntheticCatalog()
+                self.scan_calls = 0
+                self.index_all_calls = 0
+                self.index_path_calls = []
+                self.close_calls = 0
+
+            def needs_scan(self):
+                return False
+
+            def scan(self, progress, cancelled=None):
+                self.scan_calls += 1
+                return ()
+
+            def index_all_archives(self, progress, cancelled=None):
+                self.index_all_calls += 1
+                progress(1, 1, "Dist/Test.fbrb")
+                return ()
+
+            def index_archive_paths(self, paths, progress, cancelled=None):
+                self.index_path_calls.append(paths)
+                for current, path in enumerate(paths, 1):
+                    progress(current, len(paths), path)
+                return ()
+
+            def close(self):
+                self.close_calls += 1
+
+        lightweight_repository = SyntheticRepository()
+        targeted_repository = SyntheticRepository()
+        repository = SyntheticRepository()
+        settings.archive_search = "Test"
+        original_asset_repository = blender_addon.AssetRepository
+        original_preferences = blender_addon._preferences
+        original_get_repository = blender_addon._get_repository
+        try:
+            blender_addon.AssetRepository = (
+                lambda _source_path, _cache_path: lightweight_repository
+            )
+            lightweight_events = blender_addon.queue.Queue()
+            blender_addon._scan_source_worker(
+                source_path,
+                cache_path,
+                False,
+                lightweight_events,
+                blender_addon.threading.Event(),
+            )
+            if (
+                lightweight_repository.index_all_calls
+                or lightweight_repository.index_path_calls
+                or lightweight_repository.close_calls != 1
+            ):
+                raise AssertionError(
+                    "Lightweight PC scan indexed unrelated assets"
+                )
+
+            target_archives = (
+                "Dist/win32/levels/mp_001/level-00.fbrb",
+                "Dist/win32/levels/mp_common/level-00.fbrb",
+            )
+            blender_addon.AssetRepository = (
+                lambda _source_path, _cache_path: targeted_repository
+            )
+            targeted_events = blender_addon.queue.Queue()
+            blender_addon._scan_source_worker(
+                source_path,
+                cache_path,
+                False,
+                targeted_events,
+                blender_addon.threading.Event(),
+                target_archives,
+            )
+            if (
+                targeted_repository.index_path_calls != [target_archives]
+                or targeted_repository.index_all_calls
+                or targeted_repository.close_calls != 1
+            ):
+                raise AssertionError(
+                    "Targeted map preparation indexed the wrong archives"
+                )
+
+            blender_addon.AssetRepository = (
+                lambda _source_path, _cache_path: repository
+            )
+            events = blender_addon.queue.Queue()
+            blender_addon._scan_source_worker(
+                source_path,
+                cache_path,
+                True,
+                events,
+                blender_addon.threading.Event(),
+            )
+            terminal = None
+            while not events.empty():
+                message = events.get_nowait()
+                if message[0] != "progress":
+                    terminal = message
+            if terminal is None or terminal[0] != "complete":
+                raise AssertionError("Background scan did not complete")
+            blender_addon._preferences = lambda _context: preferences
+            blender_addon._get_repository = (
+                lambda _context, require_scan=True: repository
+            )
+            reports = []
+            operator = SimpleNamespace(
+                report=lambda severity, message: reports.append(
+                    (severity, message)
+                )
+            )
+            blender_addon._apply_scan_result(
+                context,
+                operator,
+                terminal[1],
+                cancelled=False,
+            )
+        finally:
+            blender_addon.AssetRepository = original_asset_repository
+            blender_addon._preferences = original_preferences
+            blender_addon._get_repository = original_get_repository
+        if (
+            repository.scan_calls
+            or repository.index_all_calls != 1
+            or repository.close_calls != 1
+            or len(settings.archives) != 1
+            or len(settings.assets) != 1
+            or settings.indexed_asset_count != 1
+            or [item.name for item in settings.available_maps] != ["MP_001"]
+            or "existing catalog preserved" not in settings.status
+        ):
+            raise AssertionError("Scan Disc did not repopulate the cached catalog")
+
+        class MapPanelLayout:
+            def __init__(self):
+                self.search_call = None
+                self.enabled = True
+
+            def label(self, *, text, icon):
+                pass
+
+            def prop_search(
+                self,
+                data,
+                property_name,
+                search_data,
+                search_property,
+                *,
+                text,
+            ):
+                self.search_call = (
+                    data,
+                    property_name,
+                    search_data,
+                    search_property,
+                    text,
+                )
+
+            def row(self, *, align=False):
+                return self
+
+            def operator(self, operator, *, text, icon):
+                return SimpleNamespace()
+
+        map_layout = MapPanelLayout()
+        original_settings = blender_addon._settings
+        try:
+            blender_addon._settings = lambda _context: settings
+            blender_addon.BC2_PT_map.draw(
+                SimpleNamespace(layout=map_layout),
+                context,
+            )
+        finally:
+            blender_addon._settings = original_settings
+        if (
+            map_layout.search_call is None
+            or map_layout.search_call[1:] != (
+                "map_name",
+                settings,
+                "available_maps",
+                "Level",
+            )
+        ):
+            raise AssertionError("Discovered-map search control was not drawn")
+    finally:
+        blender_addon.unregister()
+    if hasattr(bpy.types.WindowManager, "bc2_settings"):
+        raise AssertionError("WindowManager session settings were not unregistered")
+
+
+def _test_import_policies(context):
+    class SyntheticRepository:
+        def __init__(self, needs_scan):
+            self._needs_scan = needs_scan
+            self.scan_calls = 0
+
+        def needs_scan(self):
+            return self._needs_scan
+
+        def scan(self, progress, cancelled=None):
+            self.scan_calls += 1
+            return [("Archive", "Synthetic failure")]
+
+    existing_repository = SyntheticRepository(False)
+    failures, scanned = blender_addon._scan_repository(
+        existing_repository,
+        None,
+    )
+    if scanned or failures or existing_repository.scan_calls:
+        raise AssertionError("A valid catalog was destructively rescanned")
+    fresh_repository = SyntheticRepository(True)
+    failures, scanned = blender_addon._scan_repository(
+        fresh_repository,
+        None,
+    )
+    if (
+        not scanned
+        or len(failures) != 1
+        or fresh_repository.scan_calls != 1
+    ):
+        raise AssertionError("A new source was not scanned")
+
+    surface = SurfaceShader(
+        "PolicySurface",
+        "Objects/Test/Shaders/Policy/GUID",
+        "Objects/Test/Shaders/Policy",
+    )
+    diagnostics = []
+    material = blender_addon._surface_material(
+        None,
+        surface,
+        None,
+        (),
+        {},
+        {},
+        diagnostics,
+        False,
+    )
+    if (
+        material.get("bc2_material_status")
+        != "resolved source material without textures"
+    ):
+        raise AssertionError("Materials-only mode did not create a source material")
+    if any(node.type == "TEX_IMAGE" for node in material.node_tree.nodes):
+        raise AssertionError("Materials-only mode created an image texture node")
+
+    subset = MeshSubset(
+        name="PlaceholderSubset",
+        positions=((0.0, 0.0, 0.0),),
+        faces=(),
+        uvs=((0.0, 0.0),),
+        influences=((),),
+        vertex_stride=12,
+    )
+    parsed = MeshAsset(mesh_type=1, endian="<", subsets=(subset,))
+    materials, issues, summary = blender_addon._resolve_mesh_subset_materials(
+        None,
+        None,
+        parsed,
+        (),
+        SimpleNamespace(material_mode="PLACEHOLDER"),
+    )
+    if (
+        len(materials) != 1
+        or materials[0].get("bc2_material_status") != "placeholder material"
+        or issues
+        or summary["source_surfaces"] != 0
+    ):
+        raise AssertionError("Placeholder material mode resolved source data")
+
+    name = "BC2_Synthetic_Diagnostics.json"
+    disabled = blender_addon._create_diagnostics_text(
+        context,
+        SimpleNamespace(create_diagnostics=False),
+        name,
+        {"issues": [{"code": "synthetic"}]},
+    )
+    if disabled is not None or bpy.data.texts.get(name) is not None:
+        raise AssertionError("Disabled diagnostics created a Text datablock")
+    enabled = blender_addon._create_diagnostics_text(
+        context,
+        SimpleNamespace(create_diagnostics=True),
+        name,
+        {"issues": [{"code": "synthetic"}]},
+    )
+    if enabled is None or "synthetic" not in enabled.as_string():
+        raise AssertionError("Enabled diagnostics did not create JSON text")
+    bpy.data.texts.remove(enabled)
+
+
 def _test_mesh(context):
     subset = MeshSubset(
         name="Accelerated",
@@ -181,6 +607,30 @@ def _test_composite_parts(context):
         components,
         "00_Test_Mesh",
     )
+    composite_parts = (
+        CompositePart(
+            name="Hull",
+            bounds=(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0),
+            transform=(
+                1.0, 0.0, 0.0,
+                0.0, 1.0, 0.0,
+                0.0, 0.0, 1.0,
+                1.0, 2.0, 3.0,
+            ),
+            source_offset=0,
+        ),
+        CompositePart(
+            name="DoorWreck",
+            bounds=(-2.0, -2.0, -2.0, 2.0, 2.0, 2.0),
+            transform=(
+                0.0, 0.0, 1.0,
+                0.0, 1.0, 0.0,
+                -1.0, 0.0, 0.0,
+                4.0, 5.0, 6.0,
+            ),
+            source_offset=1,
+        ),
+    )
     objects = blender_addon._create_mesh_objects(
         context,
         parsed,
@@ -188,30 +638,7 @@ def _test_composite_parts(context):
         settings,
         collection=component,
         split_parts=True,
-        composite_parts=(
-            CompositePart(
-                name="Hull",
-                bounds=(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0),
-                transform=(
-                    1.0, 0.0, 0.0,
-                    0.0, 1.0, 0.0,
-                    0.0, 0.0, 1.0,
-                    1.0, 2.0, 3.0,
-                ),
-                source_offset=0,
-            ),
-            CompositePart(
-                name="DoorWreck",
-                bounds=(-2.0, -2.0, -2.0, 2.0, 2.0, 2.0),
-                transform=(
-                    0.0, 0.0, 1.0,
-                    0.0, 1.0, 0.0,
-                    -1.0, 0.0, 0.0,
-                    4.0, 5.0, 6.0,
-                ),
-                source_offset=1,
-            ),
-        ),
+        composite_parts=composite_parts,
         part_states=(
             AssemblyPart(
                 name="Hull",
@@ -330,6 +757,50 @@ def _test_composite_parts(context):
         raise AssertionError("Single-Wreck name count is incorrect")
     if single_wreck.get("bc2_geometry_default_visible") is not True:
         raise AssertionError("Single-Wreck geometry is not default-visible")
+
+    settings.composite_visibility = "SHOW_ALL"
+    show_all_root = blender_addon._new_collection(
+        context,
+        "BC2_TestVehicle_ShowAll",
+    )
+    show_all_component = blender_addon._new_child_collection(
+        blender_addon._new_child_collection(show_all_root, "Components"),
+        "00_Test_Mesh",
+    )
+    show_all_objects = blender_addon._create_mesh_objects(
+        context,
+        parsed,
+        asset,
+        settings,
+        collection=show_all_component,
+        split_parts=True,
+        composite_parts=composite_parts,
+    )
+    show_all_parts = next(
+        child
+        for child in show_all_component.children
+        if child.name.startswith("Parts")
+    )
+    if any(
+        child.hide_viewport or child.hide_render
+        for child in show_all_parts.children
+    ):
+        raise AssertionError("Show All hid a composite part collection")
+    if any(
+        obj.hide_viewport or obj.hide_render or obj.hide_get()
+        for obj in show_all_objects
+    ):
+        raise AssertionError("Show All hid imported composite geometry")
+    show_all_wreck = next(
+        obj
+        for obj in show_all_objects
+        if "wreckparttail_wreck" in obj.name.casefold()
+    )
+    if (
+        show_all_wreck.get("bc2_geometry_default_visible") is not False
+        or show_all_wreck.get("bc2_geometry_state") != "DESTROYED"
+    ):
+        raise AssertionError("Show All discarded default visibility metadata")
 
 
 def _test_terrain(context):
@@ -1255,6 +1726,7 @@ def _test_armature_and_action(context):
         axis_conversion=True,
         unit_scale=2.0,
         flip_v=True,
+        import_related_animations=True,
     )
     asset = {
         "path": "Characters/Test/Skeleton.res",
@@ -1300,6 +1772,18 @@ def _test_armature_and_action(context):
     identity_rotation = GrannyCurve(
         "D4Constant32f", 0, (0.0,), ((0.0, 0.0, 0.0, 1.0),)
     )
+    identity_scale = GrannyCurve(
+        "DaIdentity",
+        0,
+        (0.0,),
+        ((1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),),
+    )
+    reduced_scale = GrannyCurve(
+        "DaConstant32f",
+        0,
+        (0.0,),
+        ((0.8, 0.0, 0.0, 0.0, 0.8, 0.0, 0.0, 0.0, 0.8),),
+    )
     root_translation = GrannyCurve(
         "DaK32fC32f",
         1,
@@ -1319,10 +1803,10 @@ def _test_armature_and_action(context):
         1.0,
         (
             GrannyTransformTrack(
-                "root", 0, identity_rotation, root_translation, "DaIdentity"
+                "root", 0, identity_rotation, root_translation, identity_scale
             ),
             GrannyTransformTrack(
-                "child", 0, identity_rotation, child_translation, "DaIdentity"
+                "child", 0, identity_rotation, child_translation, reduced_scale
             ),
         ),
     )
@@ -1332,7 +1816,7 @@ def _test_armature_and_action(context):
     if len(action.slots) != 1 or len(action.layers) != 1:
         raise AssertionError("Blender 5.2 Action slots/layers were not created")
     channelbag = action.layers[0].strips[0].channelbags[0]
-    if len(channelbag.fcurves) != 14:
+    if len(channelbag.fcurves) != 20:
         raise AssertionError("Synthetic Action has the wrong F-Curve count")
     context.scene.frame_set(3)
     _assert_vector(armature.pose.bones["root"].matrix.translation, (2.0, 0.0, 0.0))
@@ -1340,13 +1824,225 @@ def _test_armature_and_action(context):
         armature.pose.bones["child"].matrix.translation,
         (4.0, 0.0, 2.0),
     )
+    _assert_vector(armature.pose.bones["child"].scale, (0.8, 0.8, 0.8))
+
+    additive_translation = GrannyCurve(
+        "DaK32fC32f",
+        1,
+        (0.0, 1.0),
+        ((0.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+    )
+    additive_animation = GrannyAnimation(
+        "SyntheticAdditive",
+        1.0,
+        0.5,
+        1.0,
+        (
+            GrannyTransformTrack(
+                "child",
+                0,
+                identity_rotation,
+                additive_translation,
+                identity_scale,
+            ),
+        ),
+        (1,),
+    )
+    additive_action = blender_addon._create_animation_action(
+        context,
+        armature,
+        skeleton,
+        additive_animation,
+        settings,
+    )
+    if (
+        additive_action["bc2_additive"] is not True
+        or additive_action["bc2_additive_bone_count"] != 1
+    ):
+        raise AssertionError("Additive Action metadata is incorrect")
+    context.scene.frame_set(1)
+    _assert_vector(armature.pose.bones["child"].location, (0.0, 0.0, 0.0))
+    context.scene.frame_set(3)
+    _assert_vector(armature.pose.bones["child"].location, (0.0, 0.0, 2.0))
+
+    related_asset = {
+        "id": 10,
+        "path": "Animations/Test/Idle.res",
+        "archive_path": "Dist/Test.fbrb",
+        "platform": "pc",
+    }
+    wrong_asset = {
+        "id": 11,
+        "path": "Animations/Test/Wrong.res",
+        "archive_path": "Dist/Other.fbrb",
+        "platform": "pc",
+    }
+    mesh_folder_asset = {
+        "id": 14,
+        "path": "Characters/Test/MeshPose.res",
+        "archive_path": "Dist/Test.fbrb",
+        "platform": "pc",
+    }
+    entity_asset = {
+        "id": 15,
+        "path": "Objects/Soldiers/Test/TestSoldier.dbx",
+        "archive_path": "Dist/Test.fbrb",
+        "platform": "pc",
+    }
+    tree_asset = {
+        "id": 16,
+        "path": "Characters/AnimTree/Test.dbx",
+        "archive_path": "Dist/Test.fbrb",
+        "platform": "pc",
+    }
+    graph_asset = {
+        "id": 17,
+        "path": "Characters/Animations/GraphDelta.res",
+        "archive_path": "Dist/Test.fbrb",
+        "platform": "pc",
+    }
+
+    class RelatedCatalog:
+        def assets_with_prefix(self, path_prefix, asset_type=None):
+            if (
+                path_prefix == "Objects/Soldiers/"
+                and asset_type is None
+            ):
+                return (entity_asset,)
+            if asset_type != "GrannyAnimation":
+                raise AssertionError("Related animation search scope is wrong")
+            if path_prefix == "Animations/Test/":
+                return (
+                    related_asset,
+                    {**related_asset, "id": 12},
+                    wrong_asset,
+                    {
+                        "id": 13,
+                        "path": "Animations/Test/Nested/Ignored.res",
+                        "archive_path": "Dist/Test.fbrb",
+                        "platform": "pc",
+                    },
+                )
+            if path_prefix == "Characters/Test/":
+                return (mesh_folder_asset,)
+            raise AssertionError("Related animation search scope is wrong")
+
+        def archive_index_counts(self):
+            return 2, 3
+
+        def find_asset(self, path, preferred_archives=()):
+            if path == related_asset["path"]:
+                return related_asset
+            if path == wrong_asset["path"]:
+                return wrong_asset
+            if path == mesh_folder_asset["path"]:
+                return mesh_folder_asset
+            if path == tree_asset["path"]:
+                return tree_asset
+            if path == graph_asset["path"]:
+                return graph_asset
+            return None
+
+    class RelatedRepository:
+        catalog = RelatedCatalog()
+
+        def materialize_archive_payload(self, archive_path):
+            if archive_path != "Dist/Test.fbrb":
+                raise AssertionError("Unexpected archive materialization")
+            return None
+
+        def read_asset(self, asset_id, max_size=None):
+            if asset_id == related_asset["id"]:
+                return related_asset, b"synthetic"
+            if asset_id == mesh_folder_asset["id"]:
+                return mesh_folder_asset, b"synthetic"
+            if asset_id == entity_asset["id"]:
+                return entity_asset, b"characters/test/skeleton"
+            if asset_id == tree_asset["id"]:
+                return tree_asset, b"tree"
+            if asset_id == graph_asset["id"]:
+                return graph_asset, b"synthetic"
+            raise AssertionError("Unrelated animation was read")
+
+    original_skeleton_path = blender_addon._skeleton_path_for_resource
+    original_document_skeleton_path = (
+        blender_addon._skeleton_path_for_document
+    )
+    original_parse_animation = blender_addon.parse_granny_animation
+    original_parse_dbx = blender_addon.parse_dbx
+    original_character_links = blender_addon.character_animation_links
+    original_tree_references = (
+        blender_addon.animation_tree_clip_references
+    )
+    try:
+        blender_addon._skeleton_path_for_resource = (
+            lambda _repository, resource: (
+                "Animations/Test/skel_Test.res"
+                if resource["id"]
+                in {
+                    related_asset["id"],
+                    mesh_folder_asset["id"],
+                    graph_asset["id"],
+                }
+                else "Animations/Other/skel_Other.res"
+            )
+        )
+        blender_addon._skeleton_path_for_document = (
+            lambda _document, _path: "Animations/Test/skel_Test.res"
+        )
+        blender_addon.parse_granny_animation = (
+            lambda _raw, _platform, _name: animation
+        )
+        blender_addon.parse_dbx = lambda raw: raw
+        blender_addon.character_animation_links = (
+            lambda _document, _path: blender_addon.CharacterAnimationLinks(
+                animation_tree_references=(
+                    "Characters/AnimTree/Test/TREE-GUID",
+                )
+            )
+        )
+        blender_addon.animation_tree_clip_references = (
+            lambda _document: (
+                "Characters/Animations/GraphDelta/CLIP-GUID",
+            )
+        )
+        related = blender_addon._import_related_animations(
+            context,
+            RelatedRepository(),
+            asset,
+            {
+                "path": "Animations/Test/skel_Test.res",
+                "archive_path": "Dist/Test.fbrb",
+            },
+            skeleton,
+            armature,
+            settings,
+        )
+    finally:
+        blender_addon._skeleton_path_for_resource = original_skeleton_path
+        blender_addon._skeleton_path_for_document = (
+            original_document_skeleton_path
+        )
+        blender_addon.parse_granny_animation = original_parse_animation
+        blender_addon.parse_dbx = original_parse_dbx
+        blender_addon.character_animation_links = original_character_links
+        blender_addon.animation_tree_clip_references = (
+            original_tree_references
+        )
+    if len(related.actions) != 3:
+        raise AssertionError("Related animations were not deduplicated")
+    if armature["bc2_related_animation_count"] != 3:
+        raise AssertionError("Related animation metadata is incorrect")
+    warning = blender_addon._related_animation_warning(related)
+    if "1 archive(s) remain unindexed" not in warning:
+        raise AssertionError("Partial related animation coverage was not reported")
 
 
 def main():
     if blender_addon._np is None:
         raise AssertionError("Blender NumPy is unavailable")
-    blender_addon.register()
-    blender_addon.unregister()
+    _test_settings_registration(bpy.context)
+    _test_import_policies(bpy.context)
     _test_mesh(bpy.context)
     _test_composite_parts(bpy.context)
     _test_terrain(bpy.context)

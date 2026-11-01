@@ -131,12 +131,32 @@ class AssetCatalog:
             (like, limit, offset),
         ).fetchall()
 
+    def unindexed_archives(self):
+        return self.connection.execute(
+            """
+            SELECT * FROM archives
+            WHERE indexed = 0
+            ORDER BY path COLLATE NOCASE
+            """
+        ).fetchall()
+
     def archive_count(self, query: str = "") -> int:
         row = self.connection.execute(
             "SELECT COUNT(*) AS count FROM archives WHERE path LIKE ?",
             (f"%{query}%",),
         ).fetchone()
         return int(row["count"])
+
+    def archive_index_counts(self) -> tuple[int, int]:
+        row = self.connection.execute(
+            """
+            SELECT
+                SUM(CASE WHEN indexed = 1 THEN 1 ELSE 0 END) AS indexed_count,
+                COUNT(*) AS total_count
+            FROM archives
+            """
+        ).fetchone()
+        return int(row["indexed_count"] or 0), int(row["total_count"])
 
     def replace_archive_assets(
         self,

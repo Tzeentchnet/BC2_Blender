@@ -3,7 +3,7 @@
 bl_info = {
     "name": "Bad Company 2 Frostbite Importer",
     "author": "BC2 Blender Contributors",
-    "version": (0, 6, 5),
+    "version": (0, 7, 0),
     "blender": (5, 2, 0),
     "location": "File > Import > Bad Company 2; 3D View > Sidebar > Frostbite",
     "description": (

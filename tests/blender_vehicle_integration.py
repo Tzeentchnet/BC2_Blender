@@ -67,7 +67,9 @@ def _settings():
             "unit_scale": 1.0,
             "flip_v": True,
             "include_z_only": False,
-            "import_textures": True,
+            "material_mode": "FULL",
+            "composite_visibility": "DEFAULT_STATE",
+            "create_diagnostics": True,
         },
     )()
 

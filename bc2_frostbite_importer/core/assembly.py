@@ -30,12 +30,19 @@ class AssemblyPart:
 
 
 @dataclass(frozen=True)
+class CharacterAnimationLinks:
+    animation_references: tuple[str, ...] = ()
+    animation_tree_references: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ModularAssembly:
     name: str
     kind: str
     source_path: str
     components: tuple[AssemblyComponent, ...]
     parts: tuple[AssemblyPart, ...] = ()
+    animation_links: CharacterAnimationLinks | None = None
 
 
 def _field(element: DbxElement, name: str) -> DbxElement | None:
@@ -70,6 +77,103 @@ def _array_references(
         if (reference := child.attribute("ref"))
         and reference.casefold() != "null"
     )
+
+
+def _unique_references(references) -> tuple[str, ...]:
+    unique = {}
+    for reference in references:
+        if reference and reference.casefold() != "null":
+            unique.setdefault(reference.casefold(), reference)
+    return tuple(unique.values())
+
+
+def _character_animation_links(
+    document: DbxDocument,
+    instance: DbxElement,
+) -> CharacterAnimationLinks:
+    animation_references = []
+    animation_tree_references = []
+    tree_reference = _reference(instance, "AnimTree3p")
+    tree = document.instance(tree_reference)
+    if tree is None:
+        return CharacterAnimationLinks()
+
+    static_pose = _reference(tree, "StaticPose")
+    if static_pose and "/" in static_pose:
+        animation_references.append(static_pose)
+
+    for name in ("KitJointsAnimTree", "ReviveAnimTree"):
+        reference = _reference(tree, name)
+        if reference and "/" in reference:
+            animation_tree_references.append(reference)
+
+    facial_reference = _reference(tree, "FacialAnimations")
+    if facial_reference:
+        if "/" in facial_reference:
+            animation_tree_references.append(facial_reference)
+        else:
+            facial_data = document.instance(facial_reference)
+            if facial_data is not None:
+                reference = _reference(facial_data, "AnimTree")
+                if reference and "/" in reference:
+                    animation_tree_references.append(reference)
+
+    return CharacterAnimationLinks(
+        animation_references=_unique_references(animation_references),
+        animation_tree_references=_unique_references(
+            animation_tree_references
+        ),
+    )
+
+
+def character_animation_links(
+    document: DbxDocument,
+    mesh_set_path: str | None = None,
+) -> CharacterAnimationLinks | None:
+    instance = document.primary_instance
+    if instance is None:
+        return None
+    components = _character_components(instance)
+    if not components:
+        return None
+    if (
+        mesh_set_path is not None
+        and all(
+            component.mesh_set_path.casefold()
+            != mesh_set_path.casefold()
+            for component in components
+        )
+    ):
+        return None
+    return _character_animation_links(document, instance)
+
+
+def animation_tree_clip_references(
+    document: DbxDocument,
+) -> tuple[str, ...]:
+    list_names = {
+        "animationlist",
+        "aimanimationlist",
+        "replacmentanimations",
+        "replacementanimations",
+    }
+    references = []
+
+    def visit(element: DbxElement, in_animation_list: bool = False):
+        is_animation_list = (
+            element.tag == "array"
+            and (element.attribute("name") or "").casefold() in list_names
+        )
+        active = in_animation_list or is_animation_list
+        if active:
+            reference = element.attribute("ref")
+            if reference and "/" in reference:
+                references.append(reference)
+        for child in element.children:
+            visit(child, active)
+
+    visit(document.root)
+    return _unique_references(references)
 
 
 def vehicle_part_state(name: str) -> str:
@@ -302,6 +406,7 @@ def modular_assembly(
             kind="CHARACTER",
             source_path=source_path,
             components=character_components,
+            animation_links=_character_animation_links(document, instance),
         )
 
     if instance_type.endswith("VehicleEntityData"):

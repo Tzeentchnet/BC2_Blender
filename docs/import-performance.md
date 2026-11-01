@@ -78,6 +78,24 @@ images into the `.blend` by default. Packing is useful for standalone example
 files but adds memory, save-time, and file-size costs to the normal browsing
 workflow.
 
+## Material workload controls
+
+The session material mode makes dependency cost explicit:
+
+- **Materials and Textures** performs source surface resolution, shader
+  database reads, texture extraction/conversion, and Blender image/node
+  creation.
+- **Materials Only** retains source-named material assignments while skipping
+  shader-binding discovery and texture image work.
+- **Simple Placeholders** skips source material dependency resolution and uses
+  neutral materials.
+
+All three modes parse and create the selected geometry. Directly importing a
+texture remains an image conversion operation regardless of this setting.
+Detailed diagnostics Text datablocks are also optional and disabled by
+default, but diagnostics are still collected and warning/error summaries are
+reported; disabling the Text output is not an error-suppression mode.
+
 ## Repository and map caches
 
 An open `AssetRepository` caches parsed FbRB metadata by archive ID. More
@@ -96,6 +114,30 @@ Parsed metadata caches are cleared when a fresh disc scan resets the catalog.
 Materialized payload files are fingerprint-scoped disposable derivatives and
 are reused across Blender sessions while their size matches the archive
 metadata.
+
+Direct PC soldier animation discovery also uses this cache selectively. If a
+preferred archive contains multiple `Objects/Soldiers` descriptor candidates,
+the importer materializes that compressed payload once before testing bounded
+`Meshes3p` reverse references. This avoids restarting gzip traversal for every
+candidate while retaining the lightweight catalog: the scan still does not
+parse or cache every DBX document, texture, or resource payload.
+
+Choosing an ISO scans it immediately. Xbox scanning already indexes every
+archive. The default PC scan reads the MSI archive records without extracting
+each FbRB. Map choices are derived from
+archive folders that contain both `level-00.fbrb` and `terrain-00.fbrb`.
+**Index Map Objects** then indexes only the selected level's `level-00`
+archive and `mp_common`; textures and other dependencies remain limited to
+those relevant archives until import. **Index All (Slow)** is an explicit
+archive-panel action that reads every archive metadata table.
+
+Disc scans, targeted archive indexing, and optional full PC indexing run in a
+worker thread with a worker-owned repository and SQLite connection. Blender's
+modal operator handles progress and result application on the main thread and
+passes unrelated UI events through. Cancellation is checked between archives,
+so an active PC cabinet extraction finishes before cancellation takes effect.
+Reopening or manually scanning an unchanged source reuses the valid catalog
+and indexes only requested or still-pending archives.
 
 Mesh resource bytes are parsed once per unique path during a map import.
 Converted DDS images and Blender material datablocks are also reused by source
@@ -144,8 +186,8 @@ Potential future work should be benchmarked before implementation:
 - structured NumPy views for MeshData position and UV decoding;
 - vectorized TerrainHeightfield sampling and face generation;
 - lower overhead when repeatedly opening the same staged PC archive;
-- background extraction that respects Blender's main-thread data API;
 - explicit progress reporting for large conversions.
 
-Blender datablock creation must remain on Blender's supported thread. Parallel
-workers, if added, should stop at byte parsing or array preparation.
+Blender datablock creation remains on Blender's supported thread. The current
+background worker stops at source scanning, archive extraction, FbRB metadata
+parsing, and SQLite updates; it does not create or mutate Blender datablocks.
