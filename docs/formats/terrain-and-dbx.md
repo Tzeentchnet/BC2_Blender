@@ -269,6 +269,14 @@ A DBX exporter should extend the intermediate representation to preserve raw
 encodings, exact scalar types, and unknown nodes. Do not attempt XML-to-DBX
 conversion from the current output.
 
+The supplied Frostbite 1 DBX converter reinforces this warning. In synthetic
+testing, its own generated XML was silently rejected by its XML-to-DBX path
+because of newline normalization. After bypassing only that check, an
+unedited `float32` changed value, a very small float field was omitted without
+an error, and an ampersand produced invalid XML. This is **Verified
+(synthetic)** evidence that the converter is an inspection aid, not a
+round-trip implementation.
+
 ## External-reference coverage
 
 The audited MaxScripts contain no TerrainHeightfield, TerrainMaterialMap, or
@@ -277,6 +285,11 @@ search for labels such as `LinearTransform`; that confirms only human-readable
 field naming in the dump, not DBX byte layout, numeric-array encoding, or level
 graph semantics. No terrain or DBX behavior changed from this evidence. See
 the [external MaxScript audit](../maxscript-reference-audit.md).
+
+The external DBX converter understands similar string-table, LEB128, and
+numeric-array concepts, but rebuilds scalar types and strings heuristically.
+Its failures and the raw-preserving adaptation requirements are recorded in
+the [external writer audit](../external-writer-reference-audit.md).
 
 See [`dbx.py`](../../bc2_frostbite_importer/core/dbx.py) and
 [Levels and complete maps](levels-and-maps.md).

@@ -98,6 +98,20 @@ entry, deletion, or string-table handling. They neither confirm nor conflict
 with this archive implementation. See the
 [external MaxScript audit](../maxscript-reference-audit.md).
 
+The separately audited Frostbite 1 packer does write FbRB archives.
+**Verified (synthetic)** output was readable in both raw- and gzip-payload
+modes, but the packer is reconstructive rather than lossless: it hard-codes
+metadata word zero to `2`, assigns flags from whether a file is empty, makes
+`alternate_size == size`, removes payload padding, regenerates strings and
+entry order from the filesystem, omits unknown filename extensions, and does
+not fix the gzip timestamp.
+
+One **Verified (PC retail)** `MP_001` archive also used metadata word `2`,
+flag `0x10000` for every active entry, equal size fields, contiguous active
+ranges, and zero-byte deleted records. That agreement is sample-specific and
+does not establish other archives, builds, or Xbox 360 output. See the
+[external writer audit](../external-writer-reference-audit.md).
+
 ## Writer requirements
 
 Before implementing FbRB output, establish and test:
@@ -111,4 +125,6 @@ Before implementing FbRB output, establish and test:
 
 A lossless editor should retain all unknown metadata, original string order,
 entry order, flags, and padding. Rebuilding only from the current catalog would
-discard information and is not sufficient for safe round-tripping.
+discard information and is not sufficient for safe round-tripping. The
+external packer demonstrates a readable reconstruction algorithm, not a
+replacement for these preservation requirements.

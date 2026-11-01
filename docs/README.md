@@ -35,6 +35,7 @@ The documents use these terms deliberately:
 | Level graphs, compact groups, transforms, and instancing | [Levels and complete maps](formats/levels-and-maps.md) |
 | Shader database findings and normal decoding | [Shaders and materials](shaders-and-materials.md) |
 | BF3/BF4 MaxScript evidence and applicability limits | [External MaxScript reference audit](maxscript-reference-audit.md) |
+| BC2-oriented external writers and export constraints | [External writer reference audit](external-writer-reference-audit.md) |
 | NumPy acceleration and native Blender image loading | [Import performance](import-performance.md) |
 | Safe importer/exporter architecture | [Import and export design](import-export-design.md) |
 | Evidence, test coverage, and open questions | [Validation and unknowns](validation-and-unknowns.md) |
@@ -91,5 +92,7 @@ resources, and converted DDS files are disposable derivatives.
    copyrighted payloads to this repository.
 8. Treat later-Frostbite tools as corroborating references only. Record which
    principles transfer, which findings are heuristic, and which versioned
-   offsets or DCC choices are unsafe for BC2. See the
-   [MaxScript audit](maxscript-reference-audit.md).
+   offsets or DCC choices are unsafe for BC2. Treat BC2-oriented external
+   writers the same way until no-edit and in-game validation succeeds. See the
+   [MaxScript audit](maxscript-reference-audit.md) and
+   [writer audit](external-writer-reference-audit.md).

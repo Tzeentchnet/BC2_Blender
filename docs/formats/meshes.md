@@ -378,16 +378,53 @@ routing remains shader-specific for other declarations.
 This is Blender instancing, not reconstruction of Frostbite runtime culling or
 destruction systems. See [Levels and complete maps](levels-and-maps.md).
 
+## Native writer cross-check
+
+The supplied BC2-oriented C++ tool includes a PC-style FBX-to-MeshData and
+mesh-set writer. Unlike the later-engine MaxScripts, it corroborates several
+Frostbite 1 structures directly:
+
+- four count-prefixed byte arrays between subset metadata and geometry sizes;
+- 89-byte shader-database vertex-declaration records selected through mesh
+  reference GUIDs;
+- declaration words containing an element code and byte offset;
+- little-endian `uint16` triangle indices;
+- rigid, composite, and tree mesh-set records with part names, hashes, bounds,
+  and transforms.
+
+A **Verified (PC retail)** sample of 60 `MP_001` MeshData resources had all
+four byte arrays end exactly at the geometry-size triplet. Five composite
+resources matched the reference part hash for all 48 decoded parts. Two local
+PC shader-database samples linked every surveyed mesh-reference GUID to an
+89-byte record; the larger sample contained 61 generic declarations, of which
+11 used element codes unknown to the external writer. Only 24 of 50 fully
+recognized declarations filled the complete stride, making trailing padding
+or unknown data an explicit preservation requirement.
+
+The writer is not safe to adapt directly. It is host-little-endian, leaves
+skinned generation unfinished, writes weights through an unsupported path,
+does not enforce the 16-bit index limit, zeroes unknown declaration fields,
+forces tangent/default signs, and replaces composite rotations with identity.
+It also maps FBX control points to output vertices while selecting UVs and
+normals from one polygon corner, so loop-specific seams require a separate
+vertex-expansion pass. See the
+[external writer audit](../external-writer-reference-audit.md).
+
 ## Writer requirements
 
 A safe MeshData writer needs more than the current preview model:
 
 - preserve unknown header and inter-buffer metadata;
-- preserve or explicitly regenerate the complete vertex declaration;
+- preserve the four count-prefixed subset-order arrays;
+- preserve the raw declaration record, GUID, element offsets, and stride
+  padding, or explicitly regenerate the complete declaration;
 - retain all attributes and original quantization;
 - preserve subset order, names, Z-only subsets, palettes, and mesh-set links;
+- expand Blender loop/corner data when UVs, normals, tangents, materials, or
+  weights require distinct output vertices;
 - confirm alignment and offset units for every target platform;
-- verify triangle winding after coordinate conversion;
+- verify triangle winding and tangent handedness after coordinate and UV
+  conversion;
 - enforce the 16-bit index limit or reproduce the game's subset splitting.
 
 Round-trip tests should compare untouched resources byte-for-byte before any

@@ -54,7 +54,10 @@ at least:
 - archive path, resource path, type, flags, and both size fields;
 - byte order and original header bytes;
 - unknown metadata blocks and padding;
-- original vertex declaration and attribute encodings;
+- original vertex declaration, its raw shader-database record and GUID,
+  attribute encodings, and trailing stride padding;
+- subset order, shared/local index convention, and the four count-prefixed
+  MeshData byte arrays;
 - texture header, mip allocations, tiling mode, and channel semantics;
 - Granny wrapper strings, section/relocation tables, source bone transforms,
   inverse bind matrices, curve codecs, knots, controls, and original timing;
@@ -131,6 +134,22 @@ offsets. Their BF3 and BF4 structure offsets differ, their bone counts and DCC
 scale are hard-coded, and their material path is filename-based. Use the
 [external MaxScript audit](maxscript-reference-audit.md) as design evidence,
 not as an encoder specification.
+
+The supplied BC2-oriented C++ source is a closer native-format reference. It
+corroborates PC MeshData subset records, four count-prefixed byte arrays,
+shader-database declaration GUIDs, `uint16` indices, and composite mesh-set
+records. It is still not an exporter specification: output is little-endian,
+skinned generation is unfinished, unknown fields are zeroed, tangent signs
+and composite rotations are replaced, and FBX control-point handling can
+collapse Blender loop-specific UVs and normals.
+
+The supplied FbRB packer creates archives that the current reader accepts, but
+synthetic testing showed that it reconstructs flags, alternate sizes, offsets,
+ordering, padding, and type information rather than preserving them. The
+supplied DBX XML writer also failed an unedited synthetic round trip and lost
+numeric and XML information. Adapt the data-flow principles, not these
+implementations. See the
+[external writer audit](external-writer-reference-audit.md).
 
 ## Coordinate and material cautions
 
