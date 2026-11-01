@@ -1569,22 +1569,29 @@ def _character_binding_uv_map(
     role: str,
 ) -> str:
     name = _normalized_surface_name(surface.name)
+    collapsed_coordinate_surfaces = (
+        "legstandard",
+        "molle",
+        "pouches",
+    )
     if role == "OCCLUSION":
         return "UV3"
     if role == "CAMO":
-        return "UV2" if "armstandard" in name else "UV1"
+        return (
+            "UV2"
+            if any(
+                value in name
+                for value in ("armstandard", "legstandard")
+            )
+            else "UV1"
+        )
     if role == "DIRT_MASK":
-        if any(
-            value in name
-            for value in ("legstandard", "molle", "pouches")
-        ):
-            return "UV1"
         return "UV2"
     if role in {"DETAIL_COLOR", "DETAIL_NORMAL"} and any(
         value in name
-        for value in ("legstandard", "molle", "pouches")
+        for value in collapsed_coordinate_surfaces
     ):
-        return "UV1"
+        return "UV2"
     if (
         role in {"BASE_COLOR", "DIRT_COLOR"}
         and name.endswith("meshberetta")

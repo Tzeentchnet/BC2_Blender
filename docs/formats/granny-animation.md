@@ -245,7 +245,8 @@ Armature creation:
 Character material resolution is separate from Granny decoding. The matching
 `Render.SkinnedMeshAsset` DBX supplies the default surface set, while the
 retail DX11 database supplies texture bindings and shader evidence. The tested
-stride-64 mesh exposes four shader-selected UV channels. See
+stride-64 mesh preserves four shader-coordinate channels and applies a
+nondegenerate UV routing correction where the byte-16 field collapses. See
 [Meshes](meshes.md) and
 [Shaders and materials](../shaders-and-materials.md).
 

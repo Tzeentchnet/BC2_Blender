@@ -254,6 +254,35 @@ characters: those bytes are tangent-frame inputs. Primary color and normal
 usually use `UVMap`; selected camouflage/detail paths use `UV1` or `UV2`;
 dirt masks use `UV1`/`UV2`; baked occlusion uses `UV3`.
 
+#### US_01 collapsed-coordinate correction
+
+The declaration and DXBC assignments above are preserved as source metadata,
+but the byte-16 field is not a usable 2D UV on the three reported retail
+subsets:
+
+- `LegStandard`: all 929 vertices satisfy `u == v`;
+- MOLLE: all 1,603 vertices satisfy `u == v`;
+- pouches: all 1,361 vertices satisfy `u == v`.
+
+Every triangle therefore has zero area in that coordinate pair. Routing
+cloth detail and camouflage through it produced the visible zigzag bands in
+Blender. The importer now uses the nondegenerate byte-44 `UV2` layer for:
+
+- LegStandard camouflage, cloth color/detail normal, and dirt mask;
+- MOLLE cloth color/detail normal and dirt mask;
+- pouches cloth color/detail normal and dirt mask.
+
+The original byte-16 values remain available in `UV1` for source inspection.
+This is an explicit Blender compatibility correction rather than a claim that
+the still-unknown runtime interpretation of the auxiliary field has been
+fully decoded.
+
+The BF3/BF4 MaxScript references in `E:\BFTools\Battlefield` reinforce this
+decision boundary: their mesh readers use explicit `Vert_Diffuse_UV` and
+`Vert_Normals_UV` semantics and offsets, keep tangent/binormal fields
+separate, and V-flip each recognized UV channel. Their standard `_d`/`_s`/`_n`
+material setup does not reproduce BC2's layered shaders.
+
 ### Normal packing and layer arithmetic
 
 The inspected `ps_5_0` permutations reconstruct the primary normal from red

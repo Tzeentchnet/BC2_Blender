@@ -273,6 +273,48 @@ def main():
             "OCCLUSION",
         } <= arm_roles:
             raise AssertionError("ArmStandard omitted shader texture roles")
+        affected_uv_roles = {
+            "LegStandard": {
+                "CAMO",
+                "DETAIL_COLOR",
+                "DETAIL_NORMAL",
+                "DIRT_MASK",
+            },
+            "MOLLE": {
+                "DETAIL_COLOR",
+                "DETAIL_NORMAL",
+                "DIRT_MASK",
+            },
+            "Pouches": {
+                "DETAIL_COLOR",
+                "DETAIL_NORMAL",
+                "DIRT_MASK",
+            },
+        }
+        for surface_name, expected_roles in affected_uv_roles.items():
+            material = next(
+                material
+                for material in materials
+                if material.get("bc2_surface_name") == surface_name
+            )
+            bindings = json.loads(material["bc2_texture_bindings"])
+            roles_by_path = {
+                binding["path"].casefold(): binding["role"]
+                for binding in bindings
+            }
+            routed_roles = {
+                roles_by_path[node.get("bc2_asset_path", "").casefold()]
+                for node in material.node_tree.nodes
+                if node.type == "TEX_IMAGE"
+                and node.get("bc2_uv_map") == "UV2"
+                and node.get("bc2_asset_path", "").casefold()
+                in roles_by_path
+            }
+            if not expected_roles <= routed_roles:
+                raise AssertionError(
+                    f"{surface_name} did not route collapsed-coordinate "
+                    "bindings through UV2"
+                )
         source_images = {
             node.image.name: node.image
             for material in materials

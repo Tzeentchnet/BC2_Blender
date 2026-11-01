@@ -13,7 +13,7 @@ the browser is not necessarily decoded.
 |---|---|---|
 | `MeshData` | Mesh | Native geometry, UV preview, and available weight groups |
 | `RigidMeshSet` | Mesh | Resolves a naming-matched LOD MeshData, preferring LOD0 |
-| `SkinnedMeshSet` | Mesh | PC: resolves MeshData, four verified character UV channels, the DBX skeleton/default surface references, source DX11 materials, and a bound armature; console: geometry-only |
+| `SkinnedMeshSet` | Mesh | PC: resolves MeshData, four preserved character shader-coordinate channels with nondegenerate material routing, the DBX skeleton/default surface references, source DX11 materials, and a bound armature; console: geometry-only |
 | `CompositeMeshSet` | Mesh | Resolves MeshData; no part hierarchy decoding |
 | `TreeMeshSet` | Mesh | Resolves MeshData; no tree-specific semantics |
 | `WaterMesh` | Mesh | Native positions and triangle geometry |

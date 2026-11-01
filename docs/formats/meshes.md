@@ -87,19 +87,27 @@ usable Blender preview:
   that range. The parser retains UV1 when the immediately following
   half-float pair passes structural scoring.
 - The tested little-endian stride-64 skinned-character declaration is
-  explicit rather than heuristic. It exposes four half-float UV pairs:
+  explicit rather than heuristic. It exposes four half-float shader-coordinate
+  pairs:
 
   | Vertex input | Byte offset | Blender layer | Representative shader use |
   |---|---:|---|---|
   | `v6.xy` | 40 | `UVMap` | primary color and primary normal |
-  | `v3.xy` | 16 | `UV1` | alternate camouflage/detail coordinates |
-  | `v6.zw` | 44 | `UV2` | dirt/camouflage masks |
+  | `v3.xy` | 16 | `UV1` | nominal auxiliary/detail coordinate |
+  | `v6.zw` | 44 | `UV2` | nondegenerate secondary UV and masks |
   | `v7.xy` | 48 | `UV3` | baked character occlusion |
 
   DX11 vertex shaders 424 and 920 both declare these offsets and write the
   values to pixel interpolants `o10.xy`, `o10.zw`, `o11.xy`, and `o11.zw`.
   Decoding offsets 24 and 28 as UVs is incorrect for this layout because those
   bytes are packed tangent-frame inputs.
+
+  On retail `US_01`, every byte-16 pair on `LegStandard`, MOLLE, and pouches
+  satisfies `u == v`, so every triangle has zero 2D UV area. The pair remains
+  preserved as `UV1` because it is part of the source declaration, but the
+  Blender material adapter routes the affected layered bindings through
+  byte-44 `UV2`. That channel is nondegenerate and removes the visible zigzag
+  corruption.
 - For tested type-1 skinned layouts with a palette, four byte-sized palette
   indices are stored at vertex offset `8` and four byte weights at offset
   `12`.
@@ -119,6 +127,26 @@ Normals, tangents, colors, morph data, arbitrary UV declarations outside the
 verified static and PC skinned layouts, and every vertex declaration variant
 are not yet decoded generically. Do not treat the preview decoder as a
 complete vertex-layout specification.
+
+### MaxScript cross-check
+
+The BF3 and BF4 MaxScript importers under `E:\BFTools\Battlefield` are for
+later Frostbite revisions, so their numeric layout identifiers are not copied
+into the Frostbite 1 parser. They nevertheless confirm two useful format
+rules:
+
+- vertex-element offsets come from the mesh declaration, not from stride-only
+  guesses;
+- `Vert_Diffuse_UV` (`1570`) and `Vert_Normals_UV` (`1569`) are distinct
+  half-float-pair semantics, while tangents, binormals, and unknown fields
+  have separate identifiers;
+- both recognized UV channels receive an explicit V flip when converted to
+  the DCC coordinate convention.
+
+The scripts build simple `_d`, `_s`, and `_n` standard materials and do not
+decode Frostbite 1 shader-database layer arithmetic. They are supporting
+evidence for semantic-driven vertex decoding, not an authoritative source for
+the BC2 character material graph.
 
 The offset-24 rule is verified on the reported
 `Objects/Objects/GasSilo/GasSilo` and

@@ -116,7 +116,8 @@ missing-texture, texture-conversion, or unresolved-subset diagnostics.
   hierarchy.
 - PC `US_01_Body` materials: 13/13 exact default shader keys, 34 unique
   file-backed DDS images, four UV layers from verified offsets 40/16/44/48,
-  and connected Base Color plus source-normal graphs where bound.
+  corrected byte-44 routing for the collapsed LegStandard/MOLLE/pouches
+  coordinate, and connected Base Color plus source-normal graphs where bound.
 - PC `ske01`: local transforms composed against every transposed stored
   inverse-world matrix with a maximum identity residual below `7.5e-7`.
 - PC rifle third-person `StandIdle` and `RunForward`: 39 named transform
@@ -146,7 +147,8 @@ Current tests cover:
 - one-influence palette-index handling for rigid skinned subsets;
 - composite/static palettes remain isolated from the skinned index and UV
   declarations;
-- the declared four-channel little-endian stride-64 skinned UV layout;
+- the declared four-channel little-endian stride-64 skinned coordinate layout
+  and nondegenerate routing for LegStandard, MOLLE, and pouches;
 - bounded PC Granny wrapper, section, relocation, skeleton, and constant-curve
   fixtures;
 - PC L8-to-DDS conversion;

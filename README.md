@@ -61,7 +61,7 @@ The provided Xbox example indexes 630 Frostbite archives and 251,251 active asse
 |---|---|
 | `MeshData` | Creates one Blender mesh object per visible subset, including UVs, materials, and available bone-weight vertex groups. PC little-endian and Xbox 360 big-endian layouts are supported. |
 | Rigid, composite, and tree mesh sets | Resolves a matching LOD `MeshData` resource when available, preferring LOD0. |
-| PC `SkinnedMeshSet` | Resolves LOD0 geometry, the DBX skeleton reference, the default surface set, and source DX11 texture bindings; creates all source bones, four verified character UV layers, named vertex groups, one material per visible subset, and Armature modifiers. Console mesh sets remain geometry-only. |
+| PC `SkinnedMeshSet` | Resolves LOD0 geometry, the DBX skeleton reference, the default surface set, and source DX11 texture bindings; creates all source bones, four preserved shader-coordinate layers, nondegenerate character UV routing, named vertex groups, one material per visible subset, and Armature modifiers. Console mesh sets remain geometry-only. |
 | PC `GrannyModel` | Creates a native Blender armature while preserving the complete source hierarchy, local transforms, source flags, and physics-joint metadata. |
 | PC `GrannyAnimation` | Creates a Blender 5.2 layered/slotted Action on the matching armature, sampled at the source time step with root motion and quaternion continuity. |
 | `WaterMesh` | Creates native water geometry. |
@@ -125,6 +125,13 @@ alpha/green repeated cloth-detail normals, 15x dirt sampling, camouflage and
 cloth modulation, source dirt masks, and baked occlusion. The Blender graph
 reproduces those high-level relationships while labeling the remaining
 lighting/specular and per-surface blend differences as approximations.
+
+The byte-16 field is preserved as `UV1`, but retail `US_01` stores collinear
+`u == v` values there for `LegStandard`, MOLLE, and pouches. Treating it as a
+2D Blender UV caused the reported zigzag texture corruption. Those surfaces
+now route their layered detail, camouflage, and dirt-mask bindings through
+the nondegenerate byte-44 `UV2` channel while retaining the original field
+for diagnostics.
 
 ## Cache behavior
 
@@ -234,9 +241,10 @@ blender --background --factory-startup --python tests\benchmark_blender_import.p
 The tests cover PC/Xbox mesh byte order, accelerated and fallback Xbox texture
 paths, DDS generation, terrain sampling, DBX conversion, an end-to-end
 synthetic XDVDFS -> FbRB -> MeshData path, bounded Granny skeleton/animation
-fixtures, the verified four-channel PC character UV declaration, character
-binding roles and packed-normal graphs, and Blender-native mesh, armature,
-Action, material, and image creation.
+fixtures, the four-channel PC character shader declaration, degenerate
+coordinate routing regressions, character binding roles and packed-normal
+graphs, and Blender-native mesh, armature, Action, material, and image
+creation.
 
 For optional validation with legally owned PC media:
 
@@ -261,7 +269,7 @@ blender --background --factory-startup `
 ```
 
 It imports `US_01_Body`, `ske01`, `StandIdle`, and `RunForward`; checks bind
-invariance, sampled pose matrices, four source UV channels, 13 exact material
-keys, source-backed DDS images, Base Color and packed-normal graphs; then
-saves, reopens, and verifies the armature, skinned subsets, materials,
-modifiers, and Actions.
+invariance, sampled pose matrices, four source coordinate channels, corrected
+LegStandard/MOLLE/pouches UV routing, 13 exact material keys, source-backed
+DDS images, Base Color and packed-normal graphs; then saves, reopens, and
+verifies the armature, skinned subsets, materials, modifiers, and Actions.

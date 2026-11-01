@@ -560,6 +560,30 @@ def _test_character_material_graph():
         != (7.0, 7.0)
     ):
         raise AssertionError("Character shader UV mapping is incorrect")
+    for surface_name, roles_to_check in (
+        (
+            "LegStandard",
+            ("CAMO", "DETAIL_COLOR", "DETAIL_NORMAL", "DIRT_MASK"),
+        ),
+        ("MOLLE", ("DETAIL_COLOR", "DETAIL_NORMAL", "DIRT_MASK")),
+        ("Pouches", ("DETAIL_COLOR", "DETAIL_NORMAL", "DIRT_MASK")),
+    ):
+        affected_surface = SurfaceShader(
+            surface_name,
+            f"Characters/US/Shaders/{surface_name}/GUID",
+            f"Characters/US/Shaders/{surface_name}",
+        )
+        if any(
+            blender_addon._character_binding_uv_map(
+                affected_surface,
+                role,
+            )
+            != "UV2"
+            for role in roles_to_check
+        ):
+            raise AssertionError(
+                f"{surface_name} retained the collapsed character coordinate"
+            )
 
     material = bpy.data.materials.new("BC2 Character Graph")
     nodes, links, shader = blender_addon._material_nodes(material)
