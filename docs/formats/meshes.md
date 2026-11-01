@@ -37,7 +37,7 @@ Each subset begins with a NUL-terminated Latin-1 name, followed by:
 | `bones_per_vertex` | `uint8` | influence-layout hint |
 | `palette_count` | `uint8` | bone palette entries |
 | `palette_count_2` | `uint16` | duplicate count; must agree |
-| palette | `uint16[]` | global bone indices |
+| palette | `uint16[]` | type-1 global bone indices or type-2 global part IDs |
 
 Subset names containing `ZOnly` identify shadow/depth-only geometry in tested
 assets and are skipped by default.
@@ -86,6 +86,21 @@ usable Blender preview:
   28. UV0 can legitimately tile beyond `0..1`; UV1 is usually constrained to
   that range. The parser retains UV1 when the immediately following
   half-float pair passes structural scoring.
+- The retail PC stride-48 composite declaration whose repeated part-ID field
+  is at byte 36 exposes four half-float shader-coordinate pairs:
+
+  | Vertex input | Byte offset | Blender layer |
+  |---|---:|---|
+  | `v2.xy` | 24 | `UVMap` |
+  | `v2.zw` | 28 | `UV1` |
+  | `v3.xy` | 32 | `UV2` |
+  | `v5.xy` | 40 | `UV3` |
+
+  The importer identifies this declaration across related type-2 subsets from
+  the verified byte-36 part field, including one-part subsets where the field
+  offset cannot be inferred independently. Padding at byte 44 is not exposed
+  as a coordinate layer. Which layer is a color UV remains shader-specific;
+  for AH60 Main, byte 28 is the nondegenerate base-color channel.
 - The tested little-endian stride-64 skinned-character declaration is
   explicit rather than heuristic. It exposes four half-float shader-coordinate
   pairs:
@@ -100,7 +115,9 @@ usable Blender preview:
   DX11 vertex shaders 424 and 920 both declare these offsets and write the
   values to pixel interpolants `o10.xy`, `o10.zw`, `o11.xy`, and `o11.zw`.
   Decoding offsets 24 and 28 as UVs is incorrect for this layout because those
-  bytes are packed tangent-frame inputs.
+  bytes are packed tangent-frame inputs. Because these channels are
+  declaration-backed, a constant channel remains valid; the US head eyelash
+  subset verifies that zero span must not be treated as corrupt UV data.
 
   On retail `US_01`, every byte-16 pair on `LegStandard`, MOLLE, and pouches
   satisfies `u == v`, so every triangle has zero 2D UV area. The pair remains
@@ -117,11 +134,82 @@ usable Blender preview:
   incorrect.
 - Weights are normalized to sum to one. If no usable weights exist, the first
   palette entry receives full weight.
-- Type-2 composite and type-4 tree meshes also carry palettes with
-  `bones_per_vertex == 1`, but they do not use the validated skinned vertex
-  declaration. Their part/hierarchy semantics remain undecoded, so the parser
+- Type-4 tree meshes also carry palettes with `bones_per_vertex == 1`, but
+  they do not use the validated skinned vertex declaration. The parser
   preserves its conservative first-palette-entry fallback instead of treating
   packed static vertex data as a bone index.
+
+### Type-2 composite index streams and part IDs
+
+Retail type-2 composite meshes use two index conventions. A subset whose
+maximum index is below its declared vertex count is already local. Otherwise,
+the subset can address a shared cumulative vertex stream:
+
+```text
+base = min(subset indices)
+max(subset indices) - base < vertex_count
+vertex byte address += base * stride
+Blender face index = source index - base
+```
+
+The parser rejects a range that does not fit after rebasing. AH60 begins with
+seven shared-stream subsets and later switches to subsets with explicit vertex
+offsets and local indices. Across the surveyed retail type-2 LOD0 resources,
+24 visible subsets require this correction.
+
+The same type-2 subset palette contains **global composite part IDs**, not
+type-1 local skin slots. Part membership is stored per vertex as four repeated
+bytes in an aligned declaration field. The byte offset is declaration
+dependent: verified stride-32/48/64 samples use offsets 28, 32, 36, 40, 44,
+or 48. The implemented inference:
+
+1. scans four-byte-aligned fields;
+2. requires all four bytes to agree and the value to belong to the subset
+   palette for every vertex;
+3. groups identical candidate sequences;
+4. chooses the unique sequence with the greatest distinct part coverage,
+   preferring exact palette coverage.
+
+A one-entry palette assigns that one part without guessing a field offset.
+Triangles must have one part ID across all three vertices; crossing triangles
+are rejected rather than duplicated or silently assigned. Per-part output
+compacts positions, every retained UV channel, influences, and face indices.
+
+Ordered NUL-terminated strings in the mesh-set resource provide global names:
+
+```text
+lod0|MainFuselage
+lod0|Door_Left
+...
+```
+
+For records with decoded placement data, the bytes immediately after the name
+terminator are 18 platform-endian `float32` values:
+
+```text
+bounds_min[3]
+bounds_max[3]
+linear_transform[3][3]  # row-major
+translation[3]
+```
+
+PC records are little-endian; Xbox 360 and PS3 records are big-endian. Part ID
+`n` maps to the `n`th `lod0|` record. Geometry remains in its authored local
+coordinates and the 3x3 plus translation is applied as the Blender object
+matrix. The matrix uses the same Frostbite-to-Blender basis conversion as map
+placements, `(x, y, z) -> (x, -z, y)`; only the translation is multiplied by
+the configured unit scale.
+
+A survey of 156 retail type-2 LOD0 meshes decoded all 542 visible
+palette-bearing subsets without an ambiguous field, and no triangle among
+552,570 surveyed triangles crossed a part boundary. Ordered names covered 151
+resources. Five resources without recognizable names use stable `Part_###`
+fallbacks: MP09 Dam, static A10, static F18, static Su39, and the GMG QLZ
+ground mount.
+
+The decoded matrix is the mesh-set bind placement, not evidence of a runtime
+pivot or hierarchy. Composite runtime pivots, parent links, state switching,
+and animation remain unknown and are not inferred.
 
 Normals, tangents, colors, morph data, arbitrary UV declarations outside the
 verified static and PC skinned layouts, and every vertex declaration variant
@@ -151,10 +239,11 @@ version-specific. They nevertheless confirm useful format rules:
   meshes.
 
 BF3 v4.1 also groups object-type-2 vertices by their four-byte index tuple and
-offers to detach them as vehicle parts. This is a research lead for composite
-meshes, not an implementation-ready rule: the later script does not recover
-part names, hierarchy, transforms, or pivots, and tested BC2 type-2 data does
-not share the validated type-1 layout.
+offers to detach them as vehicle parts. That remains non-authoritative for
+BC2, but the independently verified retail rules above now corroborate its
+high-level distinction between type-1 skinning and type-2 part membership.
+The later script still does not provide BC2 offsets, global index rebasing,
+ordered part names, hierarchy, bind-transform records, or pivots.
 
 The scripts build simple `_d`, `_s`, and `_n` standard materials and do not
 decode Frostbite 1 shader-database layer arithmetic. Their scale of 39 and the
@@ -191,14 +280,15 @@ Shared-stride selection yields coherent bounds for both complete resources.
 
 ## Mesh-set resources
 
-`RigidMeshSet`, `SkinnedMeshSet`, `CompositeMeshSet`, and `TreeMeshSet` are
-currently resolved by asset naming rather than fully parsed. The catalog looks
-for `<base>_lod%_data.res`, prefers LOD0, and prefers a resource in the same
-FbRB.
+`RigidMeshSet`, `SkinnedMeshSet`, `CompositeMeshSet`, and `TreeMeshSet` locate
+geometry by asset naming. The catalog looks for `<base>_lod%_data.res`,
+prefers LOD0, and prefers a resource in the same FbRB. Composite payloads are also scanned for ordered `lod0|PartName` records and
+their 18-float bounds/bind-transform payloads used by the type-2 split path.
 
-For robust multi-LOD or export support, decode the mesh-set resource itself and
-retain its explicit references, bounds, part hierarchy, skeleton linkage, and
-material assignments.
+For robust multi-LOD or export support, continue decoding the mesh-set resource
+and retain its explicit references, runtime pivots, skeleton linkage, and
+material assignments. LOD0 part membership, names, bounds, and bind transforms
+are retained, but they are not a decoded runtime hierarchy.
 
 The PC native character path currently obtains the skeleton reference from the
 matching DBX `Render.SkinnedMeshAsset` descriptor rather than decoding the

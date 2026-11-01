@@ -118,6 +118,30 @@ missing-texture, texture-conversion, or unresolved-subset diagnostics.
   file-backed DDS images, four UV layers from verified offsets 40/16/44/48,
   corrected byte-44 routing for the collapsed LegStandard/MOLLE/pouches
   coordinate, and connected Base Color plus source-normal graphs where bound.
+- PC US Assault assembly: 13 body, three head, and seven headgear visible
+  subsets; all 23 materials resolved; 56 unique file-backed DDS images; every
+  module bound to the same 147-bone `ske01` armature.
+- PC AH60 assembly: 36 ordered source-part collections, 66 surface fragments,
+  27,388 total triangles, 11 resolved source materials, and 14 file-backed
+  images. Thirty-four healthy/static collections are visible by default; only
+  two blurred high-RPM rotor collections are hidden at collection level. The
+  four single-`Wreck` collections remain visible.
+  All 11 geometry fragments containing `Wreck` twice in their source name are
+  hidden even when part splitting places them in a healthy collection;
+  fragments with one occurrence remain visible inside single-`Wreck`
+  collections. Decoded
+  mesh-set translations place the doors, rotors, wheels, wings, and other
+  local parts in the retail bind pose. The reported WingLeft
+  `lod0_WreckPartTail_Main` piece retains 948 vertices and 722 triangles from
+  LOD0; the authored LOD1 and LOD2 equivalents contain 434/251 and 56/34
+  vertices/triangles. Its stride-48 composite declaration retains offsets
+  24/28/32/40 as `UVMap`/`UV1`/`UV2`/`UV3`. Main color uses the nondegenerate
+  byte-28 channel, with symbols, dirt, detail, and the 15x generic mask routed
+  through their shader-verified channels. Glass uses transmissive
+  Fresnel/dirt-mask opacity, Interior and CockpitInterior use their verified
+  dark diffuse scales, and Minigun Main uses `Symbols_Us` for color while
+  `MiniGun_C` green controls specular. Save/reopen retains every transform,
+  visibility state, and material graph and introduces no fabricated armature.
 - PC `ske01`: local transforms composed against every transposed stored
   inverse-world matrix with a maximum identity residual below `7.5e-7`.
 - PC rifle third-person `StandIdle` and `RunForward`: 39 named transform
@@ -147,8 +171,21 @@ Current tests cover:
 - one-influence palette-index handling for rigid skinned subsets;
 - composite/static palettes remain isolated from the skinned index and UV
   declarations;
+- type-2 shared/global subset indices, aligned repeated part-ID inference,
+  ordered LOD0 part-record extraction, little-/big-endian bounds and bind
+  transforms, and compact lossless per-part splitting;
+- character `Meshes3p` and vehicle composite-mesh DBX assembly resolution,
+  including health-state and low-/high-RPM model classification;
+- object-level default hiding for geometry with at least two `Wreck`
+  occurrences in one name while preserving single-`Wreck` geometry and
+  collections;
+- the declared four-channel little-endian stride-48 composite layout when the
+  verified part-ID field is at byte 36;
+- verified AH60 Main/glass/interior/cockpit/minigun texture roles, UV channels,
+  shader constants, and Blender graph construction;
 - the declared four-channel little-endian stride-64 skinned coordinate layout
-  and nondegenerate routing for LegStandard, MOLLE, and pouches;
+  including constant declared channels, plus nondegenerate routing for
+  LegStandard, MOLLE, and pouches;
 - bounded PC Granny wrapper, section, relocation, skeleton, and constant-curve
   fixtures;
 - PC L8-to-DDS conversion;
@@ -186,7 +223,8 @@ degenerate-face cleanup), linked map instances, placement matrices, map
 texture roles, layered OcRGB/detail construction, and the verified DXT5nm node
 graph. It also checks character texture-role selection, primary red/green
 normal decode, alpha/green cloth-detail decode, and the combined character
-normal graph.
+normal graph. Composite smoke coverage verifies `Components/Parts` collection
+creation, source part names/metadata, and compact triangle geometry.
 
 An optional real-media integration runner performs a complete import, saves the
 blend, reopens it, and checks placement count, linked mesh count, exact child
@@ -201,14 +239,29 @@ blender --background --factory-startup `
   --output <OUTPUT_BLEND> --level MP_001
 ```
 
-The PC character integration runner imports and binds `US_01_Body`, resolves
-all 13 visible default materials, loads native DDS images, adds `StandIdle` and
-`RunForward`, validates sampled pose matrices, and verifies the saved/reopened
-scene:
+The PC character integration runner imports and binds the full US Assault
+body/head/headgear assembly, resolves all 23 visible materials, loads native
+DDS images, adds `StandIdle` and `RunForward`, validates sampled pose matrices,
+and verifies the saved/reopened scene:
 
 ```powershell
 blender --background --factory-startup `
   --python tests\blender_character_integration.py -- `
+  --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
+  --output <OUTPUT_BLEND>
+```
+
+The PC vehicle runner imports AH60, checks its 36 named source parts, 27,388
+triangles, 34-visible/2-hidden part state, 11 hidden double-`Wreck` fragments,
+visible single-`Wreck` collections and healthy fragments, known part
+translations, verified
+WingLeft LOD0 topology and four-channel UV declaration,
+Main/glass/interior/minigun graphs, materials and file-backed images, then
+validates save/reopen persistence:
+
+```powershell
+blender --background --factory-startup `
+  --python tests\blender_vehicle_integration.py -- `
   --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
   --output <OUTPUT_BLEND>
 ```
@@ -224,8 +277,12 @@ skinning to object type 1 also supports the importer's type-1 gate.
 These findings are secondary evidence only. The scripts provide no BC2 retail
 fixture, binary round trip, or coverage for discs, FbRB, Xbox texture storage,
 terrain, DBX level graphs, shader arithmetic, Granny animation, or export.
-Their type-2 vehicle-part detachment remains an unimplemented research lead.
-The full source inventory, hashes, and applicability matrix are in the
+Their type-2 vehicle-part detachment supplied a research lead only; subsequent
+BC2 retail correlation independently verified global part IDs, shared index
+rebasing, and ordered LOD0 names. The MaxScripts did not validate BC2 offsets,
+bind transforms, pivots, or hierarchy. Separate BC2 mesh-set research has now
+decoded the 18-float LOD0 bounds/bind-transform record. The full source
+inventory, hashes, and applicability matrix are in the
 [external MaxScript audit](maxscript-reference-audit.md).
 
 ## Known heuristics
@@ -240,8 +297,10 @@ These behaviors are useful but need broader format research:
 - Skinned vertex influence offsets.
 - PC Granny field locations and curve codecs outside the validated v7 samples.
 - Mesh-set-to-MeshData resolution by path.
-- Type-2 composite part membership and hierarchy; later-engine scripts suggest
-  grouping by an index tuple, but BC2 fields and pivots are unverified.
+- Composite runtime pivots, parent hierarchy, automatic state switching, and
+  animation. Type-2 membership, ordered LOD0 names, bounds, and mesh-set bind
+  transforms are verified; wreck/damaged name classification remains a
+  fallback where DBX component state data is incomplete.
 - Terrain sample-endian selection by smoothness.
 - Small FbRB declared-payload discrepancy tolerance.
 - Binary DBX 32-bit integer-versus-float rendering.

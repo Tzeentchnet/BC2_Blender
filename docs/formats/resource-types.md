@@ -14,13 +14,15 @@ the browser is not necessarily decoded.
 | `MeshData` | Mesh | Native geometry, UV preview, and available weight groups |
 | `RigidMeshSet` | Mesh | Resolves a naming-matched LOD MeshData, preferring LOD0 |
 | `SkinnedMeshSet` | Mesh | PC: resolves MeshData, four preserved character shader-coordinate channels with nondegenerate material routing, the DBX skeleton/default surface references, source DX11 materials, and a bound armature; console: geometry-only |
-| `CompositeMeshSet` | Mesh | Resolves MeshData; no part hierarchy decoding |
+| `CompositeMeshSet` | Mesh | Resolves LOD0 MeshData and materials; rebases verified shared index streams and separates type-2 geometry into ordered source-named part collections |
 | `TreeMeshSet` | Mesh | Resolves MeshData; no tree-specific semantics |
 | `WaterMesh` | Mesh | Native positions and triangle geometry |
 | `ITexture` | Texture | PC resource-to-DDS conversion |
 | `XenonTexture` | Texture | Xbox untile, byte correction, and DDS conversion |
 | `TerrainHeightfield` | Terrain | Downsampled native preview mesh |
-| non-resource path ending `.dbx` | Level / DBX | Binary DBX converted to an XML Text datablock |
+| soldier entity `.dbx` with `Meshes3p` | Level / DBX | PC: imports every linked LOD0 body/head/headgear module on one shared armature with source materials and modular collections |
+| vehicle entity `.dbx` with a composite `Mesh` | Level / DBX | Imports the linked LOD0 composite into named source-part collections with source materials |
+| other non-resource path ending `.dbx` | Level / DBX | Binary DBX converted to an XML Text datablock |
 | PC level DBX graph | Level / DBX | Complete static map assembly with direct/grouped placements, terrain, water, and DX11-bound materials |
 | `Dx11ShaderDatabase` | Other | Material keys and indexed texture bindings parsed during PC complete-map and skinned-character import |
 | `GrannyModel` | Animation | PC little-endian skeleton converted to a native armature |
@@ -31,11 +33,18 @@ texture variants were not part of this validation effort. It must not be
 advertised as verified support.
 
 Later BF3/BF4 MaxScripts use object type 1 for skinned meshes and add a
-separate object-type-2 vehicle-part path. This corroborates keeping BC2
-type-1 skin declarations isolated, but it does not prove that later numeric
-type semantics or part fields are identical in Frostbite 1. The scripts
-provide no type-4 tree semantics or evidence for other catalog types. See the
+separate object-type-2 vehicle-part path. BC2 retail investigation now
+independently verifies this high-level separation, but not the later scripts'
+numeric offsets or layouts. BC2 part IDs, shared index rebasing, and ordered
+LOD names are documented in [Meshes](meshes.md). The scripts provide no
+type-4 tree semantics or evidence for other catalog types. See the
 [external MaxScript audit](../maxscript-reference-audit.md).
+
+High-level DBX assembly dispatch is intentionally deterministic. Selecting the
+soldier or vehicle entity imports its full linked assembly; selecting a
+`SkinnedMeshSet` or `CompositeMeshSet` imports only that component. The
+importer does not reverse-search component references because one body mesh
+can participate in both normal and upgraded soldier entities.
 
 ## Cataloged but extracted raw
 

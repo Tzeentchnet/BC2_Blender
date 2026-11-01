@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 import bpy
@@ -28,6 +29,13 @@ from bpy.types import (
 from bpy_extras.io_utils import ImportHelper
 from mathutils import Matrix, Quaternion
 
+from .core.assembly import (
+    AssemblyComponent,
+    AssemblyPart,
+    ModularAssembly,
+    modular_assembly,
+    vehicle_part_state,
+)
 from .core.dbx import dbx_to_xml, parse_dbx
 from .core.errors import BC2Error
 from .core.granny import (
@@ -46,9 +54,21 @@ from .core.level import (
     index_pc_character_shader_archive,
     index_pc_level_archives,
 )
-from .core.mesh import MeshAsset, parse_meshdata, parse_watermesh
+from .core.mesh import (
+    CompositePart,
+    MeshAsset,
+    MeshSubset,
+    parse_composite_lod_parts,
+    parse_meshdata,
+    parse_watermesh,
+    split_mesh_subset_by_parts,
+)
 from .core.repository import AssetRepository
-from .core.shaderdb import ShaderDatabase, parse_shader_database
+from .core.shaderdb import (
+    ShaderDatabase,
+    ShaderTextureBinding,
+    parse_shader_database,
+)
 from .core.terrain import (
     TerrainMaterialMap,
     TerrainMesh,
@@ -70,6 +90,42 @@ ADDON_ID = (
     else __package__
 )
 RESULTS_PER_PAGE = 150
+_PC_MODULAR_SHADER_FALLBACKS = (
+    (
+        "Dist/win32/levels/mp_004/level-00.fbrb",
+        "Levels/mp_004/shaders/Dx11_Single.res",
+    ),
+)
+
+
+@dataclass
+class _SourceMaterialContext:
+    import_textures: bool
+    material_archives: tuple[str, ...]
+    shader_database: ShaderDatabase | None
+    shader_database_path: str | None
+    material_cache: dict[str, object]
+    image_cache: dict[str, tuple[object, object]]
+    diagnostics: list[dict[str, str]]
+    loaded_shader_paths: set[str]
+
+
+@dataclass(frozen=True)
+class _ImportedAssemblyComponent:
+    definition: AssemblyComponent
+    collection: object
+    objects: tuple[object, ...]
+    mesh_type: int
+
+
+@dataclass(frozen=True)
+class _ImportedAssembly:
+    definition: ModularAssembly
+    root_collection: object
+    armature: object | None
+    components: tuple[_ImportedAssemblyComponent, ...]
+    diagnostics_text: object
+
 
 CATEGORIES = (
     ("ALL", "All indexed", "All indexed assets", "ASSET_MANAGER", 0),
@@ -316,6 +372,12 @@ def _new_collection(context, name: str):
     return collection
 
 
+def _new_child_collection(parent, name: str):
+    collection = bpy.data.collections.new(name)
+    parent.children.link(collection)
+    return collection
+
+
 def _mesh_positions(values, settings: BC2Settings):
     if _np is None:
         return [_mesh_position(value, settings) for value in values]
@@ -487,6 +549,10 @@ def _create_mesh_objects(
     collection=None,
     bone_names=None,
     subset_materials=None,
+    split_parts: bool = False,
+    part_names: tuple[str, ...] = (),
+    composite_parts: tuple[CompositePart, ...] = (),
+    part_states: tuple[AssemblyPart, ...] = (),
 ):
     if (
         subset_materials is not None
@@ -496,8 +562,86 @@ def _create_mesh_objects(
     collection = collection or _new_collection(
         context, Path(asset["path"]).stem
     )
-    created = []
-    for subset_index, subset in enumerate(parsed.subsets):
+    parts_collection = (
+        _new_child_collection(collection, "Parts")
+        if split_parts
+        else None
+    )
+    part_collections = {}
+    part_records = {
+        index: part
+        for index, part in enumerate(composite_parts)
+    }
+    states_by_name = {
+        part.name.casefold(): part
+        for part in part_states
+    }
+    unresolved_part_subsets = 0
+
+    def target_collection(part_index: int):
+        target = part_collections.get(part_index)
+        if target is not None:
+            return target
+        record = part_records.get(part_index)
+        part_name = (
+            record.name
+            if record is not None
+            else (
+                part_names[part_index]
+                if 0 <= part_index < len(part_names)
+                else f"Part_{part_index:03d}"
+            )
+        )
+        part_state = states_by_name.get(part_name.casefold())
+        state = (
+            part_state.state
+            if part_state is not None
+            else vehicle_part_state(part_name)
+        )
+        target = _new_child_collection(
+            parts_collection,
+            f"{part_index:03d}_{part_name}",
+        )
+        target["bc2_part_index"] = part_index
+        target["bc2_part_name"] = part_name
+        target["bc2_part_state"] = state
+        target["bc2_part_default_visible"] = state == "DEFAULT"
+        target["bc2_part_state_source"] = (
+            part_state.source
+            if part_state is not None
+            else "part_name"
+        )
+        target.hide_viewport = state != "DEFAULT"
+        target.hide_render = state != "DEFAULT"
+        if record is not None:
+            if record.bounds is not None:
+                target["bc2_part_bounds"] = json.dumps(
+                    record.bounds,
+                    separators=(",", ":"),
+                )
+            if record.transform is not None:
+                target["bc2_part_transform"] = json.dumps(
+                    record.transform,
+                    separators=(",", ":"),
+                )
+        if part_state is not None:
+            target["bc2_source_component_type"] = (
+                part_state.component_type
+            )
+            if part_state.component_name:
+                target["bc2_source_component_name"] = (
+                    part_state.component_name
+                )
+        part_collections[part_index] = target
+        return target
+
+    def create_object(
+        subset_index: int,
+        subset: MeshSubset,
+        target,
+        material,
+        part_index: int | None = None,
+    ):
         mesh = bpy.data.meshes.new(f"{subset.name}_Mesh")
         positions = _mesh_positions(subset.positions, settings)
         _populate_triangle_mesh(
@@ -529,25 +673,184 @@ def _create_mesh_objects(
             subset.uv_offsets,
             separators=(",", ":"),
         )
+        mesh["bc2_palette"] = json.dumps(
+            subset.palette,
+            separators=(",", ":"),
+        )
+        if subset.part_index_offset is not None:
+            mesh["bc2_part_index_offset"] = subset.part_index_offset
+        mesh.materials.append(material)
+        obj = bpy.data.objects.new(
+            f"{subset_index:02d}_{subset.name}",
+            mesh,
+        )
+        target.objects.link(obj)
+        if not split_parts:
+            _create_vertex_groups(obj, subset.influences, bone_names)
+        obj["bc2_asset_path"] = asset["path"]
+        obj["bc2_archive_path"] = asset["archive_path"]
+        obj["bc2_platform"] = asset["platform"]
+        obj["bc2_source_subset"] = subset.name
+        if part_index is not None:
+            obj["bc2_part_index"] = part_index
+            obj["bc2_part_name"] = target.get(
+                "bc2_part_name",
+                f"Part_{part_index:03d}",
+            )
+            obj["bc2_part_state"] = target.get(
+                "bc2_part_state",
+                "DEFAULT",
+            )
+            obj["bc2_part_default_visible"] = target.get(
+                "bc2_part_default_visible",
+                True,
+            )
+            for property_name in (
+                "bc2_part_bounds",
+                "bc2_part_transform",
+                "bc2_part_state_source",
+                "bc2_source_component_type",
+                "bc2_source_component_name",
+            ):
+                if property_name in target:
+                    obj[property_name] = target[property_name]
+        wreck_name_count = max(
+            subset.name.casefold().count("wreck"),
+            obj.name.casefold().count("wreck"),
+            mesh.name.casefold().count("wreck"),
+        )
+        wreck_named = wreck_name_count >= 2
+        part_default_visible = obj.get(
+            "bc2_part_default_visible",
+            True,
+        )
+        obj["bc2_geometry_default_visible"] = (
+            part_default_visible and not wreck_named
+        )
+        obj["bc2_geometry_wreck_name_count"] = wreck_name_count
+        if wreck_named:
+            obj.hide_viewport = True
+            obj.hide_render = True
+            obj.hide_set(True)
+            obj["bc2_geometry_state"] = "DESTROYED"
+            obj["bc2_geometry_visibility_source"] = (
+                "name_contains_wreck_twice"
+            )
+        if part_index is not None:
+            record = part_records.get(part_index)
+            if record is not None and record.transform is not None:
+                obj.matrix_basis = _composite_part_matrix(
+                    record,
+                    settings,
+                )
+        return obj
+
+    created = []
+    for subset_index, subset in enumerate(parsed.subsets):
         if subset_materials is None:
             material = bpy.data.materials.new(subset.name)
             material.diffuse_color = (0.8, 0.8, 0.8, 1.0)
         else:
             material = subset_materials[subset_index]
-        mesh.materials.append(material)
-        obj = bpy.data.objects.new(
-            f"{subset_index:02d}_{subset.name}", mesh
+        pieces = (
+            split_mesh_subset_by_parts(subset)
+            if split_parts
+            else ()
         )
-        collection.objects.link(obj)
-        _create_vertex_groups(obj, subset.influences, bone_names)
-        obj["bc2_asset_path"] = asset["path"]
-        obj["bc2_archive_path"] = asset["archive_path"]
-        obj["bc2_platform"] = asset["platform"]
-        created.append(obj)
+        if pieces:
+            for part_index, piece in pieces:
+                created.append(
+                    create_object(
+                        subset_index,
+                        piece,
+                        target_collection(part_index),
+                        material,
+                        part_index,
+                    )
+                )
+        else:
+            if split_parts:
+                unresolved_part_subsets += 1
+                target = part_collections.get(-1)
+                if target is None:
+                    target = _new_child_collection(
+                        parts_collection,
+                        "Unassigned",
+                    )
+                    target["bc2_part_index"] = -1
+                    target["bc2_part_name"] = "Unassigned"
+                    part_collections[-1] = target
+            else:
+                target = collection
+            created.append(
+                create_object(
+                    subset_index,
+                    subset,
+                    target,
+                    material,
+                )
+            )
+    if split_parts:
+        collection["bc2_part_collection_count"] = len(
+            [
+                part_index
+                for part_index in part_collections
+                if part_index >= 0
+            ]
+        )
+        collection["bc2_unresolved_part_subset_count"] = (
+            unresolved_part_subsets
+        )
+        state_counts = {}
+        for part_index, part_collection in part_collections.items():
+            if part_index < 0:
+                continue
+            state = part_collection.get("bc2_part_state", "DEFAULT")
+            state_counts[state] = state_counts.get(state, 0) + 1
+        collection["bc2_part_state_counts"] = json.dumps(
+            state_counts,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        collection["bc2_default_visible_part_count"] = state_counts.get(
+            "DEFAULT",
+            0,
+        )
+        collection["bc2_hidden_part_count"] = sum(
+            count
+            for state, count in state_counts.items()
+            if state != "DEFAULT"
+        )
     if created:
-        bpy.context.view_layer.objects.active = created[0]
-        created[0].select_set(True)
+        active = next(
+            (
+                obj
+                for obj in created
+                if obj.get("bc2_geometry_default_visible", True)
+            ),
+            created[0],
+        )
+        bpy.context.view_layer.objects.active = active
+        active.select_set(True)
     return created
+
+
+def _composite_part_matrix(
+    part: CompositePart,
+    settings: BC2Settings,
+) -> Matrix:
+    values = part.transform
+    if values is None:
+        return Matrix.Identity(4)
+    source = Matrix(
+        (
+            (values[0], values[1], values[2], values[9]),
+            (values[3], values[4], values[5], values[10]),
+            (values[6], values[7], values[8], values[11]),
+            (0.0, 0.0, 0.0, 1.0),
+        )
+    )
+    return _convert_source_matrix(source, settings)
 
 
 def _source_transform_matrix(
@@ -569,7 +872,7 @@ def _source_transform_matrix(
     return matrix
 
 
-def _convert_skeleton_matrix(matrix: Matrix, settings: BC2Settings) -> Matrix:
+def _convert_source_matrix(matrix: Matrix, settings: BC2Settings) -> Matrix:
     if settings.axis_conversion:
         basis = Matrix(
             (
@@ -584,6 +887,10 @@ def _convert_skeleton_matrix(matrix: Matrix, settings: BC2Settings) -> Matrix:
         result = matrix.copy()
     result.translation *= settings.unit_scale
     return result
+
+
+def _convert_skeleton_matrix(matrix: Matrix, settings: BC2Settings) -> Matrix:
+    return _convert_source_matrix(matrix, settings)
 
 
 def _skeleton_local_matrices(
@@ -796,7 +1103,7 @@ def _create_character(
         subset_materials,
         material_diagnostics,
         material_summary,
-    ) = _resolve_character_subset_materials(
+    ) = _resolve_mesh_subset_materials(
         repository,
         mesh_set_asset,
         parsed,
@@ -806,22 +1113,35 @@ def _create_character(
         ),
         settings,
     )
-    collection = _new_collection(
+    root_collection = _new_collection(
         context, Path(mesh_set_asset["path"]).stem
     )
+    root_collection["bc2_assembly_kind"] = "CHARACTER_COMPONENT"
+    root_collection["bc2_asset_path"] = mesh_set_asset["path"]
+    rig_collection = _new_child_collection(root_collection, "Rig")
+    components_collection = _new_child_collection(
+        root_collection,
+        "Components",
+    )
+    component_collection = _new_child_collection(
+        components_collection,
+        f"00_{Path(mesh_set_asset['path']).stem}",
+    )
+    component_collection["bc2_component_path"] = mesh_set_asset["path"]
+    component_collection["bc2_component_role"] = "CHARACTER"
     armature_obj = _create_armature_object(
         context,
         skeleton,
         skeleton_asset,
         settings,
-        collection=collection,
+        collection=rig_collection,
     )
     objects = _create_mesh_objects(
         context,
         parsed,
         mesh_asset,
         settings,
-        collection=collection,
+        collection=component_collection,
         bone_names=tuple(bone.name for bone in skeleton.bones),
         subset_materials=subset_materials,
     )
@@ -847,6 +1167,356 @@ def _create_character(
     context.view_layer.objects.active = armature_obj
     armature_obj.select_set(True)
     return armature_obj, objects
+
+
+def _mesh_component_assets(
+    repository,
+    component: AssemblyComponent,
+    preferred_archives: tuple[str, ...],
+    settings: BC2Settings,
+):
+    mesh_set_asset = repository.catalog.find_asset(
+        component.mesh_set_path,
+        preferred_archives,
+    )
+    if mesh_set_asset is None:
+        raise BC2Error(
+            f"Linked mesh set is not indexed: {component.mesh_set_path}"
+        )
+    _, mesh_set_raw = repository.read_asset(
+        int(mesh_set_asset["id"]),
+        max_size=256 << 20,
+    )
+    mesh_asset, mesh_raw = repository.read_asset(
+        int(mesh_set_asset["id"]),
+        max_size=1 << 30,
+        resolve_mesh=True,
+    )
+    parsed = parse_meshdata(
+        mesh_raw,
+        mesh_asset["platform"],
+        include_z_only=settings.include_z_only,
+    )
+    return mesh_set_asset, mesh_set_raw, mesh_asset, parsed
+
+
+def _create_mesh_set_import(
+    context,
+    repository,
+    mesh_set_asset,
+    parsed: MeshAsset,
+    mesh_asset,
+    settings: BC2Settings,
+):
+    preferred_archives = tuple(
+        dict.fromkeys(
+            (
+                str(mesh_set_asset["archive_path"]),
+                str(mesh_asset["archive_path"]),
+            )
+        )
+    )
+    material_context = _source_material_context(
+        repository,
+        preferred_archives,
+        settings,
+    )
+    subset_materials, _, material_summary = (
+        _resolve_mesh_subset_materials(
+            repository,
+            mesh_set_asset,
+            parsed,
+            preferred_archives,
+            settings,
+            material_context=material_context,
+        )
+    )
+    root_collection = _new_collection(
+        context,
+        Path(mesh_set_asset["path"]).stem,
+    )
+    root_collection["bc2_assembly_kind"] = "MESH_COMPONENT"
+    root_collection["bc2_asset_path"] = mesh_set_asset["path"]
+    components_collection = _new_child_collection(
+        root_collection,
+        "Components",
+    )
+    component_collection = _new_child_collection(
+        components_collection,
+        f"00_{Path(mesh_set_asset['path']).stem}",
+    )
+    component_collection["bc2_component_path"] = mesh_set_asset["path"]
+    component_collection["bc2_component_role"] = (
+        "VEHICLE" if parsed.mesh_type == 2 else "MESH"
+    )
+    split_parts = parsed.mesh_type == 2
+    composite_parts = ()
+    if split_parts:
+        _, mesh_set_raw = repository.read_asset(
+            int(mesh_set_asset["id"]),
+            max_size=256 << 20,
+        )
+        composite_parts = parse_composite_lod_parts(
+            mesh_set_raw,
+            platform=str(mesh_set_asset["platform"]),
+        )
+        if not composite_parts:
+            material_context.diagnostics.append(
+                {
+                    "code": "composite_part_names_unavailable",
+                    "reference": str(mesh_set_asset["path"]),
+                    "message": (
+                        "Composite LOD0 parts use numbered fallback "
+                        "collections because the mesh-set names were not found"
+                    ),
+                }
+            )
+    objects = _create_mesh_objects(
+        context,
+        parsed,
+        mesh_asset,
+        settings,
+        collection=component_collection,
+        subset_materials=subset_materials,
+        split_parts=split_parts,
+        composite_parts=composite_parts,
+    )
+    diagnostics_text = bpy.data.texts.new(
+        f"BC2_{Path(mesh_set_asset['path']).stem}_"
+        "Material_Diagnostics.json"
+    )
+    diagnostics_text.write(
+        json.dumps(
+            {
+                "summary": material_summary,
+                "issues": material_context.diagnostics,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    root_collection["bc2_material_diagnostics_text"] = (
+        diagnostics_text.name
+    )
+    root_collection["bc2_resolved_material_count"] = material_summary[
+        "resolved_materials"
+    ]
+    return root_collection, objects
+
+
+def _create_modular_assembly(
+    context,
+    repository,
+    assembly_asset,
+    assembly: ModularAssembly,
+    settings: BC2Settings,
+) -> _ImportedAssembly:
+    if (
+        assembly.kind == "CHARACTER"
+        and str(assembly_asset["platform"]) != "pc"
+    ):
+        raise BC2Error(
+            "Native modular character import currently supports PC retail "
+            "assets only"
+        )
+
+    preferred = (str(assembly_asset["archive_path"]),)
+    loaded = []
+    for component in assembly.components:
+        loaded.append(
+            (
+                component,
+                *_mesh_component_assets(
+                    repository,
+                    component,
+                    preferred,
+                    settings,
+                ),
+            )
+        )
+    preferred_archives = tuple(
+        dict.fromkeys(
+            (
+                str(assembly_asset["archive_path"]),
+                *(
+                    str(mesh_set_asset["archive_path"])
+                    for _, mesh_set_asset, _, _, _ in loaded
+                ),
+                *(
+                    str(mesh_asset["archive_path"])
+                    for _, _, _, mesh_asset, _ in loaded
+                ),
+            )
+        )
+    )
+    material_context = _source_material_context(
+        repository,
+        preferred_archives,
+        settings,
+    )
+
+    root_collection = _new_collection(
+        context,
+        f"BC2_{assembly.name}",
+    )
+    root_collection["bc2_assembly_kind"] = assembly.kind
+    root_collection["bc2_assembly_path"] = assembly.source_path
+    root_collection["bc2_component_count"] = len(assembly.components)
+    components_collection = _new_child_collection(
+        root_collection,
+        "Components",
+    )
+
+    armature_obj = None
+    skeleton = None
+    if assembly.kind == "CHARACTER":
+        skeleton_paths = tuple(
+            _skeleton_path_for_resource(repository, mesh_set_asset)
+            for _, mesh_set_asset, _, _, _ in loaded
+        )
+        if len({path.casefold() for path in skeleton_paths}) != 1:
+            raise BC2Error(
+                "Linked character components do not use the same skeleton"
+            )
+        skeleton_asset, skeleton = _read_referenced_skeleton(
+            repository,
+            loaded[0][1],
+        )
+        rig_collection = _new_child_collection(root_collection, "Rig")
+        armature_obj = _create_armature_object(
+            context,
+            skeleton,
+            skeleton_asset,
+            settings,
+            collection=rig_collection,
+        )
+        armature_obj["bc2_assembly_path"] = assembly.source_path
+
+    imported_components = []
+    component_summaries = []
+    resolved_material_count = 0
+    for component_index, (
+        component,
+        mesh_set_asset,
+        mesh_set_raw,
+        mesh_asset,
+        parsed,
+    ) in enumerate(loaded):
+        component_collection = _new_child_collection(
+            components_collection,
+            f"{component_index:02d}_{component.name}",
+        )
+        component_collection["bc2_component_index"] = component_index
+        component_collection["bc2_component_path"] = component.mesh_set_path
+        component_collection["bc2_component_role"] = component.role
+        if component.random_group is not None:
+            component_collection["bc2_random_group"] = component.random_group
+
+        subset_materials, _, summary = _resolve_mesh_subset_materials(
+            repository,
+            mesh_set_asset,
+            parsed,
+            preferred_archives,
+            settings,
+            shader_set_override=component.shader_set_reference,
+            material_context=material_context,
+        )
+        split_parts = assembly.kind == "VEHICLE" and parsed.mesh_type == 2
+        composite_parts = (
+            parse_composite_lod_parts(
+                mesh_set_raw,
+                platform=str(mesh_set_asset["platform"]),
+            )
+            if split_parts
+            else ()
+        )
+        if split_parts and not composite_parts:
+            material_context.diagnostics.append(
+                {
+                    "code": "composite_part_names_unavailable",
+                    "reference": component.mesh_set_path,
+                    "message": (
+                        "Composite LOD0 parts use numbered fallback "
+                        "collections because mesh-set names were not found"
+                    ),
+                }
+            )
+        objects = _create_mesh_objects(
+            context,
+            parsed,
+            mesh_asset,
+            settings,
+            collection=component_collection,
+            bone_names=(
+                tuple(bone.name for bone in skeleton.bones)
+                if skeleton is not None
+                else None
+            ),
+            subset_materials=subset_materials,
+            split_parts=split_parts,
+            composite_parts=composite_parts,
+            part_states=assembly.parts,
+        )
+        for obj in objects:
+            obj["bc2_assembly_path"] = assembly.source_path
+            obj["bc2_component_path"] = component.mesh_set_path
+            obj["bc2_component_role"] = component.role
+        if armature_obj is not None:
+            _bind_meshes_to_armature(objects, armature_obj)
+        resolved_material_count += summary["resolved_materials"]
+        component_summaries.append(
+            {
+                "name": component.name,
+                "role": component.role,
+                "path": component.mesh_set_path,
+                **summary,
+            }
+        )
+        imported_components.append(
+            _ImportedAssemblyComponent(
+                definition=component,
+                collection=component_collection,
+                objects=tuple(objects),
+                mesh_type=parsed.mesh_type,
+            )
+        )
+
+    diagnostics_text = bpy.data.texts.new(
+        f"BC2_{assembly.name}_Assembly_Diagnostics.json"
+    )
+    diagnostics_text.write(
+        json.dumps(
+            {
+                "assembly": {
+                    "name": assembly.name,
+                    "kind": assembly.kind,
+                    "path": assembly.source_path,
+                },
+                "components": component_summaries,
+                "issues": material_context.diagnostics,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    root_collection["bc2_material_diagnostics_text"] = diagnostics_text.name
+    root_collection["bc2_resolved_material_count"] = (
+        resolved_material_count
+    )
+    if armature_obj is not None:
+        armature_obj["bc2_material_diagnostics_text"] = diagnostics_text.name
+        armature_obj["bc2_resolved_material_count"] = (
+            resolved_material_count
+        )
+        context.view_layer.objects.active = armature_obj
+        armature_obj.select_set(True)
+    return _ImportedAssembly(
+        definition=assembly,
+        root_collection=root_collection,
+        armature=armature_obj,
+        components=tuple(imported_components),
+        diagnostics_text=diagnostics_text,
+    )
 
 
 def _new_action_channelbag(action, armature_obj):
@@ -1464,6 +2134,79 @@ def _binding_roles(bindings):
     return tuple(roles)
 
 
+def _verified_surface_family(surface: SurfaceShader) -> str | None:
+    partition = surface.reference.rsplit("/", 1)[0].casefold()
+    return {
+        "objects/vehicles/air/ah60/shaders/main": "AH60_MAIN",
+        "objects/vehicles/air/ah60/shaders/glass": "AH60_GLASS",
+        "objects/vehicles/air/ah60/shaders/interior": "AH60_INTERIOR",
+        "objects/vehicles/air/ah60/shaders/cockpitinterior": (
+            "AH60_COCKPIT_INTERIOR"
+        ),
+        "objects/weapons/stationary/minigun/shaders/main": "MINIGUN_MAIN",
+    }.get(partition)
+
+
+def _surface_binding_roles(surface: SurfaceShader, bindings):
+    roles = list(_binding_roles(bindings))
+    family = _verified_surface_family(surface)
+    if family == "AH60_MAIN":
+        verified_roles = {
+            1: "COLOR",
+            2: "COLOR",
+            3: "MASK",
+            4: "DETAIL",
+            5: "MASK",
+        }
+        for index, binding in enumerate(bindings):
+            roles[index] = verified_roles.get(binding.index, roles[index])
+    elif family == "MINIGUN_MAIN":
+        for index, binding in enumerate(bindings):
+            if binding.index == 2:
+                roles[index] = "COLOR"
+            elif binding.index == 3:
+                roles[index] = "MASK"
+            elif binding.index == 4:
+                roles[index] = "SPECULAR"
+    return tuple(roles)
+
+
+def _surface_binding_uv_map(
+    surface: SurfaceShader,
+    binding: ShaderTextureBinding,
+    role: str,
+) -> str:
+    family = _verified_surface_family(surface)
+    if family == "AH60_MAIN":
+        verified_uv_maps = {
+            1: "UV1",
+            2: "UV2",
+            3: "UV3",
+            4: "UVMap",
+            5: "UV1",
+        }
+        if binding.index in verified_uv_maps:
+            return verified_uv_maps[binding.index]
+    if family == "MINIGUN_MAIN":
+        if binding.index == 2:
+            return "UV1"
+        if binding.index in {3, 4}:
+            return "UVMap"
+    return _binding_uv_map(binding.path, role)
+
+
+def _surface_binding_uv_scale(
+    surface: SurfaceShader,
+    binding: ShaderTextureBinding,
+) -> tuple[float, float]:
+    family = _verified_surface_family(surface)
+    if family == "AH60_MAIN" and binding.index == 5:
+        return (15.0, 15.0)
+    if family == "MINIGUN_MAIN" and binding.index == 3:
+        return (13.0, 13.0)
+    return (1.0, 1.0)
+
+
 _CHARACTER_NON_COLOR_ROLES = {
     "NORMAL",
     "DETAIL_NORMAL",
@@ -2062,6 +2805,297 @@ def _texture_asset(repository, path: str, preferred_archives):
     return None
 
 
+def _binding_texture_node(texture_nodes, binding_index: int):
+    return next(
+        (
+            node
+            for binding, _, node in texture_nodes
+            if binding.index == binding_index
+        ),
+        None,
+    )
+
+
+def _configure_verified_surface_material(
+    material,
+    surface: SurfaceShader,
+    nodes,
+    links,
+    shader,
+    texture_nodes,
+) -> bool:
+    family = _verified_surface_family(surface)
+    if family == "AH60_MAIN":
+        primary = _binding_texture_node(texture_nodes, 1)
+        if primary is None:
+            return False
+        color_output = primary.outputs["Color"]
+
+        symbols = _binding_texture_node(texture_nodes, 2)
+        if symbols is not None:
+            symbols_mix = nodes.new("ShaderNodeMixRGB")
+            symbols_mix.name = "BC2 AH60 main symbols"
+            symbols_mix.label = "Main color to Symbols_Us by alpha"
+            symbols_mix.blend_type = "MIX"
+            symbols_mix.location = (-20, 180)
+            links.new(symbols.outputs["Alpha"], symbols_mix.inputs["Fac"])
+            links.new(color_output, symbols_mix.inputs["Color1"])
+            links.new(symbols.outputs["Color"], symbols_mix.inputs["Color2"])
+            color_output = symbols_mix.outputs["Color"]
+
+        dirt = _binding_texture_node(texture_nodes, 3)
+        if dirt is not None:
+            channels = nodes.new("ShaderNodeSeparateColor")
+            channels.name = "BC2 AH60 main dirt channels"
+            channels.label = "DirtMaskRGB blue"
+            channels.location = (-220, -80)
+            links.new(dirt.outputs["Color"], channels.inputs["Color"])
+            dirt_scale = nodes.new("ShaderNodeMath")
+            dirt_scale.name = "BC2 AH60 main dirt scale"
+            dirt_scale.label = "Dirt blue x 0.1"
+            dirt_scale.operation = "MULTIPLY"
+            dirt_scale.inputs[1].default_value = 0.1
+            links.new(channels.outputs["Blue"], dirt_scale.inputs[0])
+            dirt_bias = nodes.new("ShaderNodeMath")
+            dirt_bias.name = "BC2 AH60 main dirt bias"
+            dirt_bias.label = "Dirt term + 0.045"
+            dirt_bias.operation = "ADD"
+            dirt_bias.inputs[1].default_value = 0.045
+            links.new(dirt_scale.outputs[0], dirt_bias.inputs[0])
+            dirt_add = nodes.new("ShaderNodeMixRGB")
+            dirt_add.name = "BC2 AH60 main dirt"
+            dirt_add.label = "Add source dirt term"
+            dirt_add.blend_type = "ADD"
+            dirt_add.inputs["Fac"].default_value = 1.0
+            links.new(color_output, dirt_add.inputs["Color1"])
+            links.new(dirt_bias.outputs[0], dirt_add.inputs["Color2"])
+            color_output = dirt_add.outputs["Color"]
+
+        detail = _binding_texture_node(texture_nodes, 4)
+        if detail is not None:
+            detail_double = nodes.new("ShaderNodeMixRGB")
+            detail_double.name = "BC2 AH60 main detail double"
+            detail_double.label = "Ah60Blackhawk_D x 2"
+            detail_double.blend_type = "MULTIPLY"
+            detail_double.inputs["Fac"].default_value = 1.0
+            detail_double.inputs["Color2"].default_value = (
+                2.0,
+                2.0,
+                2.0,
+                1.0,
+            )
+            links.new(
+                detail.outputs["Color"],
+                detail_double.inputs["Color1"],
+            )
+            detail_mix = nodes.new("ShaderNodeMixRGB")
+            detail_mix.name = "BC2 AH60 main detail modulation"
+            detail_mix.label = "Main x lerp(1, detail x 2, 0.482)"
+            detail_mix.blend_type = "MULTIPLY"
+            detail_mix.inputs["Fac"].default_value = 0.482
+            links.new(color_output, detail_mix.inputs["Color1"])
+            links.new(
+                detail_double.outputs["Color"],
+                detail_mix.inputs["Color2"],
+            )
+            color_output = detail_mix.outputs["Color"]
+
+        links.new(color_output, shader.inputs["Base Color"])
+        material["bc2_material_family"] = "AH60 main"
+        material["bc2_color_model"] = (
+            "Ah60Blackhawk_C blended to Symbols_Us by alpha, "
+            "DirtMaskRGB blue x0.1 + 0.045, then Ah60Blackhawk_D "
+            "detail modulation x0.482"
+        )
+        material["bc2_lighting_mask_model"] = (
+            "Msk_Generic retained at source UV x15 for the outdoor-light "
+            "term, which remains Blender-native"
+        )
+        material["bc2_material_evidence"] = (
+            "MP_004 vertex shaders 428/554/748/1310 and "
+            "pixel shaders 1229/1792"
+        )
+        material["bc2_material_status"] = (
+            "resolved verified AH60 main graph"
+        )
+        return True
+
+    if family == "AH60_GLASS":
+        material.diffuse_color = (0.06, 0.08, 0.10, 0.2)
+        shader.inputs["Base Color"].default_value = (
+            0.06,
+            0.08,
+            0.10,
+            1.0,
+        )
+        shader.inputs["Roughness"].default_value = 0.12
+        shader.inputs["IOR"].default_value = 1.45
+        transmission = shader.inputs.get("Transmission Weight")
+        if transmission is not None:
+            transmission.default_value = 1.0
+
+        fresnel = nodes.new("ShaderNodeFresnel")
+        fresnel.name = "BC2 glass Fresnel"
+        fresnel.label = "Source view-angle opacity"
+        fresnel.inputs["IOR"].default_value = 1.45
+        fresnel.location = (100, -260)
+        opacity = fresnel.outputs["Fac"]
+        dirt_node = _binding_texture_node(texture_nodes, 2)
+        if dirt_node is None:
+            dirt_node = _binding_texture_node(texture_nodes, 0)
+        if dirt_node is not None:
+            channels = nodes.new("ShaderNodeSeparateColor")
+            channels.name = "BC2 glass dirt channels"
+            channels.label = "DirtMaskRGB red"
+            channels.location = (-180, -300)
+            links.new(dirt_node.outputs["Color"], channels.inputs["Color"])
+            add = nodes.new("ShaderNodeMath")
+            add.name = "BC2 glass opacity"
+            add.label = "Fresnel + dirt red"
+            add.operation = "ADD"
+            add.use_clamp = True
+            add.location = (320, -240)
+            links.new(fresnel.outputs["Fac"], add.inputs[0])
+            links.new(channels.outputs["Red"], add.inputs[1])
+            opacity = add.outputs[0]
+        links.new(opacity, shader.inputs["Alpha"])
+        material.surface_render_method = "DITHERED"
+        material["bc2_material_family"] = "AH60 glass"
+        material["bc2_color_model"] = (
+            "transparent reflective glass with Fresnel plus "
+            "DirtMaskRGB red opacity"
+        )
+        material["bc2_material_evidence"] = (
+            "MP_004 pixel shaders 978, 1135, and 2110"
+        )
+        material["bc2_material_status"] = (
+            "resolved verified AH60 glass graph"
+        )
+        return True
+
+    if family in {"AH60_INTERIOR", "AH60_COCKPIT_INTERIOR"}:
+        color_node = _binding_texture_node(texture_nodes, 1)
+        if color_node is None:
+            return False
+        factor = 0.2 if family == "AH60_INTERIOR" else 0.05
+        multiply = nodes.new("ShaderNodeMixRGB")
+        multiply.name = "BC2 interior albedo scale"
+        multiply.label = f"Source diffuse scale {factor:g}"
+        multiply.blend_type = "MULTIPLY"
+        multiply.inputs["Fac"].default_value = 1.0
+        multiply.inputs["Color2"].default_value = (
+            factor,
+            factor,
+            factor,
+            1.0,
+        )
+        multiply.location = (300, 120)
+        links.new(color_node.outputs["Color"], multiply.inputs["Color1"])
+        links.new(multiply.outputs["Color"], shader.inputs["Base Color"])
+        material.diffuse_color = (
+            factor * 0.55,
+            factor * 0.55,
+            factor * 0.55,
+            1.0,
+        )
+        material["bc2_material_family"] = (
+            "AH60 interior"
+            if family == "AH60_INTERIOR"
+            else "AH60 cockpit interior"
+        )
+        material["bc2_color_model"] = (
+            f"Interior_D color scaled by verified diffuse factor {factor:g}"
+        )
+        material["bc2_material_evidence"] = (
+            "MP_004 Interior pixel shaders 174/910 and "
+            "CockpitInterior pixel shaders 1538/1589"
+        )
+        material["bc2_material_status"] = (
+            "resolved verified AH60 interior graph"
+        )
+        return True
+
+    if family == "MINIGUN_MAIN":
+        symbols = _binding_texture_node(texture_nodes, 2)
+        if symbols is None:
+            return False
+        symbols_mix = nodes.new("ShaderNodeMixRGB")
+        symbols_mix.name = "BC2 minigun symbols"
+        symbols_mix.label = "0.072 gray to Symbols_Us by alpha"
+        symbols_mix.blend_type = "MIX"
+        symbols_mix.inputs["Color1"].default_value = (
+            0.072,
+            0.072,
+            0.072,
+            1.0,
+        )
+        symbols_mix.location = (20, 160)
+        links.new(symbols.outputs["Alpha"], symbols_mix.inputs["Fac"])
+        links.new(symbols.outputs["Color"], symbols_mix.inputs["Color2"])
+        color_output = symbols_mix.outputs["Color"]
+
+        generic_mask = _binding_texture_node(texture_nodes, 3)
+        if generic_mask is not None:
+            mask_scale = nodes.new("ShaderNodeMixRGB")
+            mask_scale.name = "BC2 minigun generic mask scale"
+            mask_scale.label = "Msk_Generic x 0.006"
+            mask_scale.blend_type = "MULTIPLY"
+            mask_scale.inputs["Fac"].default_value = 1.0
+            mask_scale.inputs["Color2"].default_value = (
+                0.006,
+                0.006,
+                0.006,
+                1.0,
+            )
+            mask_scale.location = (20, -40)
+            links.new(
+                generic_mask.outputs["Color"],
+                mask_scale.inputs["Color1"],
+            )
+            add = nodes.new("ShaderNodeMixRGB")
+            add.name = "BC2 minigun base color"
+            add.label = "Symbols color + generic mask"
+            add.blend_type = "ADD"
+            add.use_clamp = True
+            add.inputs["Fac"].default_value = 1.0
+            add.location = (300, 120)
+            links.new(color_output, add.inputs["Color1"])
+            links.new(mask_scale.outputs["Color"], add.inputs["Color2"])
+            color_output = add.outputs["Color"]
+        links.new(color_output, shader.inputs["Base Color"])
+
+        specular_mask = _binding_texture_node(texture_nodes, 4)
+        specular_input = shader.inputs.get("Specular IOR Level")
+        if specular_mask is not None and specular_input is not None:
+            channels = nodes.new("ShaderNodeSeparateColor")
+            channels.name = "BC2 minigun specular channels"
+            channels.label = "MiniGun_C green specular mask"
+            channels.location = (280, -180)
+            links.new(
+                specular_mask.outputs["Color"],
+                channels.inputs["Color"],
+            )
+            links.new(channels.outputs["Green"], specular_input)
+        shader.inputs["Roughness"].default_value = 0.3
+        material.diffuse_color = (0.072, 0.072, 0.072, 1.0)
+        material["bc2_material_family"] = "Minigun main"
+        material["bc2_color_model"] = (
+            "Symbols_Us RGB/alpha over 0.072 gray plus "
+            "Msk_Generic x0.006"
+        )
+        material["bc2_specular_model"] = (
+            "MiniGun_C green channel with source exponent 20 approximation"
+        )
+        material["bc2_material_evidence"] = (
+            "MP_004 pixel shaders 23 and 1869"
+        )
+        material["bc2_material_status"] = (
+            "resolved verified minigun material graph"
+        )
+        return True
+    return False
+
+
 def _surface_uses_alpha(surface: SurfaceShader) -> bool:
     value = f"{surface.name}/{surface.database_key}".casefold()
     return any(
@@ -2159,7 +3193,7 @@ def _surface_material(
     roles = (
         _character_binding_roles(surface, shader_material.textures)
         if character_surface
-        else _binding_roles(shader_material.textures)
+        else _surface_binding_roles(surface, shader_material.textures)
     )
     material["bc2_texture_bindings"] = json.dumps(
         [
@@ -2264,7 +3298,7 @@ def _surface_material(
         uv_map = (
             _character_binding_uv_map(surface, role)
             if character_surface
-            else _binding_uv_map(binding.path, role)
+            else _surface_binding_uv_map(surface, binding, role)
         )
         uv_node = uv_nodes.get(uv_map)
         if uv_node is None:
@@ -2277,7 +3311,7 @@ def _surface_material(
         uv_scale = (
             _character_binding_uv_scale(surface, role)
             if character_surface
-            else (1.0, 1.0)
+            else _surface_binding_uv_scale(surface, binding)
         )
         if uv_scale == (1.0, 1.0):
             links.new(uv_node.outputs["UV"], node.inputs["Vector"])
@@ -2340,6 +3374,16 @@ def _surface_material(
         )
         return material
 
+    if _configure_verified_surface_material(
+        material,
+        surface,
+        nodes,
+        links,
+        shader,
+        texture_nodes,
+    ):
+        return material
+
     color_output, color_node, color_model = _layered_color_output(
         nodes,
         links,
@@ -2394,61 +3438,17 @@ def _surface_material(
     return material
 
 
-def _resolve_character_subset_materials(
+def _source_material_context(
     repository,
-    mesh_set_asset,
-    parsed: MeshAsset,
     preferred_archives,
     settings: BC2Settings,
-):
-    descriptor_path = _resource_partition(mesh_set_asset["path"]) + ".dbx"
-    descriptor_asset = repository.catalog.find_asset(
-        descriptor_path,
-        preferred_archives,
-    )
-    if descriptor_asset is None:
-        raise BC2Error(
-            f"Character mesh descriptor is not indexed: {descriptor_path}"
-        )
-    _, descriptor_raw = repository.read_asset(
-        int(descriptor_asset["id"]),
-        max_size=256 << 20,
-    )
-    descriptor = parse_dbx(descriptor_raw)
-    mesh_instance = descriptor.primary_instance
-    mesh_guid = (
-        mesh_instance.attribute("guid")
-        if mesh_instance is not None
-        else None
-    )
-    if not mesh_guid:
-        raise BC2Error(
-            f"Character descriptor has no primary mesh instance: "
-            f"{descriptor_path}"
-        )
-    mesh_reference = (
-        descriptor_path.removesuffix(".dbx") + "/" + mesh_guid
-    )
-    resolver = LevelResolver(
-        repository,
-        "CHARACTER",
-        tuple(preferred_archives),
-    )
-    definition = resolver.resolve_mesh(mesh_reference)
-    diagnostics = [
-        {
-            "code": issue.code,
-            "message": issue.message,
-            "reference": issue.reference or "",
-        }
-        for issue in resolver.issues
-    ]
-
+) -> _SourceMaterialContext:
     import_textures = getattr(settings, "import_textures", True)
+    material_archives = tuple(preferred_archives)
     shader_database = None
     shader_database_path = None
-    material_archives = tuple(preferred_archives)
-    if import_textures:
+    diagnostics = []
+    if import_textures and repository.kind == "PC_ISO":
         shader_archive = index_pc_character_shader_archive(repository)
         material_archives = tuple(
             dict.fromkeys((*preferred_archives, shader_archive))
@@ -2471,62 +3471,280 @@ def _resolve_character_subset_materials(
                     ),
                 }
             )
+    return _SourceMaterialContext(
+        import_textures=import_textures,
+        material_archives=material_archives,
+        shader_database=shader_database,
+        shader_database_path=shader_database_path,
+        material_cache={},
+        image_cache={},
+        diagnostics=diagnostics,
+        loaded_shader_paths=(
+            {PC_CHARACTER_SHADER_PATH.casefold()}
+            if shader_database_path
+            else set()
+        ),
+    )
+
+
+def _merge_shader_databases(
+    first: ShaderDatabase | None,
+    second: ShaderDatabase,
+) -> ShaderDatabase:
+    if first is None:
+        return second
+    materials = list(first.materials)
+    existing = {material.key.casefold() for material in materials}
+    materials.extend(
+        material
+        for material in second.materials
+        if material.key.casefold() not in existing
+    )
+    return ShaderDatabase(
+        tuple(materials),
+        first.trailing_bytes + second.trailing_bytes,
+    )
+
+
+def _extend_source_shader_database(
+    repository,
+    material_context: _SourceMaterialContext,
+    archive_path: str,
+    shader_path: str,
+) -> bool:
+    key = shader_path.casefold()
+    if key in material_context.loaded_shader_paths:
+        return False
+    material_context.loaded_shader_paths.add(key)
+    if repository.catalog.archive_by_path(archive_path) is None:
+        return False
+    repository.index_archive_path(archive_path)
+    shader_asset = repository.catalog.find_asset(
+        shader_path,
+        (archive_path,),
+    )
+    if shader_asset is None:
+        return False
+    _, shader_raw = repository.read_asset(
+        int(shader_asset["id"]),
+        max_size=1 << 30,
+    )
+    database = parse_shader_database(shader_raw)
+    material_context.shader_database = _merge_shader_databases(
+        material_context.shader_database,
+        database,
+    )
+    material_context.material_archives = tuple(
+        dict.fromkeys(
+            (*material_context.material_archives, archive_path)
+        )
+    )
+    material_context.shader_database_path = ";".join(
+        (
+            *(
+                path
+                for path in (
+                    material_context.shader_database_path or ""
+                ).split(";")
+                if path
+            ),
+            shader_path,
+        )
+    )
+    if database.trailing_bytes:
+        material_context.diagnostics.append(
+            {
+                "code": "shader_database_trailing_bytes",
+                "reference": shader_path,
+                "message": (
+                    f"{database.trailing_bytes} unparsed byte(s) remain "
+                    "after the shader database"
+                ),
+            }
+        )
+    return True
+
+
+def _ensure_source_shader_materials(
+    repository,
+    material_context: _SourceMaterialContext,
+    shader_keys: tuple[str, ...],
+):
+    if (
+        repository.kind != "PC_ISO"
+        or not material_context.import_textures
+        or not shader_keys
+    ):
+        return
+
+    def unresolved():
+        database = material_context.shader_database
+        return (
+            database is None
+            or any(
+                _find_shader_material(database, key)[0] is None
+                for key in shader_keys
+            )
+        )
+
+    if not unresolved():
+        return
+    indexed = repository.catalog.search_assets(
+        query="Dx11_Single.res",
+        limit=500,
+    )
+    candidates = [
+        (str(asset["archive_path"]), str(asset["path"]))
+        for asset in indexed
+    ]
+    candidates.extend(_PC_MODULAR_SHADER_FALLBACKS)
+    seen = set()
+    for archive_path, shader_path in candidates:
+        key = shader_path.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        _extend_source_shader_database(
+            repository,
+            material_context,
+            archive_path,
+            shader_path,
+        )
+        if not unresolved():
+            return
+
+
+def _resolve_mesh_subset_materials(
+    repository,
+    mesh_set_asset,
+    parsed: MeshAsset,
+    preferred_archives,
+    settings: BC2Settings,
+    *,
+    shader_set_override: str | None = None,
+    material_context: _SourceMaterialContext | None = None,
+):
+    created_context = material_context is None
+    material_context = material_context or _source_material_context(
+        repository,
+        preferred_archives,
+        settings,
+    )
+    diagnostic_start = 0 if created_context else len(
+        material_context.diagnostics
+    )
+    descriptor_path = _resource_partition(mesh_set_asset["path"]) + ".dbx"
+    descriptor_asset = repository.catalog.find_asset(
+        descriptor_path,
+        preferred_archives,
+    )
+    if descriptor_asset is None:
+        raise BC2Error(
+            f"Mesh descriptor is not indexed: {descriptor_path}"
+        )
+    _, descriptor_raw = repository.read_asset(
+        int(descriptor_asset["id"]),
+        max_size=256 << 20,
+    )
+    descriptor = parse_dbx(descriptor_raw)
+    mesh_instance = descriptor.primary_instance
+    mesh_guid = (
+        mesh_instance.attribute("guid")
+        if mesh_instance is not None
+        else None
+    )
+    if not mesh_guid:
+        raise BC2Error(
+            f"Descriptor has no primary mesh instance: "
+            f"{descriptor_path}"
+        )
+    mesh_reference = (
+        descriptor_path.removesuffix(".dbx") + "/" + mesh_guid
+    )
+    resolver = LevelResolver(
+        repository,
+        "MODULAR",
+        tuple(preferred_archives),
+    )
+    definition = resolver.resolve_mesh(
+        mesh_reference,
+        shader_set_override,
+    )
+    _ensure_source_shader_materials(
+        repository,
+        material_context,
+        tuple(surface.database_key for surface in definition.surfaces),
+    )
+    material_context.diagnostics.extend(
+        {
+            "code": issue.code,
+            "message": issue.message,
+            "reference": issue.reference or "",
+        }
+        for issue in resolver.issues
+    )
 
     assignments = _surface_assignments(parsed, definition)
-    material_cache = {}
-    image_cache = {}
     materials = []
     for subset, (surface, match) in zip(parsed.subsets, assignments):
         if surface is None:
-            diagnostics.append(
+            material_context.diagnostics.append(
                 {
-                    "code": "unresolved_character_surface",
+                    "code": "unresolved_mesh_surface",
                     "reference": subset.name,
                     "message": (
-                        "Character subset could not be matched to its "
-                        "default MeshShaderSet"
+                        "Mesh subset could not be matched to its "
+                        "resolved MeshShaderSet"
                     ),
                 }
             )
             material = _diagnostic_material(
-                material_cache,
+                material_context.material_cache,
                 subset.name,
                 f"BC2 Missing {PurePosixPath(subset.name).name}",
-                "Character subset has no resolved source surface",
+                "Mesh subset has no resolved source surface",
             )
-            material["bc2_material_status"] = "unresolved character surface"
+            material["bc2_material_status"] = "unresolved mesh surface"
         else:
             material = _surface_material(
                 repository,
                 surface,
-                shader_database,
-                material_archives,
-                material_cache,
-                image_cache,
-                diagnostics,
-                import_textures,
+                material_context.shader_database,
+                material_context.material_archives,
+                material_context.material_cache,
+                material_context.image_cache,
+                material_context.diagnostics,
+                material_context.import_textures,
             )
             material["bc2_subset_match"] = match
         materials.append(material)
 
     resolved_materials = sum(
-        material.get("bc2_material_status")
-        == "resolved character material graph"
+        str(material.get("bc2_material_status", "")).startswith(
+            "resolved "
+        )
         for material in materials
     )
     summary = {
         "mesh_reference": mesh_reference,
         "shader_set_reference": definition.shader_set_reference or "",
-        "shader_database": shader_database_path or "",
+        "shader_database": material_context.shader_database_path or "",
         "subsets": len(parsed.subsets),
         "source_surfaces": len(definition.surfaces),
         "resolved_materials": resolved_materials,
         "source_images": sum(
-            image is not None for image, _ in image_cache.values()
+            image is not None
+            for image, _ in material_context.image_cache.values()
         ),
-        "diagnostics": len(diagnostics),
+        "diagnostics": (
+            len(material_context.diagnostics) - diagnostic_start
+        ),
     }
-    return tuple(materials), diagnostics, summary
+    return (
+        tuple(materials),
+        tuple(material_context.diagnostics[diagnostic_start:]),
+        summary,
+    )
 
 
 _TERRAIN_LAYER_PATTERNS = {
@@ -3622,6 +4840,19 @@ class BC2_OT_import_selected(Operator):
                         f"Imported {len(objects)} skinned mesh object(s) "
                         f"on {len(armature.data.bones)} bones",
                     )
+                elif asset_type == "CompositeMeshSet":
+                    _, objects = _create_mesh_set_import(
+                        context,
+                        repository,
+                        source_asset,
+                        parsed,
+                        asset,
+                        settings,
+                    )
+                    self.report(
+                        {"INFO"},
+                        f"Imported {len(objects)} modular mesh object(s)",
+                    )
                 else:
                     objects = _create_mesh_objects(
                         context, parsed, asset, settings
@@ -3690,12 +4921,38 @@ class BC2_OT_import_selected(Operator):
                 asset, raw = repository.read_asset(
                     selected.asset_id, max_size=256 << 20
                 )
-                xml = dbx_to_xml(raw)
-                text = bpy.data.texts.new(Path(asset["path"]).stem + ".xml")
-                text.write(xml)
-                text["bc2_asset_path"] = asset["path"]
-                text["bc2_archive_path"] = asset["archive_path"]
-                self.report({"INFO"}, f"Imported DBX as text: {text.name}")
+                document = parse_dbx(raw)
+                assembly = modular_assembly(document, str(asset["path"]))
+                if assembly is not None:
+                    imported = _create_modular_assembly(
+                        context,
+                        repository,
+                        asset,
+                        assembly,
+                        settings,
+                    )
+                    object_count = sum(
+                        len(component.objects)
+                        for component in imported.components
+                    )
+                    self.report(
+                        {"INFO"},
+                        f"Imported {assembly.kind.lower()} assembly with "
+                        f"{len(imported.components)} component(s) and "
+                        f"{object_count} mesh object(s)",
+                    )
+                else:
+                    xml = dbx_to_xml(raw)
+                    text = bpy.data.texts.new(
+                        Path(asset["path"]).stem + ".xml"
+                    )
+                    text.write(xml)
+                    text["bc2_asset_path"] = asset["path"]
+                    text["bc2_archive_path"] = asset["archive_path"]
+                    self.report(
+                        {"INFO"},
+                        f"Imported DBX as text: {text.name}",
+                    )
             else:
                 _, path = repository.extract_asset(selected.asset_id)
                 self.report({"INFO"}, f"Extracted unsupported resource to {path}")

@@ -203,8 +203,15 @@ metadata but do not create duplicate color layers.
 
 `Characters/US/US_Models/US_01_Body_Mesh.dbx` contains two
 `MeshShaderSetAsset` references. The first is the default appearance; the
-second contains kit-upgrade overrides. Individual character import uses the
-first set and leaves variation selection for future work.
+second contains kit-upgrade overrides. A direct component import uses the
+first set.
+
+The high-level `Objects/Soldiers/US/Assault.dbx` entity supplies a `Meshes3p`
+array linking `US_01_Body_Mesh`, `US_01_Head_Mesh`, and
+`US_01_Headgear_Mesh`. Each entry can carry its own `MeshShaderSet` override
+and `RandomGroup`. Assembly import resolves those overrides, retains random
+groups as collection metadata, and binds all three LOD0 modules to the shared
+147-bone `ske01` armature.
 
 The shared `mp_common` archive contains the mesh, descriptor, skeleton, and
 textures, but no DX11 shader database. Retail level shader databases duplicate
@@ -216,9 +223,10 @@ Levels/mp_001/shaders/Dx11_Single.res
 ```
 
 on demand for PC character materials. All 13 visible `US_01_Body` LOD0
-surfaces resolve by exact database key. Ten additional default-set surfaces,
-including face, eye, eyelash, teeth, and headgear families, are not present in
-this body LOD and therefore are not assigned by this sample.
+surfaces resolve by exact database key. The full Assault assembly adds three
+head and seven headgear subsets, including the face, eye, eyelash, teeth, and
+headgear families absent from the body LOD. All 23 visible component materials
+resolve in the retail integration scene.
 
 ### Verified visible binding families
 
@@ -277,6 +285,11 @@ This is an explicit Blender compatibility correction rather than a claim that
 the still-unknown runtime interpretation of the auxiliary field has been
 fully decoded.
 
+Declared coordinates are decoded even when a channel is constant. The linked
+head's eyelash subset verifies this distinction: zero span is valid for an
+explicit stride-64 channel and must not trigger the generic heuristic's
+"nonvarying UV" rejection.
+
 The supplied external BF3/BF4 MaxScript references reinforce this decision
 boundary: their mesh readers use explicit `Vert_Diffuse_UV` and
 `Vert_Normals_UV` semantics and offsets, keep tangent/binormal fields
@@ -322,11 +335,101 @@ are explicitly recorded as approximations in material custom properties.
 
 ### Validation result
 
-The retail integration scene resolves 13/13 visible materials, loads 34 unique
-file-backed DDS images, retains all four UV layers, and has connected Base
-Color graphs for every subset. Every surface with a source primary normal has
-a connected packed-normal graph. Materials, images, UV layers, armature
-modifiers, `StandIdle`, and `RunForward` persist after save/reopen.
+The retail integration scene resolves 23/23 visible materials across body,
+head, and headgear and loads 56 unique file-backed DDS images. The 13 body
+subsets retain all four UV layers and connected Base Color graphs. Every
+surface with a source primary normal has a connected packed-normal graph. All
+three modules share one armature; materials, images, UV layers, modifiers,
+component metadata, `StandIdle`, and `RunForward` persist after save/reopen.
+
+## Standalone composite-vehicle materials
+
+A standalone vehicle entity has no selected level from which to infer a DX11
+database, while shared archives contain its mesh, shader descriptors, and
+textures but not compiled level material records. The importer first reuses
+already indexed `Dx11_Single.res` databases. It uses `MP_001` as the
+deterministic shared-character source and, when required keys remain missing,
+loads the verified `MP_004` database as a standalone modular fallback.
+Databases are merged by case-insensitive material key, and their archives are
+added to texture lookup precedence.
+
+The AH60's `MP_004` records exactly match its composite mesh/shader keys. The
+validated import resolves 11 visible surface families, including Main, Wreck,
+metal, cockpit/interior, glass, lights, minigun, and blurred rotors, and loads
+14 file-backed images. The material graph uses the same reflected texture-role
+pipeline as complete maps. This solves source bindings, not vehicle runtime
+behavior; rotor animation, damage switching, lighting constants, and exact
+blend arithmetic remain outside the current scope.
+
+### Verified AH60 Main, glass, interior, and minigun graphs
+
+The earlier generic role pipeline recovered the correct `MP_004` material
+keys and textures but misinterpreted several families. AH60 Main routed every
+binding through byte-24 `UVMap`, `Glass` had no color-producing binding, the
+pale `Interior_D` atlas was connected without the shader's dark scale, and the
+channel-packed `MiniGun_C` texture was incorrectly promoted to Base Color
+because of its `_C` suffix.
+
+Retail pixel-shader disassembly establishes the following behavior:
+
+| Surface | Pixel shaders | Verified relationship |
+|---|---|---|
+| AH60 Main | `1229`, `1792` | Blends `Ah60Blackhawk_C` to `Symbols_Us` by symbol alpha, adds the blue dirt channel plus a constant bias, applies `Ah60Blackhawk_D` modulation, and samples `Msk_Generic` at 15x for its outdoor-light term |
+| AH60 Glass | `978`, `1135`, `2110` | Opacity combines a view-angle Fresnel term with the red channel of `DirtMaskRGB`; the lit permutations multiply reflected light by the same opacity |
+| AH60 Interior | `174`, `910` | `Interior_D` supplies color and the direct diffuse term uses a `0.2` scale |
+| AH60 CockpitInterior | `1538`, `1589` | Uses the same `Interior_D` atlas with a darker `0.05` direct diffuse scale |
+| Minigun Main | `23`, `1869` | `Symbols_Us` supplies RGB/alpha color, `Msk_Generic` adds a repeated low-amplitude surface term, and `MiniGun_C` green controls specular response rather than color |
+
+AH60 Main vertex shaders `428`, `554`, `748`, and `1310` agree on:
+
+```text
+pixel v6.xy <- vertex v2.zw <- byte 28 (UV1)
+pixel v6.zw <- vertex v3.xy <- byte 32 (UV2)
+pixel v7.xy <- vertex v5.xy <- byte 40 (UV3)
+pixel v7.zw <- vertex v2.xy <- byte 24 (UVMap)
+```
+
+The recovered pre-light relationship is:
+
+```text
+base = lerp(sample(Ah60Blackhawk_C, UV1).rgb,
+            sample(Symbols_Us, UV2).rgb,
+            sample(Symbols_Us, UV2).a)
+base += sample(DirtMaskRGB, UV3).b * 0.1 + 0.045
+base *= lerp(1.0, sample(Ah60Blackhawk_D, UVMap).rgb * 2.0, 0.482)
+lighting mask = sample(Msk_Generic, UV1 * 15).rgb
+```
+
+The imported Blender graph reproduces the recoverable pre-light color. The
+generic mask remains attached at its verified coordinate and scale, while its
+outdoor-light interaction remains Blender-native. On the reported
+`01_lod0_WreckPartTail_Main.001` piece, byte-24 has 280 degenerate UV
+triangles out of 722; byte-28 has none. That is valid source data for
+different shader inputs, not evidence that LOD1 was selected.
+
+The recovered minigun pre-light color is:
+
+```text
+base = lerp(0.072, sample(Symbols_Us, UV1).rgb,
+                    sample(Symbols_Us, UV1).a)
+base += sample(Msk_Generic, UVMap * 13).rgb * 0.006
+specular mask = sample(MiniGun_C, UVMap).g
+```
+
+Paired retail vertex shaders `1400` and `1583` both write
+`o6.xyzw = v2.zwxy`. The packed stride-48 `TEXCOORD3` input places the
+byte-24 half-float pair in `v2.xy` (`UVMap`) and the byte-28 pair in
+`v2.zw` (`UV1`). Consequently pixel input `v6.xy`, used by `Symbols_Us`,
+comes from `UV1`, while `v6.zw`, used by `Msk_Generic` and `MiniGun_C`,
+comes from `UVMap`. This swizzle is why treating all three bindings as
+secondary UVs produces incorrect minigun texturing.
+
+The source specular exponent is `20`. Blender approximates that response with
+Principled roughness `0.3` and feeds `MiniGun_C` green to Specular IOR Level.
+The glass graph uses Principled transmission with Fresnel plus dirt-red
+opacity. These graphs preserve the exact source texture roles, UV channels,
+repeat factor, and immediate constants; Frostbite's outdoor-light buffers and
+reflection environment remain Blender-native approximations.
 
 ### Verified representative map families
 

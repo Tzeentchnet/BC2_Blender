@@ -7,6 +7,7 @@ little-endian Granny resources validated here:
 
 - the shared `Characters/Skeletons/ske01` human skeleton;
 - the `Characters/US/US_Models/US_01_Body` skinned body;
+- the linked `US_01_Head` and `US_01_Headgear` LOD0 modules;
 - the rifle third-person `StandIdle` and `RunForward` clips;
 - `US_01_SkeletonPose` as a rest-pose cross-check.
 
@@ -15,6 +16,12 @@ bounded reads and synthetic fixtures. Field meanings are **verified** where
 the skeleton inverse-bind matrices, pose clip, or Blender output provide an
 independent invariant. Xbox 360 and PS3 Granny variants are not advertised as
 native support.
+
+`Objects/Soldiers/US/Assault.dbx` links these three mesh modules through
+`Meshes3p`. Modular import verifies that every component references `ske01`,
+creates the armature once, and binds all 23 visible subsets to it. Component
+collections retain role and `RandomGroup` metadata so optional equipment can
+be mixed without duplicating the rig.
 
 ## Frostbite wrapper
 
@@ -281,10 +288,12 @@ validation. See the [external MaxScript audit](../maxscript-reference-audit.md).
 | `ske01` source bones | 147 |
 | physics-joint names retained | 11 |
 | `US_01_Body` visible subsets | 13 |
+| complete Assault visible subsets | 23 (13 body, 3 head, 7 headgear) |
 | vertices / triangles | 10,513 / 9,883 |
 | source bones used by the mesh | 61 |
 | exact visible material keys | 13 / 13 |
-| source-backed character images | 34 |
+| source-backed body images | 34 |
+| source-backed complete-assembly images | 56 |
 | retained character UV layers | 4 |
 | `StandIdle` duration / inclusive frames | about 3.0 s / 91 at 30 Hz |
 | `RunForward` duration / inclusive frames | about 0.6 s / 19 at 30 Hz |

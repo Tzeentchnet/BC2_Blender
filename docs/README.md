@@ -50,7 +50,7 @@ Xbox XGD2 -> XDVDFS ---------------------> FbRB -> resource
 
 Both paths converge at the FbRB parser. The importer then catalogs active
 entries in SQLite and dispatches selected resources to mesh, texture, terrain,
-water, Granny skeleton/animation, or DBX readers.
+water, Granny skeleton/animation, modular entity assembly, or DBX readers.
 
 The source media is always read-only. Cached cabinets, extracted archives,
 resources, and converted DDS files are disposable derivatives.
@@ -70,6 +70,7 @@ resources, and converted DDS files are disposable derivatives.
 | Texture conversion | [`core/texture.py`](../bc2_frostbite_importer/core/texture.py) |
 | Terrain | [`core/terrain.py`](../bc2_frostbite_importer/core/terrain.py) |
 | DBX | [`core/dbx.py`](../bc2_frostbite_importer/core/dbx.py) |
+| Character/vehicle assembly links | [`core/assembly.py`](../bc2_frostbite_importer/core/assembly.py) |
 | Level resolution | [`core/level.py`](../bc2_frostbite_importer/core/level.py) |
 | DX11 shader database | [`core/shaderdb.py`](../bc2_frostbite_importer/core/shaderdb.py) |
 | Blender conversion | [`blender_addon.py`](../bc2_frostbite_importer/blender_addon.py) |

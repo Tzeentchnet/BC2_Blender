@@ -46,13 +46,20 @@ For a source checkout, install the repository root as an extension or add `bc2_f
    - Other data
 6. Select an asset and click **Import Selected**, or use **Extract Raw**.
 
-For a PC character, importing a `SkinnedMeshSet` resolves the skeleton
-reference in its DBX descriptor, creates the complete armature, names vertex
-groups from the source bone palette, adds Armature modifiers, resolves the
-default `MeshShaderSet`, and builds source-backed materials from the retail
-DX11 database. Importing a `GrannyAnimation` then adds an Action to the
-matching armature. If that armature is not already present, the animation's
-referenced skeleton is created automatically.
+For a complete PC character, select its high-level soldier `.dbx` rather than
+an individual mesh set. The importer follows `Meshes3p`, creates one shared
+armature, and places every linked LOD0 body, head, and headgear module in a
+separate visible collection. Selecting a vehicle entity `.dbx` follows its
+`CompositeMeshAsset`, applies the mesh-set LOD0 bind transforms, and creates
+named source-part collections with damaged, destroyed, and blurred
+alternatives hidden by default. Geometry whose individual source, object, or
+mesh name contains `Wreck` at least twice is also hidden independently of its
+part collection. A single occurrence does not hide either an object or its
+part collection.
+Direct
+`SkinnedMeshSet` and `CompositeMeshSet` imports remain focused component
+imports. Importing a `GrannyAnimation` adds an Action to the matching armature;
+if that armature is absent, the referenced skeleton is created automatically.
 
 The provided Xbox example indexes 630 Frostbite archives and 251,251 active assets. The provided PC example exposes 625 extractable Frostbite archives through the installer database.
 
@@ -61,15 +68,18 @@ The provided Xbox example indexes 630 Frostbite archives and 251,251 active asse
 | Asset | Current behavior |
 |---|---|
 | `MeshData` | Creates one Blender mesh object per visible subset, including UVs, materials, and available bone-weight vertex groups. PC little-endian and Xbox 360 big-endian layouts are supported. |
-| Rigid, composite, and tree mesh sets | Resolves a matching LOD `MeshData` resource when available, preferring LOD0. |
+| Rigid and tree mesh sets | Resolves a matching LOD `MeshData` resource when available, preferring LOD0. |
+| `CompositeMeshSet` | Resolves LOD0 geometry and source materials, corrects shared/global index streams, separates verified source part IDs into named collections, applies decoded mesh-set bind transforms, and hides decoded damaged/destroyed/blurred parts plus geometry or collections with two `Wreck` occurrences in one name by default. A single `Wreck` occurrence alone remains visible. |
 | PC `SkinnedMeshSet` | Resolves LOD0 geometry, the DBX skeleton reference, the default surface set, and source DX11 texture bindings; creates all source bones, four preserved shader-coordinate layers, nondegenerate character UV routing, named vertex groups, one material per visible subset, and Armature modifiers. Console mesh sets remain geometry-only. |
+| PC soldier entity `.dbx` | Resolves every `Meshes3p` body/head/headgear component at LOD0, applies per-component shader-set overrides, binds all modules to one verified skeleton, and creates modular component collections. |
+| PC vehicle entity `.dbx` | Resolves the linked composite LOD0 mesh, source-backed materials, ordered named part collections, mesh-set bind transforms, and DBX-backed default/damaged/alternate states without inventing runtime pivots, parenting, or an armature. Verified AH60 Main, glass, interior, cockpit-interior, and minigun shader relationships receive dedicated Blender graphs. |
 | PC `GrannyModel` | Creates a native Blender armature while preserving the complete source hierarchy, local transforms, source flags, and physics-joint metadata. |
 | PC `GrannyAnimation` | Creates a Blender 5.2 layered/slotted Action on the matching armature, sampled at the source time step with root motion and quaternion continuity. |
 | `WaterMesh` | Creates native water geometry. |
 | `ITexture` | Converts PC texture resources to DDS and creates an Image plus node material. |
 | `XenonTexture` | Untiles Xbox 360 surfaces, fixes compressed-block byte order, converts to DDS, and creates an Image plus node material. DXT1, DXT3, DXT5, ARGB8888, and L8 headers are recognized. Grouped, padded mip allocations import their base level so Blender can generate lower display mips. |
 | `TerrainHeightfield` | Creates a Blender terrain mesh with configurable sampling. The 1024-edge default preserves the complete `MP_001` playable heightfield; lower settings are explicit previews. |
-| Binary `.dbx` | Converts the Frostbite binary document to XML in a Blender Text datablock. |
+| Other binary `.dbx` | Converts the Frostbite binary document to XML in a Blender Text datablock. |
 | PC complete map | Resolves direct and compact-group placements into linked Blender objects; imports all level heightfields and water; combines mesh subsets; assigns surface materials through the level DX11 shader database; and creates a JSON diagnostics Text datablock. |
 | Other resources | Extracts the original resource to the cache without pretending that a native import succeeded. |
 
@@ -79,6 +89,33 @@ Blender's bundled NumPy is used when available for bulk mesh, topology, UV,
 terrain, and Xbox texture operations. The importer retains pure-Python
 fallbacks. Converted textures remain file-backed DDS images loaded through
 Blender's native image subsystem instead of expanding pixels in Python.
+
+### Modular character and vehicle organization
+
+High-level assembly imports create this collection structure:
+
+```text
+BC2_<Assembly>
+  Rig                         # characters only
+  Components
+    00_<Module>
+      mesh subsets            # character component
+      Parts                   # composite vehicle component
+        000_<SourcePart>
+        001_<SourcePart>
+```
+
+All character modules are visible by default so body, head, and headgear can
+be mixed and matched at the collection level. `RandomGroup` is retained as
+component metadata rather than used to hide optional modules. Vehicle parts
+are split only where retail part IDs and triangle membership agree; ordered
+`lod0|PartName` records provide names, local bounds, and authoritative bind
+transforms. Those transforms place movable parts in the assembled vehicle.
+Nested DBX component health states and low/high-RPM model fields identify the
+default model; lower-health, destroyed, and blurred alternatives remain
+available in collections but are hidden in the viewport and render by
+default. Runtime pivots, parenting, state switching, and animation hierarchy
+are not synthesized.
 
 ### Complete-map organization
 
@@ -103,6 +140,9 @@ the source column-major transform without the former X/Z reflection, so signs
 and other readable texture content are no longer mirrored. Sparse shader-set
 overrides are merged over mesh defaults; this restores the complete default
 SmallFactory surface set while retaining its intended metal substitutions.
+The retail PC stride-48 composite declaration used by AH60 retains four
+shader-coordinate pairs at offsets 24, 28, 32, and 40 as `UVMap`, `UV1`,
+`UV2`, and `UV3`.
 
 The `MP_001` physical-material map is decoded to a file-backed L8 image and
 drives source grass, dirt, tarmac, gravel, stone, seabed, and default-ground
@@ -117,11 +157,14 @@ ground-contact check measures a -1.09-unit median forest-origin offset. All 485
 visible subset slots resolve by source naming. The diagnostics Text preserves
 the ten distinct nonvisual-reference descriptions from 24 raw placements.
 
-The validated PC `US_01_Body` character resolves all 13 visible subset
-materials by exact shader-database key and loads 34 unique file-backed source
-images. Its stride-64 vertex declaration maps source UVs at byte offsets 40,
-16, 44, and 48 to Blender `UVMap`, `UV1`, `UV2`, and `UV3`. Representative
-retail DX11 permutations establish red/green primary normals,
+The validated PC US Assault assembly resolves 23 visible subsets across
+`US_01_Body`, `US_01_Head`, and `US_01_Headgear`, binds all three modules to
+one 147-bone `ske01` armature, resolves all 23 materials, and loads 56 unique
+file-backed source images. The body retains its verified 10,513 vertices,
+9,883 triangles, and 13 exact material keys. Its stride-64 vertex declaration
+maps source UVs at byte offsets 40, 16, 44, and 48 to Blender `UVMap`, `UV1`,
+`UV2`, and `UV3`. Representative retail DX11 permutations establish
+red/green primary normals,
 alpha/green repeated cloth-detail normals, 15x dirt sampling, camouflage and
 cloth modulation, source dirt masks, and baked occlusion. The Blender graph
 reproduces those high-level relationships while labeling the remaining
@@ -133,6 +176,28 @@ The byte-16 field is preserved as `UV1`, but retail `US_01` stores collinear
 now route their layered detail, camouflage, and dirt-mask bindings through
 the nondegenerate byte-44 `UV2` channel while retaining the original field
 for diagnostics.
+
+The validated AH60 vehicle assembly creates 36 ordered source-part
+collections and 66 surface fragments totaling 27,388 triangles. Its 34
+healthy/static part collections are visible by default; only the two blurred
+high-RPM rotor alternatives are hidden at collection level. Single-`Wreck`
+part names such as `NoseWreck` and `WreckPartTail` remain visible. The 11
+geometry fragments whose source subset contains `Wreck` twice are also hidden,
+including fragments split into otherwise healthy part collections. Fragments
+with one `Wreck` occurrence remain visible inside single-`Wreck` part
+collections. Known
+doors, rotors, wheels, and wings use their decoded retail bind transforms.
+The import resolves 11 source materials and 14 file-backed images using a
+matching retail level DX11 database. The reported
+`01_lod0_WreckPartTail_Main.001` piece is verified as authored LOD0 with 948
+vertices and 722 triangles, compared with 434/251 at LOD1 and 56/34 at LOD2.
+Retail shader disassembly routes AH60 Main color through byte-28 `UV1`,
+symbols through byte-32 `UV2`, dirt through byte-40 `UV3`, detail through
+byte-24 `UVMap`, and the generic mask through `UV1` repeated 15 times.
+Dedicated graphs also drive transmissive dirty glass, the dark
+interior/cockpit diffuse scales, and the minigun's symbol color, repeated
+generic mask, and green-channel specular control. No vehicle rig, runtime
+pivot, or parent hierarchy is fabricated.
 
 ## Cache behavior
 
@@ -156,11 +221,17 @@ scoped derivatives and may likewise be deleted when Blender is closed.
   v7 skeletons and transform animations. Xbox 360/PS3 Granny variants, vector
   tracks, nonidentity animated scale/shear, and curve codecs outside the
   documented set are rejected explicitly.
-- PC character materials are currently validated with the `US_01_Body`
-  default shader set and use `MP_001`'s duplicated shared-character DX11
-  database as the deterministic binding source. Character heads, eyes,
-  eyelashes, alternate kits, and exact Frostbite lighting/specular arithmetic
-  still require additional validation.
+- PC modular character materials are validated with the complete US Assault
+  body/head/headgear set. Shared character bindings use `MP_001`'s duplicated
+  DX11 database; standalone AH60 bindings fall back to the matching `MP_004`
+  database. AH60 Main/glass/interior/minigun source relationships are
+  verified, but exact Frostbite environment lighting and every alternate
+  vehicle kit still require additional validation.
+- Composite part membership, ordered LOD0 records, bounds, and mesh-set bind
+  transforms are imported. Initial visibility uses DBX health/model states
+  plus explicit wreck/damaged/blurred names. Runtime pivots, parent hierarchy,
+  state switching, rigs, and animation remain unverified and are not
+  synthesized.
 - Complete-map assembly is currently validated only for the PC retail
   `MP_001` graph. Xbox whole-map assembly is not yet implemented.
 - Representative map color, alpha, normal, OcRGB, and detail bindings are
@@ -239,8 +310,11 @@ An optional reproducible performance benchmark is also available:
 blender --background --factory-startup --python tests\benchmark_blender_import.py
 ```
 
-The tests cover PC/Xbox mesh byte order, accelerated and fallback Xbox texture
-paths, DDS generation, terrain sampling, DBX conversion, an end-to-end
+The tests cover PC/Xbox mesh byte order, shared composite index streams,
+source part-ID inference, lossless splitting, little-/big-endian composite
+bind records, modular DBX resolution and vehicle state classification,
+accelerated and fallback Xbox texture paths, DDS generation, terrain sampling,
+DBX conversion, an end-to-end
 synthetic XDVDFS -> FbRB -> MeshData path, bounded Granny skeleton/animation
 fixtures, the four-channel PC character shader declaration, degenerate
 coordinate routing regressions, character binding roles and packed-normal
@@ -269,8 +343,27 @@ blender --background --factory-startup `
   --output <OUTPUT_BLEND>
 ```
 
-It imports `US_01_Body`, `ske01`, `StandIdle`, and `RunForward`; checks bind
-invariance, sampled pose matrices, four source coordinate channels, corrected
-LegStandard/MOLLE/pouches UV routing, 13 exact material keys, source-backed
-DDS images, Base Color and packed-normal graphs; then saves, reopens, and
-verifies the armature, skinned subsets, materials, modifiers, and Actions.
+It imports the US Assault body, head, and headgear on `ske01`, then adds
+`StandIdle` and `RunForward`; checks bind invariance, sampled pose matrices,
+four source coordinate channels, corrected LegStandard/MOLLE/pouches UV
+routing, all 23 component materials, source-backed DDS images, Base Color and
+packed-normal graphs; then saves, reopens, and verifies the modular metadata,
+armature, skinned subsets, materials, modifiers, and Actions.
+
+The equivalent AH60 vehicle integration check is:
+
+```powershell
+blender --background --factory-startup `
+  --python tests\blender_vehicle_integration.py -- `
+  --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
+  --output <OUTPUT_BLEND>
+```
+
+It verifies 36 named source-part collections, 27,388 total triangles, the
+34-visible/2-hidden part state, all 11 double-`Wreck` fragments hidden,
+single-`Wreck` collections and their healthy fragments visible, known
+door/rotor/wheel bind
+translations, authored WingLeft LOD0 topology, its four declared coordinate
+layers, verified Main/glass/interior/minigun graphs, source-backed materials
+and images, assembly metadata, and save/reopen persistence without introducing
+an unverified vehicle armature.

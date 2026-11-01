@@ -17,14 +17,16 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from bc2_frostbite_importer import blender_addon
+from bc2_frostbite_importer.core.assembly import modular_assembly
+from bc2_frostbite_importer.core.dbx import parse_dbx
 from bc2_frostbite_importer.core.granny import (
     parse_granny_animation,
 )
-from bc2_frostbite_importer.core.mesh import parse_meshdata
 from bc2_frostbite_importer.core.repository import AssetRepository
 
 
 ARCHIVE_PATH = "Dist/win32/levels/mp_common/level-00.fbrb"
+ASSEMBLY_PATH = "Objects/Soldiers/US/Assault.dbx"
 BODY_PATH = "Characters/US/US_Models/US_01_Body_Mesh.res"
 ANIMATION_PATHS = (
     "Characters/Animations/BSet_Rif/3P/StandIdle.res",
@@ -161,28 +163,65 @@ def main():
         )
         if body_asset is None:
             raise AssertionError(f"Body asset is missing: {BODY_PATH}")
-        mesh_asset, mesh_raw = repository.read_asset(
+        mesh_asset, _ = repository.read_asset(
             int(body_asset["id"]),
             max_size=1 << 30,
             resolve_mesh=True,
         )
-        parsed_mesh = parse_meshdata(
-            mesh_raw,
-            mesh_asset["platform"],
-            include_z_only=False,
+        assembly_asset = repository.catalog.find_asset(
+            ASSEMBLY_PATH,
+            (ARCHIVE_PATH,),
         )
+        if assembly_asset is None:
+            raise AssertionError(
+                f"Character assembly is missing: {ASSEMBLY_PATH}"
+            )
+        _, assembly_raw = repository.read_asset(
+            int(assembly_asset["id"]),
+            max_size=256 << 20,
+        )
+        assembly = modular_assembly(
+            parse_dbx(assembly_raw),
+            ASSEMBLY_PATH,
+        )
+        if assembly is None:
+            raise AssertionError("US Assault DBX was not resolved as an assembly")
         settings = _settings()
         skeleton_asset, skeleton = blender_addon._read_referenced_skeleton(
             repository, body_asset
         )
-        armature, mesh_objects = blender_addon._create_character(
+        imported = blender_addon._create_modular_assembly(
             bpy.context,
             repository,
-            body_asset,
-            parsed_mesh,
-            mesh_asset,
+            assembly_asset,
+            assembly,
             settings,
         )
+        armature = imported.armature
+        if armature is None:
+            raise AssertionError("US Assault assembly has no shared armature")
+        components_by_role = {
+            component.definition.role: component
+            for component in imported.components
+        }
+        if set(components_by_role) != {"BODY", "HEAD", "HEADGEAR"}:
+            raise AssertionError(
+                "US Assault did not resolve body, head, and headgear modules"
+            )
+        mesh_objects = list(components_by_role["BODY"].objects)
+        all_mesh_objects = [
+            obj
+            for component in imported.components
+            for obj in component.objects
+        ]
+        if any(
+            component.collection.hide_viewport
+            or component.collection.hide_render
+            for component in imported.components
+        ):
+            raise AssertionError("A character component is hidden by default")
+        if imported.root_collection.get("bc2_assembly_kind") != "CHARACTER":
+            raise AssertionError("Character assembly metadata is missing")
         armature.show_in_front = True
         armature.data.display_type = "OCTAHEDRAL"
 
@@ -198,6 +237,11 @@ def main():
             raise AssertionError(
                 f"US_01 topology is {(vertex_count, triangle_count)}"
             )
+        if any(
+            not component.objects
+            for component in imported.components
+        ):
+            raise AssertionError("A linked character component has no meshes")
         for obj in mesh_objects:
             if [layer.name for layer in obj.data.uv_layers] != [
                 "UVMap",
@@ -218,6 +262,24 @@ def main():
                     f"{obj.name} uses incorrect character UV offsets"
                 )
         materials = [obj.data.materials[0] for obj in mesh_objects]
+        all_materials = [
+            obj.data.materials[0]
+            for obj in all_mesh_objects
+            if obj.data.materials
+        ]
+        if len(all_materials) != len(all_mesh_objects):
+            raise AssertionError(
+                "A linked character component has no source material"
+            )
+        if any(
+            not str(
+                material.get("bc2_material_status", "")
+            ).startswith("resolved ")
+            for material in all_materials
+        ):
+            raise AssertionError(
+                "A linked character component has an unresolved material"
+            )
         if any(
             material.get("bc2_material_status")
             != "resolved character material graph"
@@ -229,8 +291,12 @@ def main():
             for material in materials
         ):
             raise AssertionError("US_01 material keys did not resolve exactly")
-        if armature.get("bc2_resolved_material_count") != 13:
-            raise AssertionError("US_01 did not resolve all 13 materials")
+        if armature.get("bc2_resolved_material_count") != len(
+            all_mesh_objects
+        ):
+            raise AssertionError(
+                "US Assault did not resolve every component material"
+            )
         for material in materials:
             shader = next(
                 node
@@ -317,7 +383,7 @@ def main():
                 )
         source_images = {
             node.image.name: node.image
-            for material in materials
+            for material in all_materials
             for node in material.node_tree.nodes
             if node.type == "TEX_IMAGE" and node.image is not None
         }
@@ -333,7 +399,7 @@ def main():
                     f"{image.name} is not backed by a source DDS file"
                 )
         skeleton_names = {bone.name for bone in skeleton.bones}
-        for obj in mesh_objects:
+        for obj in all_mesh_objects:
             if any(
                 group.name not in skeleton_names
                 for group in obj.vertex_groups
@@ -361,7 +427,7 @@ def main():
         bpy.context.scene.frame_set(1)
         bpy.context.view_layer.update()
         rest_error = 0.0
-        for obj in mesh_objects:
+        for obj in all_mesh_objects:
             dependency_graph = bpy.context.evaluated_depsgraph_get()
             evaluated = obj.evaluated_get(dependency_graph)
             evaluated_mesh = evaluated.to_mesh()
@@ -457,6 +523,23 @@ def main():
             action.name for action in bpy.data.actions
         }:
             raise AssertionError("Saved scene lost an imported Action")
+        reopened_all_meshes = [
+            obj
+            for obj in bpy.data.objects
+            if obj.type == "MESH"
+            and obj.get("bc2_assembly_path") == ASSEMBLY_PATH
+        ]
+        if len(reopened_all_meshes) != len(all_mesh_objects):
+            raise AssertionError(
+                "Saved scene lost linked character component meshes"
+            )
+        if {
+            obj.get("bc2_component_role")
+            for obj in reopened_all_meshes
+        } != {"BODY", "HEAD", "HEADGEAR"}:
+            raise AssertionError(
+                "Saved scene lost character component metadata"
+            )
         reopened_meshes = [
             obj
             for obj in bpy.data.objects
@@ -471,15 +554,16 @@ def main():
                 and modifier.object == reopened_armature
                 for modifier in obj.modifiers
             )
-            for obj in reopened_meshes
+            for obj in reopened_all_meshes
         ):
             raise AssertionError("Saved scene lost an Armature modifier")
         reopened_materials = [
-            obj.data.materials[0] for obj in reopened_meshes
+            obj.data.materials[0] for obj in reopened_all_meshes
         ]
         if any(
-            material.get("bc2_material_status")
-            != "resolved character material graph"
+            not str(
+                material.get("bc2_material_status", "")
+            ).startswith("resolved ")
             for material in reopened_materials
         ):
             raise AssertionError("Saved scene lost character material graphs")
@@ -492,7 +576,12 @@ def main():
 
         metrics = {
             "armature_bones": len(reopened_armature.data.bones),
-            "mesh_subsets": len(reopened_meshes),
+            "assembly_components": {
+                role: len(component.objects)
+                for role, component in sorted(components_by_role.items())
+            },
+            "mesh_subsets": len(reopened_all_meshes),
+            "body_mesh_subsets": len(reopened_meshes),
             "vertices": vertex_count,
             "triangles": triangle_count,
             "materials": len(reopened_materials),

@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from bc2_frostbite_importer import blender_addon
+from bc2_frostbite_importer.core.assembly import AssemblyPart
 from bc2_frostbite_importer.core.level import (
     FrostbiteTransform,
     LevelPlacement,
@@ -30,7 +31,11 @@ from bc2_frostbite_importer.core.granny import (
     GrannySkeleton,
     GrannyTransformTrack,
 )
-from bc2_frostbite_importer.core.mesh import MeshAsset, MeshSubset
+from bc2_frostbite_importer.core.mesh import (
+    CompositePart,
+    MeshAsset,
+    MeshSubset,
+)
 from bc2_frostbite_importer.core.shaderdb import (
     ShaderDatabase,
     ShaderMaterial,
@@ -97,6 +102,234 @@ def _test_mesh(context):
         raise AssertionError("Batched vertex weights are incorrect")
     if abs(obj.vertex_groups["Bone_003"].weight(0) - 0.75) >= 1e-5:
         raise AssertionError("Batched vertex weights are incorrect")
+
+
+def _test_composite_parts(context):
+    subset = MeshSubset(
+        name="VehicleSurface",
+        positions=(
+            (0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (2.0, 0.0, 0.0),
+            (3.0, 0.0, 0.0),
+            (2.0, 1.0, 0.0),
+        ),
+        faces=((0, 1, 2), (3, 4, 5)),
+        uvs=(
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (0.0, 1.0),
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (0.0, 1.0),
+        ),
+        influences=((), (), (), (), (), ()),
+        vertex_stride=32,
+        palette=(0, 1),
+        part_indices=(0, 0, 0, 1, 1, 1),
+        part_index_offset=28,
+    )
+    wreck_subset = MeshSubset(
+        name="lod0_WreckPartTail_Wreck",
+        positions=(
+            (0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+        ),
+        faces=((0, 1, 2),),
+        uvs=((0.0, 0.0), (1.0, 0.0), (0.0, 1.0)),
+        influences=((), (), ()),
+        vertex_stride=32,
+        palette=(0,),
+        part_indices=(1, 1, 1),
+        part_index_offset=28,
+    )
+    main_wreck_subset = MeshSubset(
+        name="lod0_WreckPartTail_Main",
+        positions=(
+            (0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+        ),
+        faces=((0, 1, 2),),
+        uvs=((0.0, 0.0), (1.0, 0.0), (0.0, 1.0)),
+        influences=((), (), ()),
+        vertex_stride=32,
+        palette=(0,),
+        part_indices=(1, 1, 1),
+        part_index_offset=28,
+    )
+    parsed = MeshAsset(
+        mesh_type=2,
+        endian="<",
+        subsets=(subset, wreck_subset, main_wreck_subset),
+    )
+    settings = SimpleNamespace(
+        axis_conversion=True,
+        unit_scale=2.0,
+        flip_v=True,
+    )
+    asset = {
+        "path": "Objects/Vehicles/Test/Test_Mesh_lod0_data.res",
+        "archive_path": "Dist/Test.fbrb",
+        "platform": "pc",
+    }
+    root = blender_addon._new_collection(context, "BC2_TestVehicle")
+    components = blender_addon._new_child_collection(root, "Components")
+    component = blender_addon._new_child_collection(
+        components,
+        "00_Test_Mesh",
+    )
+    objects = blender_addon._create_mesh_objects(
+        context,
+        parsed,
+        asset,
+        settings,
+        collection=component,
+        split_parts=True,
+        composite_parts=(
+            CompositePart(
+                name="Hull",
+                bounds=(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0),
+                transform=(
+                    1.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0,
+                    0.0, 0.0, 1.0,
+                    1.0, 2.0, 3.0,
+                ),
+                source_offset=0,
+            ),
+            CompositePart(
+                name="DoorWreck",
+                bounds=(-2.0, -2.0, -2.0, 2.0, 2.0, 2.0),
+                transform=(
+                    0.0, 0.0, 1.0,
+                    0.0, 1.0, 0.0,
+                    -1.0, 0.0, 0.0,
+                    4.0, 5.0, 6.0,
+                ),
+                source_offset=1,
+            ),
+        ),
+        part_states=(
+            AssemblyPart(
+                name="Hull",
+                state="DEFAULT",
+                source="health_state",
+                component_type="PartComponentData",
+                component_name="Hull",
+            ),
+        ),
+    )
+    if len(objects) != 4:
+        raise AssertionError("Composite surfaces were not split by part")
+    parts_collection = next(
+        (child for child in component.children if child.name == "Parts"),
+        None,
+    )
+    if parts_collection is None:
+        raise AssertionError("Composite Parts collection was not created")
+    if {child.name for child in parts_collection.children} != {
+        "000_Hull",
+        "001_DoorWreck",
+    }:
+        raise AssertionError("Composite source part collections are incorrect")
+    part_collections = {
+        child["bc2_part_name"]: child
+        for child in parts_collection.children
+    }
+    if (
+        part_collections["Hull"].hide_viewport
+        or part_collections["Hull"].hide_render
+    ):
+        raise AssertionError("Default composite part is hidden")
+    wreck = part_collections["DoorWreck"]
+    if wreck.hide_viewport or wreck.hide_render:
+        raise AssertionError("Single-Wreck composite part is hidden")
+    if wreck["bc2_part_state"] != "DEFAULT":
+        raise AssertionError("Single-Wreck part state metadata is incorrect")
+    if not wreck["bc2_part_default_visible"]:
+        raise AssertionError(
+            "Single-Wreck part visibility metadata is incorrect"
+        )
+    if wreck["bc2_part_state_source"] != "part_name":
+        raise AssertionError("Destroyed part state source is incorrect")
+    hull_collection = part_collections["Hull"]
+    if (
+        hull_collection["bc2_part_state_source"] != "health_state"
+        or hull_collection["bc2_source_component_type"]
+        != "PartComponentData"
+        or hull_collection["bc2_source_component_name"] != "Hull"
+    ):
+        raise AssertionError("DBX part-state metadata is incorrect")
+    if (
+        "bc2_part_bounds" not in hull_collection
+        or "bc2_part_transform" not in hull_collection
+    ):
+        raise AssertionError("Composite transform metadata is missing")
+    if component["bc2_default_visible_part_count"] != 2:
+        raise AssertionError("Default-visible part count is incorrect")
+    if component["bc2_hidden_part_count"] != 0:
+        raise AssertionError("Hidden part count is incorrect")
+    for obj in objects:
+        if len(obj.data.polygons) != 1:
+            raise AssertionError("Composite part topology is not compact")
+        expected_name = ("Hull", "DoorWreck")[obj["bc2_part_index"]]
+        if obj["bc2_part_name"] != expected_name:
+            raise AssertionError("Composite part metadata is incorrect")
+    hull = next(obj for obj in objects if obj["bc2_part_name"] == "Hull")
+    wreck_obj = next(
+        obj for obj in objects if obj["bc2_part_name"] == "DoorWreck"
+    )
+    _assert_vector(hull.matrix_basis.translation, (2.0, -6.0, 4.0))
+    _assert_vector(
+        wreck_obj.matrix_basis.translation,
+        (8.0, -12.0, 10.0),
+    )
+    expected_rotation = (
+        (0.0, -1.0, 0.0),
+        (1.0, 0.0, 0.0),
+        (0.0, 0.0, 1.0),
+    )
+    for actual, expected in zip(
+        wreck_obj.matrix_basis.to_3x3(),
+        expected_rotation,
+    ):
+        _assert_vector(actual, expected)
+    source_wreck = next(
+        obj
+        for obj in objects
+        if "wreckparttail_wreck" in obj.name.casefold()
+    )
+    if not source_wreck.hide_viewport or not source_wreck.hide_render:
+        raise AssertionError("Wreck-named geometry is visible by default")
+    if source_wreck.get("bc2_geometry_default_visible") is not False:
+        raise AssertionError("Wreck geometry visibility metadata is incorrect")
+    if source_wreck.get("bc2_part_name") != "DoorWreck":
+        raise AssertionError("Double-Wreck geometry used the wrong part")
+    if (
+        source_wreck.get("bc2_geometry_visibility_source")
+        != "name_contains_wreck_twice"
+    ):
+        raise AssertionError("Wreck geometry hide reason is missing")
+    single_wreck = next(
+        obj
+        for obj in objects
+        if "wreckparttail_main" in obj.name.casefold()
+    )
+    if single_wreck.hide_viewport or single_wreck.hide_render:
+        raise AssertionError("Single-Wreck geometry is hidden")
+    if single_wreck.hide_get():
+        raise AssertionError(
+            "Single-Wreck parent collection hides its geometry"
+        )
+    if single_wreck.get("bc2_part_name") != "DoorWreck":
+        raise AssertionError("Single-Wreck geometry used the wrong part")
+    if single_wreck.get("bc2_geometry_wreck_name_count") != 1:
+        raise AssertionError("Single-Wreck name count is incorrect")
+    if single_wreck.get("bc2_geometry_default_visible") is not True:
+        raise AssertionError("Single-Wreck geometry is not default-visible")
 
 
 def _test_terrain(context):
@@ -501,6 +734,247 @@ def _test_reflected_material_roles():
         raise AssertionError("Layered material omitted source occlusion")
 
 
+def _test_verified_vehicle_material_graphs():
+    main_surface = SurfaceShader(
+        "Main",
+        (
+            "objects/vehicles/air/ah60/shaders/main/"
+            "0ff8511e-ef09-4249-a360-f1c598aed430"
+        ),
+        (
+            "Objects/Vehicles/Air/AH60/AH60_Mesh/"
+            "Objects/Vehicles/Air/AH60/Shaders/Main"
+        ),
+    )
+    main_bindings = (
+        ShaderTextureBinding(
+            1,
+            "Textures/Vehicles/AH60/Ah60Blackhawk_C",
+            ("texture_Texture7",),
+        ),
+        ShaderTextureBinding(
+            2,
+            "Textures/Vehicles/UsSymbols/Symbols_Us",
+            ("texture_Texture4",),
+        ),
+        ShaderTextureBinding(
+            3,
+            "Textures/Vehicles/Dirt/DirtMaskRGB",
+            ("texture_Texture2",),
+        ),
+        ShaderTextureBinding(
+            4,
+            "Textures/Vehicles/AH60/Ah60Blackhawk_D",
+            ("texture_Texture3",),
+        ),
+        ShaderTextureBinding(
+            5,
+            "Textures/_MASK/Msk_Generic",
+            ("texture_Texture6",),
+        ),
+    )
+    main_roles = blender_addon._surface_binding_roles(
+        main_surface,
+        main_bindings,
+    )
+    if main_roles != ("COLOR", "COLOR", "MASK", "DETAIL", "MASK"):
+        raise AssertionError("Verified AH60 Main roles are incorrect")
+    main_uv_maps = tuple(
+        blender_addon._surface_binding_uv_map(
+            main_surface,
+            binding,
+            role,
+        )
+        for binding, role in zip(main_bindings, main_roles)
+    )
+    if main_uv_maps != ("UV1", "UV2", "UV3", "UVMap", "UV1"):
+        raise AssertionError("Verified AH60 Main UV routing is incorrect")
+    if blender_addon._surface_binding_uv_scale(
+        main_surface,
+        main_bindings[4],
+    ) != (15.0, 15.0):
+        raise AssertionError("AH60 Main generic mask is not repeated by 15")
+
+    material = bpy.data.materials.new("BC2 Verified AH60 Main")
+    nodes, links, shader = blender_addon._material_nodes(material)
+    texture_nodes = []
+    for binding, role in zip(main_bindings, main_roles):
+        node = nodes.new("ShaderNodeTexImage")
+        node.name = f"t{binding.index}"
+        texture_nodes.append((binding, role, node))
+    if not blender_addon._configure_verified_surface_material(
+        material,
+        main_surface,
+        nodes,
+        links,
+        shader,
+        texture_nodes,
+    ):
+        raise AssertionError("Verified AH60 Main graph was not created")
+    if (
+        shader.inputs["Base Color"].links[0].from_node.name
+        != "BC2 AH60 main detail modulation"
+    ):
+        raise AssertionError("AH60 Main source color relationship is missing")
+
+    minigun_surface = SurfaceShader(
+        "Minigun_Main",
+        (
+            "objects/weapons/stationary/minigun/shaders/main/"
+            "44665ec2-1eb9-4d51-a6fe-531a694395ca"
+        ),
+        (
+            "Objects/Vehicles/Air/AH60/AH60_Mesh/"
+            "Objects/Weapons/Stationary/Minigun/Shaders/Main"
+        ),
+    )
+    minigun_bindings = (
+        ShaderTextureBinding(
+            2,
+            "Textures/Vehicles/UsSymbols/Symbols_Us",
+            ("texture_Texture",),
+        ),
+        ShaderTextureBinding(
+            3,
+            "Textures/_MASK/Msk_Generic",
+            ("texture_Texture10",),
+        ),
+        ShaderTextureBinding(
+            4,
+            "Textures/Weapons/Stationary/MiniGun/MiniGun_C",
+            ("texture_Color",),
+        ),
+    )
+    roles = blender_addon._surface_binding_roles(
+        minigun_surface,
+        minigun_bindings,
+    )
+    if roles != ("COLOR", "MASK", "SPECULAR"):
+        raise AssertionError("Verified minigun binding roles are incorrect")
+    if blender_addon._surface_binding_uv_map(
+        minigun_surface,
+        minigun_bindings[0],
+        roles[0],
+    ) != "UV1":
+        raise AssertionError("Minigun symbols do not use UV1")
+    if blender_addon._surface_binding_uv_map(
+        minigun_surface,
+        minigun_bindings[1],
+        roles[1],
+    ) != "UVMap":
+        raise AssertionError("Minigun generic mask does not use UVMap")
+    if blender_addon._surface_binding_uv_map(
+        minigun_surface,
+        minigun_bindings[2],
+        roles[2],
+    ) != "UVMap":
+        raise AssertionError("Minigun control map does not use UVMap")
+    if blender_addon._surface_binding_uv_scale(
+        minigun_surface,
+        minigun_bindings[1],
+    ) != (13.0, 13.0):
+        raise AssertionError("Minigun generic mask is not repeated by 13")
+
+    material = bpy.data.materials.new("BC2 Verified Minigun")
+    nodes, links, shader = blender_addon._material_nodes(material)
+    texture_nodes = []
+    for binding, role in zip(minigun_bindings, roles):
+        node = nodes.new("ShaderNodeTexImage")
+        node.name = f"t{binding.index}"
+        texture_nodes.append((binding, role, node))
+    if not blender_addon._configure_verified_surface_material(
+        material,
+        minigun_surface,
+        nodes,
+        links,
+        shader,
+        texture_nodes,
+    ):
+        raise AssertionError("Verified minigun graph was not created")
+    if not shader.inputs["Base Color"].is_linked:
+        raise AssertionError("Verified minigun graph has no Base Color")
+    if not shader.inputs["Specular IOR Level"].is_linked:
+        raise AssertionError("MiniGun_C is not used as a specular mask")
+    if (
+        shader.inputs["Base Color"].links[0].from_node.name
+        != "BC2 minigun base color"
+    ):
+        raise AssertionError("MiniGun_C was promoted to minigun Base Color")
+
+    interior_surface = SurfaceShader(
+        "Interior",
+        (
+            "objects/vehicles/air/ah60/shaders/interior/"
+            "56ff07f2-c5d8-4e5c-ade3-731e43bfe4fe"
+        ),
+        (
+            "Objects/Vehicles/Air/AH60/AH60_Mesh/"
+            "Objects/Vehicles/Air/AH60/Shaders/Interior"
+        ),
+    )
+    material = bpy.data.materials.new("BC2 Verified Interior")
+    nodes, links, shader = blender_addon._material_nodes(material)
+    binding = ShaderTextureBinding(
+        1,
+        "Textures/Vehicles/Common/Interior_D",
+        ("texture_Texture",),
+    )
+    image_node = nodes.new("ShaderNodeTexImage")
+    if not blender_addon._configure_verified_surface_material(
+        material,
+        interior_surface,
+        nodes,
+        links,
+        shader,
+        ((binding, "COLOR", image_node),),
+    ):
+        raise AssertionError("Verified interior graph was not created")
+    if (
+        shader.inputs["Base Color"].links[0].from_node.name
+        != "BC2 interior albedo scale"
+    ):
+        raise AssertionError("Interior source diffuse scale is missing")
+    scale_node = nodes["BC2 interior albedo scale"]
+    if any(
+        abs(value - 0.2) >= 1e-6
+        for value in scale_node.inputs["Color2"].default_value[:3]
+    ):
+        raise AssertionError("Interior source diffuse scale is incorrect")
+
+    glass_surface = SurfaceShader(
+        "Glass",
+        (
+            "objects/vehicles/air/ah60/shaders/glass/"
+            "b962700c-79cf-40a0-8f39-1c4850dad51f"
+        ),
+        (
+            "Objects/Vehicles/Air/AH60/AH60_Mesh/"
+            "Objects/Vehicles/Air/AH60/Shaders/Glass"
+        ),
+    )
+    material = bpy.data.materials.new("BC2 Verified Glass")
+    nodes, links, shader = blender_addon._material_nodes(material)
+    binding = ShaderTextureBinding(
+        2,
+        "Textures/Vehicles/Dirt/DirtMaskRGB",
+        ("texture_Texture2",),
+    )
+    dirt_node = nodes.new("ShaderNodeTexImage")
+    if not blender_addon._configure_verified_surface_material(
+        material,
+        glass_surface,
+        nodes,
+        links,
+        shader,
+        ((binding, "MASK", dirt_node),),
+    ):
+        raise AssertionError("Verified glass graph was not created")
+    if not shader.inputs["Alpha"].is_linked:
+        raise AssertionError("Verified glass graph has no opacity input")
+    if shader.inputs["Transmission Weight"].default_value != 1.0:
+        raise AssertionError("Verified glass graph is not transmissive")
+
+
 def _test_character_material_graph():
     surface = SurfaceShader(
         "ArmStandard",
@@ -792,6 +1266,7 @@ def main():
     blender_addon.register()
     blender_addon.unregister()
     _test_mesh(bpy.context)
+    _test_composite_parts(bpy.context)
     _test_terrain(bpy.context)
     _test_native_image(bpy.context)
     _test_python_fallback()
@@ -799,11 +1274,13 @@ def main():
     _test_verified_normal_graph()
     _test_shader_key_alias()
     _test_reflected_material_roles()
+    _test_verified_vehicle_material_graphs()
     _test_character_material_graph()
     _test_degenerate_subset_materials()
     _test_armature_and_action(bpy.context)
     print(
-        "PASS Blender mesh, rig, action, terrain, map, material, fallback, and DDS paths",
+        "PASS Blender mesh, composite, rig, action, terrain, map, material, "
+        "fallback, and DDS paths",
         flush=True,
     )
 

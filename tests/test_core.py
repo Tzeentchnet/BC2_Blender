@@ -11,6 +11,10 @@ from unittest import mock
 from pathlib import Path
 
 from bc2_frostbite_importer.core import texture
+from bc2_frostbite_importer.core.assembly import (
+    modular_assembly,
+    vehicle_part_state,
+)
 from bc2_frostbite_importer.core.dbx import (
     DbxDocument,
     DbxElement,
@@ -25,7 +29,10 @@ from bc2_frostbite_importer.core.granny import (
 from bc2_frostbite_importer.core.level import FrostbiteTransform, LevelResolver
 from bc2_frostbite_importer.core.mesh import (
     _position_format,
+    parse_composite_lod_part_names,
+    parse_composite_lod_parts,
     parse_meshdata,
+    split_mesh_subset_by_parts,
 )
 from bc2_frostbite_importer.core.repository import AssetRepository
 from bc2_frostbite_importer.core.shaderdb import (
@@ -55,6 +62,69 @@ def make_meshdata(endian: str = ">") -> bytes:
         vertices.extend(b"\0" * 6)
     indices = struct.pack(endian + "3H", 0, 1, 2)
     metadata.extend(struct.pack(endian + "III", len(vertices), len(indices), 0))
+    return bytes(metadata + vertices + indices)
+
+
+def make_composite_meshdata() -> bytes:
+    endian = "<"
+    metadata = bytearray(struct.pack(endian + "IHB", 2, 0, 2))
+    metadata.extend(b"body\0")
+    metadata.extend(
+        struct.pack(
+            endian + "IIIIBBBBH",
+            2,
+            6,
+            0,
+            0,
+            32,
+            3,
+            0,
+            2,
+            2,
+        )
+    )
+    metadata.extend(struct.pack(endian + "2H", 0, 1))
+    metadata.extend(b"door\0")
+    metadata.extend(
+        struct.pack(
+            endian + "IIIIBBBBH",
+            1,
+            3,
+            6,
+            0,
+            32,
+            3,
+            0,
+            1,
+            1,
+        )
+    )
+    metadata.extend(struct.pack(endian + "H", 2))
+
+    vertices = bytearray()
+    positions = (
+        (0.0, 0.0, 0.0),
+        (1.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0),
+        (2.0, 0.0, 0.0),
+        (3.0, 0.0, 0.0),
+        (2.0, 1.0, 0.0),
+        (4.0, 0.0, 0.0),
+        (5.0, 0.0, 0.0),
+        (4.0, 1.0, 0.0),
+    )
+    uvs = ((0.0, 0.0), (1.0, 0.0), (0.0, 1.0)) * 3
+    part_indices = (0, 0, 0, 1, 1, 1, 2, 2, 2)
+    for position, uv, part_index in zip(positions, uvs, part_indices):
+        vertex = bytearray(32)
+        struct.pack_into(endian + "fff", vertex, 0, *position)
+        struct.pack_into(endian + "ee", vertex, 24, *uv)
+        vertex[28:32] = bytes((part_index,)) * 4
+        vertices.extend(vertex)
+    indices = struct.pack(endian + "9H", *range(9))
+    metadata.extend(
+        struct.pack(endian + "III", len(vertices), len(indices), 0)
+    )
     return bytes(metadata + vertices + indices)
 
 
@@ -394,6 +464,73 @@ class MeshTests(unittest.TestCase):
                 self.assertEqual(subset.faces, ((0, 1, 2),))
                 self.assertEqual(subset.positions[1], (1.0, 0.0, 0.0))
 
+    def test_composite_shared_indices_and_part_splitting(self):
+        mesh = parse_meshdata(
+            make_composite_meshdata(),
+            "pc",
+            position_format="FLOAT",
+        )
+        body, door = mesh.subsets
+        self.assertEqual(body.part_indices, (0, 0, 0, 1, 1, 1))
+        self.assertEqual(body.part_index_offset, 28)
+        self.assertEqual(body.faces, ((0, 1, 2), (3, 4, 5)))
+        self.assertEqual(door.positions[0], (4.0, 0.0, 0.0))
+        self.assertEqual(door.faces, ((0, 1, 2),))
+        self.assertEqual(door.part_indices, (2, 2, 2))
+
+        parts = split_mesh_subset_by_parts(body)
+        self.assertEqual(tuple(index for index, _ in parts), (0, 1))
+        for index, subset in parts:
+            self.assertEqual(subset.faces, ((0, 1, 2),))
+            self.assertEqual(len(subset.positions), 3)
+            self.assertEqual(subset.part_indices, (index, index, index))
+            self.assertEqual(len(subset.uvs), 3)
+
+    def test_composite_lod_part_names_preserve_source_order(self):
+        data = (
+            b"header\0lod1|LowPart\0"
+            b"lod0|Fuselage\0noise\0lod0|LeftDoor\0"
+        )
+        self.assertEqual(
+            parse_composite_lod_part_names(data),
+            ("Fuselage", "LeftDoor"),
+        )
+
+    def test_composite_lod_part_payload_is_little_endian(self):
+        payload = (
+            (-1.0, -2.0, -3.0, 4.0, 5.0, 6.0)
+            + (1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 1.0, 0.0)
+            + (7.0, 8.0, 9.0)
+        )
+        data = b"header\0lod0|DoorLeft\0" + struct.pack(
+            "<18f",
+            *payload,
+        )
+        parts = parse_composite_lod_parts(data, platform="pc")
+        self.assertEqual(len(parts), 1)
+        self.assertEqual(parts[0].name, "DoorLeft")
+        self.assertEqual(parts[0].bounds, payload[:6])
+        self.assertEqual(parts[0].transform, payload[6:])
+
+    def test_composite_lod_part_payload_is_big_endian(self):
+        payload = (
+            (-6.0, -5.0, -4.0, 3.0, 2.0, 1.0)
+            + (0.0, 1.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+            + (-9.0, -8.0, -7.0)
+        )
+        data = b"header\0lod0|RotorTail\0" + struct.pack(
+            ">18f",
+            *payload,
+        )
+        parts = parse_composite_lod_parts(
+            data,
+            platform="xbox360",
+        )
+        self.assertEqual(len(parts), 1)
+        self.assertEqual(parts[0].name, "RotorTail")
+        self.assertEqual(parts[0].bounds, payload[:6])
+        self.assertEqual(parts[0].transform, payload[6:])
+
     def test_one_influence_vertices_use_their_palette_indices(self):
         metadata = bytearray(struct.pack("<IHB", 1, 0, 1))
         metadata.extend(b"rigid\0")
@@ -478,6 +615,101 @@ class MeshTests(unittest.TestCase):
                     (((4, 1.0),), ((4, 1.0),), ((4, 1.0),)),
                 )
 
+    def test_pc_composite_stride_48_uses_declared_uv_channels(self):
+        metadata = bytearray(struct.pack("<IHB", 2, 0, 1))
+        metadata.extend(b"composite\0")
+        metadata.extend(
+            struct.pack(
+                "<IIIIBBBBH",
+                2,
+                6,
+                0,
+                0,
+                48,
+                3,
+                0,
+                2,
+                2,
+            )
+        )
+        metadata.extend(struct.pack("<2H", 31, 32))
+        positions = (
+            (0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (2.0, 0.0, 0.0),
+            (3.0, 0.0, 0.0),
+            (2.0, 1.0, 0.0),
+        )
+        vertices = bytearray()
+        for index, position in enumerate(positions):
+            vertex = bytearray(48)
+            struct.pack_into("<eee", vertex, 0, *position)
+            struct.pack_into(
+                "<ee",
+                vertex,
+                24,
+                index / 10.0,
+                index / 20.0,
+            )
+            struct.pack_into(
+                "<ee",
+                vertex,
+                28,
+                index / 6.0,
+                1.0 - index / 6.0,
+            )
+            struct.pack_into(
+                "<ee",
+                vertex,
+                32,
+                0.25 + index / 20.0,
+                0.5,
+            )
+            part_index = 31 if index < 3 else 32
+            vertex[36:40] = bytes((part_index,)) * 4
+            struct.pack_into(
+                "<ee",
+                vertex,
+                40,
+                0.75,
+                index / 10.0,
+            )
+            vertices.extend(vertex)
+        indices = struct.pack("<6H", *range(6))
+        metadata.extend(
+            struct.pack("<III", len(vertices), len(indices), 0)
+        )
+
+        subset = parse_meshdata(
+            bytes(metadata + vertices + indices),
+            "pc",
+            position_format="HALF",
+        ).subsets[0]
+
+        self.assertEqual(subset.part_index_offset, 36)
+        self.assertEqual(subset.part_indices, (31, 31, 31, 32, 32, 32))
+        self.assertEqual(subset.uv_offsets, (24, 28, 32, 40))
+        self.assertAlmostEqual(subset.uvs[5][0], 0.5, places=3)
+        self.assertAlmostEqual(
+            subset.secondary_uvs[1][0],
+            1.0 / 6.0,
+            places=3,
+        )
+        self.assertAlmostEqual(
+            subset.additional_uvs[0][4][0],
+            0.45,
+            places=3,
+        )
+        self.assertAlmostEqual(
+            subset.additional_uvs[1][5][1],
+            0.5,
+            places=3,
+        )
+        split = dict(split_mesh_subset_by_parts(subset))
+        self.assertEqual(split[31].uv_offsets, (24, 28, 32, 40))
+        self.assertEqual(len(split[31].additional_uvs), 2)
+
     def test_stride_48_uses_primary_and_secondary_uv_channels(self):
         metadata = bytearray(struct.pack("<IHB", 1, 0, 1))
         metadata.extend(b"surface\0")
@@ -552,13 +784,13 @@ class MeshTests(unittest.TestCase):
                 (0.9, 0.2),
                 (0.4, 0.5),
                 (0.6, 0.7),
-                (0.8, 0.9),
+                (0.7, 0.8),
             ),
             (
                 (0.1, 0.9),
                 (0.5, 0.6),
                 (0.7, 0.8),
-                (0.9, 0.1),
+                (0.7, 0.8),
             ),
         )
         positions = (
@@ -598,7 +830,7 @@ class MeshTests(unittest.TestCase):
             subset.additional_uvs[0][0][0], 0.5, places=3
         )
         self.assertAlmostEqual(
-            subset.additional_uvs[1][2][1], 0.1, places=3
+            subset.additional_uvs[1][2][1], 0.8, places=3
         )
 
     def test_selects_one_position_format_for_related_subsets(self):
@@ -823,6 +1055,235 @@ class TerrainTests(unittest.TestCase):
 
 
 class DbxTests(unittest.TestCase):
+    def test_character_modular_assembly_uses_meshes3p(self):
+        body = element(
+            "complex",
+            element(
+                "field",
+                name="Mesh",
+                ref="Characters/US_01_Body_Mesh/BODY-GUID",
+            ),
+            element(
+                "field",
+                name="MeshShaderSet",
+                ref="Characters/US_01_Body_Shaders/SHADER-GUID",
+            ),
+            element("field", name="RandomGroup", value="-1"),
+        )
+        head = element(
+            "complex",
+            element(
+                "field",
+                name="Mesh",
+                ref="Characters/US_01_Head_Mesh/HEAD-GUID",
+            ),
+            element("field", name="RandomGroup", value="0"),
+        )
+        instance = element(
+            "instance",
+            element("array", body, head, name="Meshes3p"),
+            guid="ROOT",
+            type="GameSharedResources.SoldierEntityData",
+            id="US_Assault",
+        )
+        document = DbxDocument(
+            element(
+                "partition",
+                instance,
+                guid="PARTITION",
+                primaryInstance="ROOT",
+            )
+        )
+
+        assembly = modular_assembly(
+            document,
+            "Objects/Soldiers/US/Assault.dbx",
+        )
+
+        self.assertIsNotNone(assembly)
+        self.assertEqual(assembly.kind, "CHARACTER")
+        self.assertEqual(assembly.name, "US_Assault")
+        self.assertEqual(
+            tuple(component.role for component in assembly.components),
+            ("BODY", "HEAD"),
+        )
+        self.assertEqual(assembly.components[0].random_group, -1)
+        self.assertEqual(assembly.components[1].random_group, 0)
+        self.assertEqual(
+            assembly.components[0].mesh_set_path,
+            "Characters/US_01_Body_Mesh.res",
+        )
+        self.assertEqual(
+            assembly.components[0].shader_set_reference,
+            "Characters/US_01_Body_Shaders/SHADER-GUID",
+        )
+
+    def test_vehicle_modular_assembly_uses_composite_mesh(self):
+        instance = element(
+            "instance",
+            element(
+                "field",
+                name="Mesh",
+                ref="Objects/Vehicles/Air/AH60/AH60_Mesh/MESH-GUID",
+            ),
+            guid="ROOT",
+            type="GameSharedResources.VehicleEntityData",
+            id="AH60",
+        )
+        document = DbxDocument(
+            element(
+                "partition",
+                instance,
+                guid="PARTITION",
+                primaryInstance="ROOT",
+            )
+        )
+
+        assembly = modular_assembly(
+            document,
+            "Objects/Vehicles/Air/AH60/AH60.dbx",
+        )
+
+        self.assertIsNotNone(assembly)
+        self.assertEqual(assembly.kind, "VEHICLE")
+        self.assertEqual(len(assembly.components), 1)
+        self.assertEqual(assembly.components[0].role, "VEHICLE")
+        self.assertEqual(
+            assembly.components[0].mesh_set_path,
+            "Objects/Vehicles/Air/AH60/AH60_Mesh.res",
+        )
+
+    def test_vehicle_parts_use_health_and_model_states(self):
+        entity = element(
+            "instance",
+            element(
+                "field",
+                name="Mesh",
+                ref="Objects/Vehicles/Air/AH60/AH60_Mesh/MESH-GUID",
+            ),
+            element(
+                "array",
+                element("item", ref="COMPONENT"),
+                name="Components",
+            ),
+            guid="ROOT",
+            type="GameSharedResources.VehicleEntityData",
+            id="AH60",
+        )
+        component = element(
+            "instance",
+            element(
+                "array",
+                element("item", ref="FUSELAGE"),
+                element("item", ref="ROTOR"),
+                element("item", ref="WRECK"),
+                name="Components",
+            ),
+            guid="COMPONENT",
+            type="GameSharedResources.VehicleComponentData",
+        )
+        fuselage = element(
+            "instance",
+            element(
+                "array",
+                element("item", ref="HEALTHY"),
+                element("item", ref="DAMAGED"),
+                name="HealthStates",
+            ),
+            guid="FUSELAGE",
+            type="GameSharedResources.PartComponentData",
+            id="Fuselage",
+        )
+        healthy = element(
+            "instance",
+            element("field", name="Health", value="100"),
+            element("field", name="MeshName", value="MainFuselage"),
+            guid="HEALTHY",
+            type="GameSharedResources.VehicleHealthStateData",
+        )
+        damaged = element(
+            "instance",
+            element("field", name="Health", value="40"),
+            element("field", name="MeshName", value="MainFuselageDamaged"),
+            guid="DAMAGED",
+            type="GameSharedResources.VehicleHealthStateData",
+        )
+        rotor = element(
+            "instance",
+            element(
+                "complex",
+                element("field", name="MeshName", value="Rotor"),
+                name="LowRpmModel",
+            ),
+            element(
+                "complex",
+                element("field", name="MeshName", value="RotorBlurred"),
+                name="HighRpmModel",
+            ),
+            guid="ROTOR",
+            type="GameSharedResources.RotorComponentData",
+            id="MainRotor",
+        )
+        wreck = element(
+            "instance",
+            element(
+                "array",
+                element("item", ref="WRECK-STATE"),
+                name="HealthStates",
+            ),
+            guid="WRECK",
+            type="GameSharedResources.PartComponentData",
+            id="Nose",
+        )
+        wreck_state = element(
+            "instance",
+            element("field", name="Health", value="100"),
+            element("field", name="MeshName", value="NoseWreck"),
+            guid="WRECK-STATE",
+            type="GameSharedResources.VehicleHealthStateData",
+        )
+        document = DbxDocument(
+            element(
+                "partition",
+                entity,
+                component,
+                fuselage,
+                healthy,
+                damaged,
+                rotor,
+                wreck,
+                wreck_state,
+                guid="PARTITION",
+                primaryInstance="ROOT",
+            )
+        )
+
+        assembly = modular_assembly(
+            document,
+            "Objects/Vehicles/Air/AH60/AH60.dbx",
+        )
+
+        states = {part.name: part.state for part in assembly.parts}
+        self.assertEqual(states["MainFuselage"], "DEFAULT")
+        self.assertEqual(states["MainFuselageDamaged"], "DAMAGED")
+        self.assertEqual(states["Rotor"], "DEFAULT")
+        self.assertEqual(states["RotorBlurred"], "ALTERNATE")
+        self.assertEqual(states["NoseWreck"], "DEFAULT")
+
+    def test_vehicle_part_state_classifies_name_fallbacks(self):
+        self.assertEqual(vehicle_part_state("MainFuselage"), "DEFAULT")
+        self.assertEqual(vehicle_part_state("EngineDamaged"), "DAMAGED")
+        self.assertEqual(vehicle_part_state("RotorBlurred"), "ALTERNATE")
+        self.assertEqual(vehicle_part_state("WreckPartTail"), "DEFAULT")
+        self.assertEqual(
+            vehicle_part_state("WreckPartTail_Wreck"),
+            "DESTROYED",
+        )
+        self.assertEqual(
+            vehicle_part_state("MainFuselageDestroyed"),
+            "DESTROYED",
+        )
+
     def test_binary_dbx_to_typed_tree_and_xml(self):
         strings = (b"\0", b"partition\0", b"guid\0", b"ABC\0")
         offsets = []

@@ -142,9 +142,19 @@ weights. It is not sufficient to implement BC2 part splitting because:
 - it does not reconstruct part names, parent transforms, or pivots;
 - tested BC2 type-2 strides do not share the validated type-1 byte layout.
 
-The current conservative BC2 fallback therefore remains unchanged. Future work
-must correlate candidate per-vertex part identifiers with a BC2 DBX hierarchy
-and retail transforms before exposing separate parts.
+At the time of this audit the conservative BC2 fallback therefore remained
+unchanged. Subsequent BC2-only retail investigation independently correlated
+aligned repeated-byte fields with subset palettes and ordered `lod0|PartName`
+strings. Version 0.6.0 uses those verified Frostbite 1 rules to separate
+composite geometry. The MaxScript did not supply the BC2 field offsets, shared
+index rebasing rule, names, or validation.
+
+A further BC2-only retail pass decoded the 18-float bounds and bind-transform
+payload following each LOD part name. Version 0.6.1 applies those authoritative
+mesh-set placements and uses the vehicle DBX component graph for initial
+healthy/damaged/alternate visibility. This evidence still does not establish
+runtime pivots, parenting, state-switch animation, or a vehicle rig, so none is
+invented.
 
 ## Skeleton and transform findings
 
@@ -226,7 +236,7 @@ invariants.
 | FbRB archive and catalog | None | **No evidence** |
 | Static/rigid MeshData | Declaration-driven attributes, half/full positions, 16-bit triangle lists, two UV semantics | **Corroborating principles**; do not copy later offsets or IDs |
 | Type-1 skinned MeshData | Local palette indices and four byte weights | **Corroborating**; current retail-verified implementation retained |
-| Type-2 composite MeshData | Optional vertex-group detachment as vehicle parts | **Heuristic only**; no code change |
+| Type-2 composite MeshData | Optional vertex-group detachment as vehicle parts | **Corroborating concept only**; version 0.6.1 uses independently verified BC2 IDs, names, index rebasing, and mesh-set bind records, not script offsets |
 | Type-4 tree MeshData | None | **No evidence** |
 | Mesh normals/tangents | Separate declared half-float basis fields | **Research lead**; BC2 semantics and handedness still need retail validation |
 | WaterMesh | None | **No evidence** |
@@ -243,7 +253,7 @@ invariants.
 
 ## Implementation decision
 
-This audit caused no runtime parser or Blender behavior change:
+This audit originally caused no runtime parser or Blender behavior change:
 
 - every directly transferable finding already agrees with a BC2 retail
   invariant or current type-1 gate;
@@ -254,14 +264,23 @@ This audit caused no runtime parser or Blender behavior change:
 Addon version `0.5.1` therefore remains unchanged. The audit updates
 documentation and research priorities only.
 
+After that audit, a separate retail survey of 156 BC2 type-2 LOD0 resources
+verified global part IDs, 24 shared-index subsets, ordered names for 151
+resources, and zero cross-part triangles among 552,570 surveyed triangles.
+Those independent results support the version 0.6.0 composite split path; they
+do not retroactively make later-engine numeric layouts authoritative. A
+subsequent independent BC2 mesh-set/DBX investigation supports the version
+0.6.1 bind placement and default-state visibility behavior; that evidence also
+does not originate from the MaxScripts.
+
 ## Follow-up research
 
 1. Locate or reconstruct BC2 vertex declarations from retail metadata and
    shader input signatures, then replace remaining stride/value guesses.
 2. Decode and validate BC2 normal, tangent, and handedness fields against
    rendered shader behavior.
-3. Correlate type-2 per-vertex data, palettes, DBX part names, parent
-   transforms, and pivots before implementing composite separation.
+3. Decode composite parent transforms and pivots before moving named parts
+   away from their verified source bind pose.
 4. Preserve full declarations, unknown attributes, and local palettes in any
    future mesh export sidecar.
 5. Treat vehicle hierarchy and animation as separate research tasks; the two

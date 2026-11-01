@@ -22,6 +22,9 @@ class MeshSubset:
     additional_uvs: tuple[
         tuple[tuple[float, float], ...], ...
     ] = ()
+    palette: tuple[int, ...] = ()
+    part_indices: tuple[int, ...] = ()
+    part_index_offset: int | None = None
 
 
 @dataclass(frozen=True)
@@ -29,6 +32,14 @@ class MeshAsset:
     mesh_type: int
     endian: str
     subsets: tuple[MeshSubset, ...]
+
+
+@dataclass(frozen=True)
+class CompositePart:
+    name: str
+    bounds: tuple[float, float, float, float, float, float] | None
+    transform: tuple[float, ...] | None
+    source_offset: int
 
 
 @dataclass(frozen=True)
@@ -285,6 +296,8 @@ def _decode_uv_channel(
     stride: int,
     offset: int,
     endian: str,
+    *,
+    require_variation: bool = True,
 ) -> tuple[tuple[float, float], ...] | None:
     values = []
     for vertex in range(count):
@@ -304,7 +317,7 @@ def _decode_uv_channel(
     v_span = max(value[1] for value in values) - min(
         value[1] for value in values
     )
-    if u_span + v_span < 1e-5:
+    if require_variation and u_span + v_span < 1e-5:
         return None
     return tuple(values)
 
@@ -368,6 +381,78 @@ def _read_influences(
     return tuple(result)
 
 
+def _subset_index_base(
+    header: _SubsetHeader,
+    indices: tuple[int, ...],
+) -> int:
+    index_end = header.index_offset + header.primitive_count * 3
+    if index_end > len(indices):
+        raise CorruptDataError(
+            f"MeshData subset points outside the index buffer: {header.name}"
+        )
+    subset_indices = indices[header.index_offset:index_end]
+    if not subset_indices:
+        return 0
+    maximum = max(subset_indices)
+    if maximum < header.vertex_count:
+        return 0
+    base = min(subset_indices)
+    if maximum - base >= header.vertex_count:
+        raise CorruptDataError(
+            f"MeshData index range exceeds vertex count in {header.name}"
+        )
+    return base
+
+
+def _read_composite_part_indices(
+    data: bytes,
+    vertex_offset: int,
+    vertex_count: int,
+    stride: int,
+    palette: tuple[int, ...],
+) -> tuple[tuple[int, ...], int | None]:
+    if not palette:
+        return (), None
+    if len(palette) == 1:
+        return (palette[0],) * vertex_count, None
+
+    palette_values = set(palette)
+    sequences: dict[tuple[int, ...], list[int]] = {}
+    for field_offset in range(0, stride - 3, 4):
+        values = []
+        for vertex in range(vertex_count):
+            start = vertex_offset + vertex * stride + field_offset
+            field = data[start:start + 4]
+            if (
+                len(field) != 4
+                or not (field[0] == field[1] == field[2] == field[3])
+                or field[0] not in palette_values
+            ):
+                break
+            values.append(field[0])
+        else:
+            sequences.setdefault(tuple(values), []).append(field_offset)
+
+    if not sequences:
+        return (), None
+    scored = []
+    for values, offsets in sequences.items():
+        unique = set(values)
+        scored.append(
+            (
+                (len(unique), int(unique == palette_values)),
+                values,
+                offsets,
+            )
+        )
+    best_score = max(item[0] for item in scored)
+    winners = [item for item in scored if item[0] == best_score]
+    if len(winners) != 1:
+        return (), None
+    _, values, offsets = winners[0]
+    return values, min(offsets)
+
+
 def parse_meshdata(
     data: bytes,
     platform: str | None = None,
@@ -387,13 +472,56 @@ def parse_meshdata(
         for header in headers
         if include_z_only or "zonly" not in header.name.casefold()
     ]
+    layouts = {
+        header: _subset_index_base(header, indices)
+        for header in active_headers
+    }
+    composite_part_data = {}
+    composite_part_offsets_by_stride: dict[int, set[int]] = {}
+    if mesh_type == 2:
+        for header in active_headers:
+            index_base = layouts[header]
+            vertex_bytes_end = (
+                header.vertex_offset
+                + (index_base + header.vertex_count) * header.stride
+            )
+            if vertex_bytes_end > vertex_size:
+                raise CorruptDataError(
+                    "MeshData subset points outside geometry buffers: "
+                    f"{header.name}"
+                )
+            subset_vertex_start = (
+                vertex_start
+                + header.vertex_offset
+                + index_base * header.stride
+            )
+            part_data = _read_composite_part_indices(
+                data,
+                subset_vertex_start,
+                header.vertex_count,
+                header.stride,
+                header.palette,
+            )
+            composite_part_data[header] = part_data
+            if part_data[1] is not None:
+                composite_part_offsets_by_stride.setdefault(
+                    header.stride,
+                    set(),
+                ).add(part_data[1])
+    pc_composite_uv_strides = {
+        stride
+        for stride, offsets in composite_part_offsets_by_stride.items()
+        if stride == 48 and offsets == {36}
+    }
     position_formats = {}
     for stride in {header.stride for header in active_headers}:
         position_formats[stride] = _position_format(
             data,
             [
                 (
-                    vertex_start + header.vertex_offset,
+                    vertex_start
+                    + header.vertex_offset
+                    + layouts[header] * header.stride,
                     header.vertex_count,
                     header.stride,
                 )
@@ -405,15 +533,21 @@ def parse_meshdata(
         )
     subsets: list[MeshSubset] = []
     for header in active_headers:
+        index_base = layouts[header]
         vertex_bytes_end = (
-            header.vertex_offset + header.vertex_count * header.stride
+            header.vertex_offset
+            + (index_base + header.vertex_count) * header.stride
         )
         index_end = header.index_offset + header.primitive_count * 3
         if vertex_bytes_end > vertex_size or index_end > total_indices:
             raise CorruptDataError(
                 f"MeshData subset points outside geometry buffers: {header.name}"
             )
-        subset_vertex_start = vertex_start + header.vertex_offset
+        subset_vertex_start = (
+            vertex_start
+            + header.vertex_offset
+            + index_base * header.stride
+        )
         encoding = position_formats[header.stride]
         position_struct = "fff" if encoding == "FLOAT" else "eee"
         positions = tuple(
@@ -436,6 +570,14 @@ def parse_meshdata(
             if endian == "<"
             else ()
         )
+        if (
+            not explicit_uv_offsets
+            and endian == "<"
+            and header.stride in pc_composite_uv_strides
+        ):
+            # The retail PC composite declaration with its part ID at byte 36
+            # exposes four half-float coordinate pairs to the vertex shader.
+            explicit_uv_offsets = (24, 28, 32, 40)
         if explicit_uv_offsets:
             decoded_channels = tuple(
                 _decode_uv_channel(
@@ -445,6 +587,7 @@ def parse_meshdata(
                     header.stride,
                     offset,
                     endian,
+                    require_variation=False,
                 )
                 for offset in explicit_uv_offsets
             )
@@ -504,15 +647,19 @@ def parse_meshdata(
         for face in range(header.primitive_count):
             offset = header.index_offset + face * 3
             triangle = (
-                int(indices[offset]),
-                int(indices[offset + 1]),
-                int(indices[offset + 2]),
+                int(indices[offset]) - index_base,
+                int(indices[offset + 1]) - index_base,
+                int(indices[offset + 2]) - index_base,
             )
-            if max(triangle) >= header.vertex_count:
+            if min(triangle) < 0 or max(triangle) >= header.vertex_count:
                 raise CorruptDataError(
                     f"MeshData index exceeds vertex count in {header.name}"
                 )
             faces.append(triangle)
+        part_indices, part_index_offset = composite_part_data.get(
+            header,
+            ((), None),
+        )
         influences = _read_influences(
             data,
             subset_vertex_start,
@@ -533,11 +680,175 @@ def parse_meshdata(
                 secondary_uvs=secondary_uvs,
                 uv_offsets=uv_offsets,
                 additional_uvs=additional_uvs,
+                palette=header.palette,
+                part_indices=part_indices,
+                part_index_offset=part_index_offset,
             )
         )
     if not subsets:
         raise CorruptDataError("MeshData contains no importable visual subsets")
     return MeshAsset(mesh_type=mesh_type, endian=endian, subsets=tuple(subsets))
+
+
+def split_mesh_subset_by_parts(
+    subset: MeshSubset,
+) -> tuple[tuple[int, MeshSubset], ...]:
+    if not subset.part_indices:
+        return ()
+    if len(subset.part_indices) != len(subset.positions):
+        raise CorruptDataError(
+            f"Composite part count does not match vertices in {subset.name}"
+        )
+
+    grouped_faces: dict[int, list[tuple[int, int, int]]] = {}
+    for face in subset.faces:
+        part_values = {subset.part_indices[index] for index in face}
+        if len(part_values) != 1:
+            raise CorruptDataError(
+                f"Composite triangle crosses part boundaries in {subset.name}"
+            )
+        part_index = next(iter(part_values))
+        grouped_faces.setdefault(part_index, []).append(face)
+
+    result = []
+    for part_index, faces in grouped_faces.items():
+        source_indices = []
+        remap = {}
+        remapped_faces = []
+        for face in faces:
+            remapped = []
+            for source_index in face:
+                target_index = remap.get(source_index)
+                if target_index is None:
+                    target_index = len(source_indices)
+                    remap[source_index] = target_index
+                    source_indices.append(source_index)
+                remapped.append(target_index)
+            remapped_faces.append(tuple(remapped))
+
+        def project(values):
+            return (
+                tuple(values[index] for index in source_indices)
+                if values
+                else ()
+            )
+
+        result.append(
+            (
+                part_index,
+                MeshSubset(
+                    name=subset.name,
+                    positions=project(subset.positions),
+                    faces=tuple(remapped_faces),
+                    uvs=project(subset.uvs),
+                    influences=project(subset.influences),
+                    vertex_stride=subset.vertex_stride,
+                    secondary_uvs=project(subset.secondary_uvs),
+                    uv_offsets=subset.uv_offsets,
+                    additional_uvs=tuple(
+                        project(channel)
+                        for channel in subset.additional_uvs
+                    ),
+                    palette=subset.palette,
+                    part_indices=(part_index,) * len(source_indices),
+                    part_index_offset=subset.part_index_offset,
+                ),
+            )
+        )
+    return tuple(result)
+
+
+def _composite_part_payload(
+    data: bytes,
+    offset: int,
+    endian: str,
+) -> tuple[
+    tuple[float, float, float, float, float, float],
+    tuple[float, ...],
+] | None:
+    if offset + 72 > len(data):
+        return None
+    values = struct.unpack_from(endian + "18f", data, offset)
+    if not all(math.isfinite(value) for value in values):
+        return None
+    bounds = values[:6]
+    if any(bounds[axis] > bounds[axis + 3] for axis in range(3)):
+        return None
+    transform = values[6:]
+    for row in range(3):
+        length = math.sqrt(
+            sum(transform[row * 3 + column] ** 2 for column in range(3))
+        )
+        if not 0.01 <= length <= 100.0:
+            return None
+    if any(abs(value) > 1_000_000 for value in values):
+        return None
+    return bounds, transform
+
+
+def parse_composite_lod_parts(
+    data: bytes,
+    lod_index: int = 0,
+    platform: str | None = None,
+) -> tuple[CompositePart, ...]:
+    marker = f"lod{lod_index}|".encode("ascii")
+    lower = data.lower()
+    parts = []
+    position = 0
+    if platform in {"xbox360", "ps3"}:
+        endians = (">",)
+    elif platform == "pc":
+        endians = ("<",)
+    else:
+        endians = ("<", ">")
+    while True:
+        position = lower.find(marker, position)
+        if position < 0:
+            break
+        value_start = position + len(marker)
+        value_end = data.find(
+            b"\0",
+            value_start,
+            min(len(data), value_start + 256),
+        )
+        if value_end > value_start:
+            raw = data[value_start:value_end]
+            if all(32 <= value < 127 for value in raw):
+                payload = next(
+                    (
+                        decoded
+                        for endian in endians
+                        if (
+                            decoded := _composite_part_payload(
+                                data,
+                                value_end + 1,
+                                endian,
+                            )
+                        )
+                        is not None
+                    ),
+                    None,
+                )
+                parts.append(
+                    CompositePart(
+                        name=raw.decode("ascii"),
+                        bounds=payload[0] if payload else None,
+                        transform=payload[1] if payload else None,
+                        source_offset=position,
+                    )
+                )
+        position = value_start
+    return tuple(parts)
+
+
+def parse_composite_lod_part_names(
+    data: bytes,
+    lod_index: int = 0,
+) -> tuple[str, ...]:
+    return tuple(
+        part.name
+        for part in parse_composite_lod_parts(data, lod_index)
+    )
 
 
 def parse_watermesh(data: bytes, platform: str | None = None) -> MeshAsset:

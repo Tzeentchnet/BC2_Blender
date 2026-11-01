@@ -16,9 +16,72 @@ and runtime culling are not reconstructed as Blender scene behavior.
 
 The external BF3/BF4 MaxScripts do not parse a level DBX graph, placement
 matrix, compact group, blueprint, or instance record. Their optional
-object-type-2 mesh detachment is only a mesh-local vehicle-part hypothesis and
-does not establish BC2 placement or instancing semantics. See the
+object-type-2 mesh detachment does not establish BC2 placement or instancing
+semantics. Composite membership is now independently verified from BC2 retail
+data, but it remains mesh-local. See the
 [external MaxScript audit](../maxscript-reference-audit.md).
+
+## Modular entity assembly versus map placement
+
+High-level soldier and vehicle DBX imports are separate from complete-map
+placement resolution. They follow deterministic asset links but do not search
+a level graph for transforms.
+
+Character assembly uses:
+
+```text
+GameSharedResources.SoldierEntityData
+  Meshes3p[]
+    Mesh -> Render.SkinnedMeshAsset
+    MeshShaderSet -> optional component override
+    RandomGroup -> required/optional grouping metadata
+```
+
+Each linked component resolves its own LOD0 MeshData and materials. The
+importer requires every module to reference the same skeleton, creates that
+armature once, and binds body, head, and headgear to it. All modules remain
+visible; `RandomGroup` is preserved as collection metadata for user-controlled
+mix-and-match rather than interpreted as a runtime randomizer.
+
+Vehicle assembly uses:
+
+```text
+GameSharedResources.VehicleEntityData
+  Mesh -> Render.CompositeMeshAsset
+  Components[] -> nested vehicle components
+    HealthStates[] -> Health + MeshName
+    LowRpmModel/HighRpmModel -> MeshName
+```
+
+The composite LOD0 is split using verified type-2 global part IDs and ordered
+mesh-set part records. Each record supplies local bounds and a 3x3 plus
+translation bind transform, which places authored local geometry into the
+retail vehicle bind pose. Nested DBX health states mark the highest-health
+named mesh as the default and lower-health named meshes as damaged;
+low-/high-RPM records keep the static rotor visible and the blurred alternative
+hidden. Explicit destroyed/damaged names provide a conservative fallback for
+components whose state graph names only the destruction mesh. `Wreck` must
+occur at least twice in one name to trigger that fallback; a single occurrence
+often identifies a destructible vehicle section rather than destroyed
+geometry.
+
+Non-default collections are preserved with their source transforms and
+metadata but hidden in both viewport and render. This creates an editable
+retail-like default assembly, not a vehicle rig: runtime pivots, parent links,
+automatic damage switching, rotor animation, and destruction animation remain
+unknown and are not synthesized. Geometry objects are also checked
+independently after part splitting: a source, object, or mesh name containing
+at least two case-insensitive `Wreck` occurrences is hidden in the viewport
+and render even if its part ID places the fragment in an otherwise healthy
+collection. Occurrences are counted within each individual name rather than
+summed across duplicate metadata names. A single occurrence does not trigger
+object- or collection-level hiding by name. A collection can still be hidden
+by an independently decoded damage or alternate state.
+
+Selecting a high-level entity `.dbx` invokes these assembly paths. Selecting a
+component mesh set remains a focused component import. Other DBX documents
+still open as XML Text datablocks. This avoids ambiguous reverse-reference
+selection when one body or vehicle component is shared by multiple entities.
 
 ## Required PC archives
 

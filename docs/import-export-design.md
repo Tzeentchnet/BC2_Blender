@@ -119,6 +119,13 @@ a future mesh writer: keep the complete vertex declaration, distinguish
 position encodings and coordinate semantics, retain subset-local bone palettes,
 and do not collapse type-2 part data into type-1 skin weights.
 
+The importer now decodes type-2 part membership for Blender organization, but
+that does not make a safe writer. Export must preserve whether each source
+subset used local or shared/global indices, the original aligned part-ID
+field and palette, ordered `lodN|PartName` strings, unsplit vertex ordering,
+and all still-unknown composite transform metadata. Recombining edited part
+objects without those invariants would be lossy.
+
 They do not provide a BC2 writer, a no-edit round trip, or transferable numeric
 offsets. Their BF3 and BF4 structure offsets differ, their bone counts and DCC
 scale are hard-coded, and their material path is filename-based. Use the
