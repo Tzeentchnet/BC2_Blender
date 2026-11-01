@@ -43,6 +43,7 @@ terrain, and `mp_common` archives indexed:
 | Terrain heightfields | 13 |
 | Water meshes | 1 |
 | Expected nonvisual references | 24 |
+| Expected unsupported terrain-decal diagnostic | 1 |
 | Unexpected unresolved geometry | 0 |
 
 Every one of the 178 LOD0 MeshData resources parsed. The unique geometry totals
@@ -69,10 +70,12 @@ The final Blender 5.2 integration scene was saved and reopened with:
 | Central heightfield vertices | 1,048,576 |
 | Median forest-origin terrain offset | approximately `-1.09` Blender units |
 | Water world elevation | approximately `130.5..133.25` on Blender Z |
+| Water topology | 569 of 569 vertices referenced by 1,013 triangles |
 
 The diagnostics Text has ten deduplicated nonvisual-reference descriptions
-covering the 24 raw nonvisual placements. There were no missing-shader,
-missing-texture, texture-conversion, or unresolved-subset diagnostics.
+covering the 24 raw nonvisual placements plus one explicit unsupported-terrain-
+visual-decal description. There were no missing-shader, missing-texture,
+texture-conversion, or unresolved-subset diagnostics.
 
 ## Verified resource samples
 
@@ -84,9 +87,13 @@ missing-texture, texture-conversion, or unresolved-subset diagnostics.
 - Xbox grouped/padded mip resources: base surface recovered without reading
   nonexistent separate mip payloads.
 - Xbox 2048 x 2048 TerrainHeightfield: bounds, samples, and preview mesh parsed.
-- PC little-endian and Xbox big-endian TerrainHeightfield headers.
+- PC little-endian and Xbox big-endian TerrainHeightfield headers; both tested
+  platforms use little-endian samples beginning at byte `0x31`.
 - Binary DBX: typed immutable tree plus well-formed XML inspection view.
-- WaterMesh: imported as native geometry.
+- WaterMesh: platform-endian body records and 32-bit indices; Xbox `MP_001`
+  consumes all 18,996 bytes and references all 569 vertices. A public PC reader
+  independently reports exact consumption with the same layout across all 36
+  terrain bundles.
 - MedKit material: texture bindings and DXT5nm decode checked against compiled
   DX11 shaders.
 - `MP_001`: direct and grouped placement graph, shared meshes, terrain, water,
@@ -96,17 +103,24 @@ missing-texture, texture-conversion, or unresolved-subset diagnostics.
   permutations checked with FXC disassembly.
 - Multi-subset map meshes: one position representation selected across related
   subsets, including half-float building blocks and the float-position bridge.
-- Tested stride-48 static meshes: primary UV at byte 24 and secondary UV at
-  byte 28, including GasSilo and IND_Silo_Medium.
-- Layered silo materials: OcRGB uses UV1, repeating details use UV0, and the
-  undecoded decal atlas remains classified separately instead of becoming a
-  striped primary-color texture.
+- Common stride-48 static declaration: object/repeating/selector/atlas pairs
+  at bytes 28/36/32/24, verified on 347 MP_001 subsets including Ship System,
+  Harbour, PileBricks, GasSilo, and IND_Silo_Medium.
+- Layered static materials: OcRGB uses byte-28 `UVMap`, repeating details use
+  byte-36 `UV1`, and the undecoded decal atlas remains classified separately
+  instead of becoming a striped primary-color texture.
 - Terrain alignment: forest origins ray-tested against imported heightfields;
   the source terrain entity translation is retained but not double-applied.
-- `MP_001.Heightfield-000`: full 1024 x 1024 source mesh, plus targeted
-  GasSilo, IND_Silo_Medium, and IND_SmallFactory contacts within one meter.
+- `MP_001.Heightfield-000`: full 1024 x 1024 byte-`0x31` little-endian source
+  mesh, `109.30..276.49` m local height range, game quad diagonal, plus
+  targeted GasSilo, IND_Silo_Medium, and IND_SmallFactory contacts within one
+  meter.
 - `MP_001` TerrainMaterialMap: 4096 x 4096 indexed map, 128 tiles, seven named
   material classes, and file-backed L8 Blender sampling.
+- Xbox `MP_001` terrain decals: 9 full, 2 group, and 20 spline records; 22
+  level splines split into 20 Road, one River, and one Lake plane; full-decal
+  source mask bounds and densities preserved in DBX; runtime
+  `VisualTerrain`/format-code-3 atlas mapping still unknown.
 - Placement transforms: source column-major reconstruction, positive target
   determinants, and no former X/Z reflection.
 - `IND_SmallFactory`: sparse metal override merged over the complete default
@@ -301,7 +315,7 @@ These behaviors are useful but need broader format research:
   animation. Type-2 membership, ordered LOD0 names, bounds, and mesh-set bind
   transforms are verified; wreck/damaged name classification remains a
   fallback where DBX component state data is incomplete.
-- Terrain sample-endian selection by smoothness.
+- TerrainHeightfield trailing offset/LOD table after the height samples.
 - Small FbRB declared-payload discrepancy tolerance.
 - Binary DBX 32-bit integer-versus-float rendering.
 - Grouped Xbox mip handling currently recovers only the base surface.

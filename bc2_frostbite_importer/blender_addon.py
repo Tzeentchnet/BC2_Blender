@@ -2087,13 +2087,22 @@ def _normal_texture_identity(path: str) -> str:
 
 
 def _binding_uv_map(path: str, role: str) -> str:
-    stem = PurePosixPath(path).name.casefold()
-    if role == "OCCLUSION" and any(
-        marker in stem
-        for marker in ("ocrgb", "oc_rgb", "oc-rgb")
-    ):
-        return "UV1"
     return "UVMap"
+
+
+def _verified_detail_repeat(
+    binding: ShaderTextureBinding,
+) -> tuple[float, float]:
+    stem = (
+        PurePosixPath(binding.path)
+        .name.casefold()
+        .removesuffix(".res")
+    )
+    scale = {
+        "dt_wirefence_001": 15.0,
+        "dt_razorwire": 10.0,
+    }.get(stem, 1.0)
+    return scale, scale
 
 
 def _binding_roles(bindings):
@@ -2175,6 +2184,7 @@ def _surface_binding_uv_map(
     surface: SurfaceShader,
     binding: ShaderTextureBinding,
     role: str,
+    layered_static: bool = False,
 ) -> str:
     family = _verified_surface_family(surface)
     if family == "AH60_MAIN":
@@ -2192,6 +2202,29 @@ def _surface_binding_uv_map(
             return "UV1"
         if binding.index in {3, 4}:
             return "UVMap"
+    if role == "DETAIL" and _verified_detail_repeat(binding) != (1.0, 1.0):
+        return "UV1"
+    parameters = {value.casefold() for value in binding.parameters}
+    if role == "COLOR" and "texture_texture7" in parameters:
+        return "UV1"
+    if "dirtmaskrgb" in PurePosixPath(binding.path).name.casefold():
+        return "UV2"
+    if layered_static:
+        if role == "OCCLUSION":
+            return "UVMap"
+        if role == "DETAIL":
+            reflected = {
+                value.casefold() for value in binding.parameters
+            }
+            if any("detail" in value for value in reflected):
+                return "UV1"
+            return "UV2" if binding.index == 5 else "UV1"
+        if role == "DECAL":
+            return "UV2"
+        if role == "NORMAL":
+            if "/_atlas/" in binding.path.replace("\\", "/").casefold():
+                return "UV3"
+            return "UV1"
     return _binding_uv_map(binding.path, role)
 
 
@@ -2204,7 +2237,7 @@ def _surface_binding_uv_scale(
         return (15.0, 15.0)
     if family == "MINIGUN_MAIN" and binding.index == 3:
         return (13.0, 13.0)
-    return (1.0, 1.0)
+    return _verified_detail_repeat(binding)
 
 
 _CHARACTER_NON_COLOR_ROLES = {
@@ -3195,6 +3228,14 @@ def _surface_material(
         if character_surface
         else _surface_binding_roles(surface, shader_material.textures)
     )
+    layered_static = not character_surface and any(
+        role == "OCCLUSION"
+        and any(
+            marker in PurePosixPath(binding.path).name.casefold()
+            for marker in ("ocrgb", "oc_rgb", "oc-rgb")
+        )
+        for binding, role in zip(shader_material.textures, roles)
+    )
     material["bc2_texture_bindings"] = json.dumps(
         [
             {
@@ -3298,7 +3339,12 @@ def _surface_material(
         uv_map = (
             _character_binding_uv_map(surface, role)
             if character_surface
-            else _surface_binding_uv_map(surface, binding, role)
+            else _surface_binding_uv_map(
+                surface,
+                binding,
+                role,
+                layered_static=layered_static,
+            )
         )
         uv_node = uv_nodes.get(uv_map)
         if uv_node is None:

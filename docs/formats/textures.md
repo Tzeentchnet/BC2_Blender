@@ -92,6 +92,25 @@ recover the lower stored mips from that allocation.
 This distinction matters to an exporter: do not rewrite such a resource as
 ordinary consecutive mips without proving the console allocation layout.
 
+### Verified PC MP_001 mip chains
+
+The textures reported as low-resolution or black in PC MP_001 each have one
+catalog copy, and their payload equals the complete declared mip chain in
+largest-to-smallest order. Representative source headers are:
+
+| Texture | Base size | Format | Mips |
+|---|---:|---|---:|
+| `Harbour_OcRGB` | 512 x 512 | DXT1 | 10 |
+| `Dt_ConcreteReinforced` | 256 x 256 | DXT1 | 9 |
+| `Truck_c` | 1024 x 1024 | DXT1 | 11 |
+| `PileBricks_t02v01_OcRGB` | 128 x 128 | DXT1 | 8 |
+| `Dt_LargeBrick_001` | 256 x 256 | DXT1 | 9 |
+
+Blender loads those full base dimensions. The small concrete and brick maps
+are authored repeating detail textures, not accidentally selected lower mips.
+Their blurry/black imported appearance came from sampling non-UV halves of the
+stride-48 declaration instead of the high-range byte-36 repeating coordinate.
+
 ## Material semantics
 
 Do not infer any of the following from `DXT5` alone:

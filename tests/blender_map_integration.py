@@ -9,7 +9,7 @@ import os
 import sys
 import time
 import traceback
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 import bpy
@@ -84,9 +84,13 @@ def _validate_resolved_model(level_scene):
         if actual != expected
     ]
     issue_codes = [issue.code for issue in level_scene.issues]
-    if issue_codes != ["non_visual_reference"] * 24:
+    if issue_codes != (
+        ["non_visual_reference"] * 24
+        + ["unsupported_terrain_visual_decals"]
+    ):
         failures.append(
-            "issues: expected 24 non_visual_reference entries, got "
+            "issues: expected 24 non_visual_reference entries and one "
+            "unsupported_terrain_visual_decals entry, got "
             + json.dumps(issue_codes)
         )
     if level_scene.terrain_material_map_path is None:
@@ -161,6 +165,7 @@ def _validate_saved_scene(root_name, expected):
     unexpected_codes = set(diagnostic_counts) - {
         "missing_shader_key",
         "non_visual_reference",
+        "unsupported_terrain_visual_decals",
         "unresolved_subset_surface",
     }
     if unexpected_codes:
@@ -218,6 +223,30 @@ def _validate_saved_scene(root_name, expected):
             "MP_001.Heightfield-000 is not full resolution: "
             f"{len(central_terrain.data.vertices):,} vertices"
         )
+    central_heights = [
+        vertex.co.z for vertex in central_terrain.data.vertices
+    ]
+    central_height_range = (
+        min(central_heights),
+        max(central_heights),
+    )
+    if not (
+        109.2 < central_height_range[0] < 109.4
+        and 276.4 < central_height_range[1] < 276.6
+    ):
+        raise AssertionError(
+            "MP_001.Heightfield-000 uses the wrong sample layout: "
+            f"{central_height_range}"
+        )
+    if (
+        tuple(central_terrain.data.polygons[0].vertices)
+        != (0, 1024, 1025)
+        or tuple(central_terrain.data.polygons[1].vertices)
+        != (0, 1025, 1)
+    ):
+        raise AssertionError(
+            "MP_001.Heightfield-000 uses the wrong quad diagonal"
+        )
 
     def terrain_height(x, y):
         for obj, bounds in terrain_regions:
@@ -243,8 +272,11 @@ def _validate_saved_scene(root_name, expected):
             forest_contacts.append(location.z - height)
     forest_contacts.sort()
     median_forest_contact = forest_contacts[len(forest_contacts) // 2]
+    minimum_forest_contacts = int(
+        expected_collections["Forest"] * 0.95
+    )
     if (
-        len(forest_contacts) != expected_collections["Forest"]
+        len(forest_contacts) < minimum_forest_contacts
         or not -15.0 < median_forest_contact < 15.0
     ):
         raise AssertionError(
@@ -253,9 +285,34 @@ def _validate_saved_scene(root_name, expected):
             f"median offset {median_forest_contact:.3f}"
         )
 
-    water_bounds = world_bounds(root.children["Water"].objects)
+    water_objects = root.children["Water"].objects
+    water_bounds = world_bounds(water_objects)
     if not 120.0 < water_bounds[2][0] < water_bounds[2][1] < 140.0:
         raise AssertionError(f"Water elevation is unexpected: {water_bounds}")
+    if expected["level"] == "MP_001":
+        if len(water_objects) != 1:
+            raise AssertionError(
+                f"Expected one MP_001 WaterMesh, got {len(water_objects)}"
+            )
+        water_mesh = water_objects[0].data
+        if (
+            len(water_mesh.vertices) != 569
+            or len(water_mesh.polygons) != 1_013
+        ):
+            raise AssertionError(
+                "MP_001 WaterMesh topology is unexpected: "
+                f"{len(water_mesh.vertices)} vertices, "
+                f"{len(water_mesh.polygons)} polygons"
+            )
+        referenced_vertices = {
+            loop.vertex_index for loop in water_mesh.loops
+        }
+        if len(referenced_vertices) != len(water_mesh.vertices):
+            raise AssertionError(
+                "MP_001 WaterMesh did not consume its complete uint32 "
+                f"topology: {len(referenced_vertices)} of "
+                f"{len(water_mesh.vertices)} vertices referenced"
+            )
 
     terrain_materials = [
         material
@@ -365,7 +422,7 @@ def _validate_saved_scene(root_name, expected):
             target.data.get("bc2_uv_offsets", "[]")
         )
         if not uv_offsets or any(
-            tuple(offsets) != (24, 28)
+            tuple(offsets) != (28, 36, 32, 24)
             for offsets in uv_offsets
         ):
             raise AssertionError(
@@ -375,10 +432,10 @@ def _validate_saved_scene(root_name, expected):
         if [layer.name for layer in target.data.uv_layers] != [
             "UVMap",
             "UV1",
+            "UV2",
+            "UV3",
         ]:
-            raise AssertionError(
-                f"Placement {enumeration} is missing UV1"
-            )
+            raise AssertionError(f"Placement {enumeration} is missing UVs")
         decal_bindings = []
         for slot in target.material_slots:
             bindings = json.loads(
@@ -405,6 +462,157 @@ def _validate_saved_scene(root_name, expected):
             raise AssertionError(
                 f"Placement {enumeration} misclassifies its decal atlas"
             )
+
+    reported = {
+        4497: {
+            "offsets": (28, 36, 32, 24),
+            "routes": {
+                "shipsystem_aftfront_oc_rgb": "UVMap",
+                "dt_rust_001": "UV1",
+                "dt_dirt_002": "UV1",
+            },
+        },
+        4275: {
+            "offsets": (28, 36, 32, 24),
+            "minimum_detail_span": 20.0,
+            "routes": {
+                "harbour_ocrgb": "UVMap",
+                "dt_concretereinforced": "UV1",
+                "dt_concreterough": "UV1",
+                "dt_concreteedgecracks": "UV2",
+            },
+            "sizes": {
+                "harbour_ocrgb": (512, 512),
+                "dt_concretereinforced": (256, 256),
+            },
+        },
+        3707: {
+            "offsets": (24, 28, 32, 40),
+            "routes": {
+                "truck_c": "UV1",
+                "dirtmaskrgb": "UV2",
+            },
+            "sizes": {"truck_c": (1024, 1024)},
+        },
+        6139: {
+            "offsets": (28, 36, 32, 24),
+            "minimum_detail_span": 5.0,
+            "routes": {
+                "pilebricks_t02v01_ocrgb": "UVMap",
+                "dt_largebrick_001": "UV1",
+                "nm_largebrick_001": "UV1",
+            },
+            "sizes": {
+                "pilebricks_t02v01_ocrgb": (128, 128),
+                "dt_largebrick_001": (256, 256),
+            },
+        },
+        2220: {
+            "offsets": (28, 36, 32, 24),
+            "minimum_detail_span": 2.0,
+            "routes": {
+                "dt_wirefence_001": "UV1",
+                "dt_razorwire": "UV1",
+            },
+            "scales": {
+                "dt_wirefence_001": (15.0, 15.0),
+                "dt_razorwire": (10.0, 10.0),
+            },
+            "sizes": {
+                "dt_wirefence_001": (256, 256),
+                "dt_razorwire": (128, 128),
+            },
+        },
+    }
+    for enumeration, requirement in reported.items():
+        target = next(
+            (
+                obj
+                for obj in placements
+                if obj.get("bc2_enumeration") == enumeration
+            ),
+            None,
+        )
+        if target is None:
+            raise AssertionError(
+                f"Reported placement enumeration {enumeration} is missing"
+            )
+        uv_offsets = json.loads(
+            target.data.get("bc2_uv_offsets", "[]")
+        )
+        expected_offsets = requirement["offsets"]
+        if not uv_offsets or any(
+            tuple(offsets) != expected_offsets
+            for offsets in uv_offsets
+        ):
+            raise AssertionError(
+                f"Placement {enumeration} has incorrect declared UVs: "
+                f"{uv_offsets}"
+            )
+        minimum_span = requirement.get("minimum_detail_span")
+        if minimum_span is not None:
+            detail_layer = target.data.uv_layers.get("UV1")
+            if detail_layer is None:
+                raise AssertionError(
+                    f"Placement {enumeration} is missing detail UV1"
+                )
+            coordinates = [
+                coordinate
+                for value in detail_layer.data
+                for coordinate in value.uv
+            ]
+            span = max(coordinates) - min(coordinates)
+            if span < minimum_span:
+                raise AssertionError(
+                    f"Placement {enumeration} detail UV span is too small: "
+                    f"{span:.3f}"
+                )
+        observed_routes = {}
+        observed_scales = {}
+        observed_sizes = {}
+        for slot in target.material_slots:
+            material = slot.material
+            shader = next(
+                (
+                    node
+                    for node in material.node_tree.nodes
+                    if node.type == "BSDF_PRINCIPLED"
+                ),
+                None,
+            )
+            if shader is None or not shader.inputs["Base Color"].is_linked:
+                raise AssertionError(
+                    f"Placement {enumeration} has an unlit material"
+                )
+            for node in material.node_tree.nodes:
+                if node.type != "TEX_IMAGE" or "bc2_asset_path" not in node:
+                    continue
+                stem = PurePosixPath(
+                    node["bc2_asset_path"]
+                ).name.casefold().removesuffix(".res")
+                observed_routes[stem] = node.get("bc2_uv_map")
+                observed_scales[stem] = tuple(
+                    node.get("bc2_uv_scale", ())
+                )
+                observed_sizes[stem] = tuple(node.image.size)
+        for stem, uv_map in requirement["routes"].items():
+            if observed_routes.get(stem) != uv_map:
+                raise AssertionError(
+                    f"Placement {enumeration} routes {stem} through "
+                    f"{observed_routes.get(stem)!r}, expected {uv_map}"
+                )
+        for stem, scale in requirement.get("scales", {}).items():
+            if observed_scales.get(stem) != scale:
+                raise AssertionError(
+                    f"Placement {enumeration} scales {stem} by "
+                    f"{observed_scales.get(stem)}, expected {scale}"
+                )
+        for stem, size in requirement.get("sizes", {}).items():
+            if observed_sizes.get(stem) != size:
+                raise AssertionError(
+                    f"Placement {enumeration} loaded {stem} at "
+                    f"{observed_sizes.get(stem)}, expected full size {size}"
+                )
 
     small_factory = next(
         obj

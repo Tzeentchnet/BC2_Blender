@@ -710,6 +710,88 @@ def _test_reflected_material_roles():
         "DECAL",
     ):
         raise AssertionError("Layered material roles are incorrect")
+    layered_surface = SurfaceShader(
+        "Layered",
+        "objects/test/shaders/layered/reference",
+        "Objects/Test/Mesh/Objects/Test/Shaders/Layered",
+    )
+    uv_maps = tuple(
+        blender_addon._surface_binding_uv_map(
+            layered_surface,
+            binding,
+            role,
+            layered_static=True,
+        )
+        for binding, role in zip(layered, roles)
+    )
+    if uv_maps != ("UVMap", "UV1", "UV1", "UVMap", "UV2"):
+        raise AssertionError("Layered static UV routing is incorrect")
+    repeated_detail = ShaderTextureBinding(
+        5,
+        "Textures/_GENERAL/Dt_Rust_001",
+        ("texture_Layer2_Detail3",),
+    )
+    selector_detail = ShaderTextureBinding(
+        5,
+        "Textures/_GENERAL/Dt_ConcreteEdgecracks",
+        ("texture_Texture4",),
+    )
+    if (
+        blender_addon._surface_binding_uv_map(
+            layered_surface,
+            repeated_detail,
+            "DETAIL",
+            layered_static=True,
+        )
+        != "UV1"
+        or blender_addon._surface_binding_uv_map(
+            layered_surface,
+            selector_detail,
+            "DETAIL",
+            layered_static=True,
+        )
+        != "UV2"
+    ):
+        raise AssertionError("Layered t5 coordinate routing is incorrect")
+    truck_color = ShaderTextureBinding(
+        2,
+        "Textures/Vehicles/Truck/Truck_c",
+        ("texture_Texture7",),
+    )
+    if (
+        blender_addon._surface_binding_uv_map(
+            layered_surface,
+            truck_color,
+            "COLOR",
+        )
+        != "UV1"
+    ):
+        raise AssertionError("Reflected vehicle color does not use UV1")
+    for texture, scale in (
+        ("Textures/_GENERAL/Dt_WireFence_001", 15.0),
+        ("Textures/_GENERAL/Dt_RazorWire", 10.0),
+    ):
+        binding = ShaderTextureBinding(
+            1,
+            texture,
+            ("texture_Texture",),
+        )
+        if (
+            blender_addon._surface_binding_uv_map(
+                layered_surface,
+                binding,
+                "DETAIL",
+            )
+            != "UV1"
+            or blender_addon._surface_binding_uv_scale(
+                layered_surface,
+                binding,
+            )
+            != (scale, scale)
+        ):
+            raise AssertionError(
+                f"Verified cutout repeat is incorrect for {texture}"
+            )
 
     material = bpy.data.materials.new("BC2 Layered Graph")
     nodes, links, shader = blender_addon._material_nodes(material)

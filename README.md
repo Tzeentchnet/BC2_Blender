@@ -75,7 +75,7 @@ The provided Xbox example indexes 630 Frostbite archives and 251,251 active asse
 | PC vehicle entity `.dbx` | Resolves the linked composite LOD0 mesh, source-backed materials, ordered named part collections, mesh-set bind transforms, and DBX-backed default/damaged/alternate states without inventing runtime pivots, parenting, or an armature. Verified AH60 Main, glass, interior, cockpit-interior, and minigun shader relationships receive dedicated Blender graphs. |
 | PC `GrannyModel` | Creates a native Blender armature while preserving the complete source hierarchy, local transforms, source flags, and physics-joint metadata. |
 | PC `GrannyAnimation` | Creates a Blender 5.2 layered/slotted Action on the matching armature, sampled at the source time step with root motion and quaternion continuity. |
-| `WaterMesh` | Creates native water geometry. |
+| `WaterMesh` | Creates native water geometry from every body using platform-endian 32-bit triangle indices. |
 | `ITexture` | Converts PC texture resources to DDS and creates an Image plus node material. |
 | `XenonTexture` | Untiles Xbox 360 surfaces, fixes compressed-block byte order, converts to DDS, and creates an Image plus node material. DXT1, DXT3, DXT5, ARGB8888, and L8 headers are recognized. Grouped, padded mip allocations import their base level so Blender can generate lower display mips. |
 | `TerrainHeightfield` | Creates a Blender terrain mesh with configurable sampling. The 1024-edge default preserves the complete `MP_001` playable heightfield; lower settings are explicit previews. |
@@ -134,15 +134,17 @@ game's alpha/green DXT5nm decode, 8x UV repeat, and
 `base + 0.4 * detail` combine. Graphs that still approximate unimplemented
 shader arithmetic are labeled in material custom properties.
 
-Static 48-byte map layouts retain UV0 and UV1 at the verified byte offsets 24
-and 28. OcRGB object maps use UV1. Placement matrices are reconstructed from
-the source column-major transform without the former X/Z reflection, so signs
-and other readable texture content are no longer mirrored. Sparse shader-set
-overrides are merged over mesh defaults; this restores the complete default
-SmallFactory surface set while retaining its intended metal substitutions.
-The retail PC stride-48 composite declaration used by AH60 retains four
-shader-coordinate pairs at offsets 24, 28, 32, and 40 as `UVMap`, `UV1`,
-`UV2`, and `UV3`.
+The common retail PC stride-48 static declaration retains object, repeating,
+selector, and atlas coordinate pairs at byte offsets 28, 36, 32, and 24 as
+`UVMap`, `UV1`, `UV2`, and `UV3`. Layered static shaders sample object
+`OcRGB` through `UVMap` and repeating detail textures through `UV1`.
+Placement matrices are reconstructed from the source column-major transform
+without the former X/Z reflection, so signs and other readable texture
+content are no longer mirrored. Sparse shader-set overrides are merged over
+mesh defaults; this restores the complete default SmallFactory surface set
+while retaining its intended metal substitutions. The distinct retail PC
+stride-48 composite declaration used by AH60 retains four shader-coordinate
+pairs at offsets 24, 28, 32, and 40.
 
 The `MP_001` physical-material map is decoded to a file-backed L8 image and
 drives source grass, dirt, tarmac, gravel, stone, seabed, and default-ground
@@ -153,7 +155,7 @@ The validated `MP_001` scene reopens with 5,380 placements, 211 linked mesh
 datablocks, 13 terrain tiles, one water mesh, 418 exact shader-key matches, 417
 connected Base Color graphs, and 185 available file-backed images.
 Terrain and water remain in the heightfield's already-world-space frame; a
-ground-contact check measures a -1.09-unit median forest-origin offset. All 485
+ground-contact check measures a -0.018-unit median forest-origin offset. All 485
 visible subset slots resolve by source naming. The diagnostics Text preserves
 the ten distinct nonvisual-reference descriptions from 24 raw placements.
 
@@ -240,9 +242,11 @@ scoped derivatives and may likewise be deleted when Blender is closed.
   Unresolved bindings and subset matches are retained in diagnostics rather
   than silently guessed.
 - Console texture formats outside the listed formats are rejected explicitly.
-- Terrain physical-material indices and source detail layers are imported, but
-  exact repeat constants, decals, atlas masks, and blend arithmetic are not
-  decoded. Water geometry uses an explicitly approximate Blender material.
+- Terrain physical-material indices and source detail layers are imported.
+  Terrain full/group/spline decal records are detected and reported, but the
+  compiled `VisualTerrain`/`MaskTileAtlas` mapping, exact repeat constants, and
+  blend arithmetic are not decoded. Water geometry is complete; its Blender
+  material remains an explicit approximation.
 - Effects, game logic, collision, destruction states, audio, lights, weather,
   and animation are not reconstructed by the static map importer.
 - Deleted Frostbite archive entries are intentionally omitted from the asset browser.

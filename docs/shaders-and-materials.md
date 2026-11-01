@@ -440,17 +440,35 @@ FXC disassembly of retail `MP_001` permutations established these patterns:
 | Background trees | `texture_Texture4` ambient occlusion, `texture_Texture` tree atlas | atlas color and alpha are sampled from the source UV; alpha is tested at `0.5`; ambient occlusion is sampled separately |
 | Jungle bark | `texture_Texture` normal, `texture_Texture2` bark color, `texture_Texture3` noise | normal and color use the same UV; noise controls distance/fade behavior rather than Base Color |
 | Jungle foliage | `texture_Texture` leaf atlas, `texture_Texture2` noise | atlas alpha participates in a cutout test at `0.2`; noise contributes to the fade threshold |
-| Layered props | `texture_Texture` object `OcRGB`, reflected `Layer*Detail*` textures, optional mask and normal atlases | detail colors are combined under object-map channel control; object alpha supplies occlusion in the inspected permutation; one detail layer uses a repeated UV and the optional mask uses world-space X/Z |
+| Layered props | `texture_Texture` object `OcRGB`, reflected `Layer*Detail*` textures, optional mask and normal atlases | detail colors are combined under object-map channel control; channel packing varies by permutation; object UV, repeated detail UV, and selector/atlas pairs are distinct |
+| Wire and razor-wire cutouts | `texture_Texture` bound to `Dt_WireFence_001` or `Dt_RazorWire` | both use byte-36 `UV1`; wire fence repeats it 15 times and razor wire repeats it 10 times before sampling and alpha testing |
 
 The Blender layered graph reproduces the recoverable high-level relationship:
 it mixes reflected detail-color layers with OcRGB channels and multiplies by
-source occlusion. Identified OcRGB object maps use the retained secondary mesh
-channel `UV1`; ordinary color and detail bindings use `UVMap` unless stronger
-shader evidence selects another source. Exact hard-coded tints, world-space
-mask coordinates, UV scales, lighting, and every permutation remain
-approximations. Identified foliage/cutout families use source color alpha with
-Blender's dithered surface mode; this does not claim exact parity with each
-DXBC threshold.
+source occlusion. For the common stride-48 static declaration, `OcRGB` samples
+byte-28 `UVMap`, repeated detail/general-normal bindings sample byte-36 `UV1`,
+selector-driven detail/decal bindings use byte-32 `UV2`, and normal atlases
+use byte-24 `UV3`. Some detail bindings multiply `UV1` by two in the retail
+shader; those per-permutation constants are not all reproduced yet. Exact
+hard-coded tints, channel packing, world-space mask coordinates, lighting, and
+every permutation remain approximations. Identified foliage/cutout families
+use source color alpha with Blender's dithered surface mode; this does not
+claim exact parity with each DXBC threshold.
+
+The wire-fence and razor-wire rules are exact immediate constants recovered
+from every retail `MP_001` lighting and alpha-only permutation inspected.
+Their vertex shaders forward `TEXCOORD4.zw`, sourced from the second half of
+the byte-32 vector, so the effective coordinate starts at byte 36. Fence pixel
+shaders multiply that coordinate by `15`; razor-wire pixel shaders multiply
+it by `10`. Blender applies those verified routes wherever the shared
+`Dt_WireFence_001` and `Dt_RazorWire` texture families are bound, rather than
+special-casing one mesh placement.
+
+The wrecked Truck uses the distinct byte-24/28/32 composite declaration.
+Retail shader `Main` samples `Truck_c` from byte-28 `UV1`, `DirtMaskRGB` from
+byte-32 `UV2`, and its generic mask from `UV1` repeated 30 times. Routing the
+primary color through byte-24 `UVMap` selected the wrong atlas region and
+caused the reported black appearance.
 
 `Decal_Atlas_001` is explicitly classified as `DECAL` and retained as an
 unconnected source node until its atlas selectors and coordinates are decoded.
@@ -497,9 +515,13 @@ selects source textures recovered from the level shader database:
 - rubble-sand/seabed families for SeaBed.
 
 The result is marked `resolved terrain material map`, not an exact shader
-reproduction. The 16 m detail repeat is estimated. Full decals, mask regions,
-`MaskTileAtlas`, hard-coded constants, and Frostbite's precise blend arithmetic
-remain unresolved.
+reproduction. The 16 m detail repeat is estimated. The terrain DBX separately
+defines full, group, and spline decals with material references, tiled source
+mask bounds, pixels-per-meter values, and Road spline links. Runtime
+`VisualTerrain` records and a 2048 x 1024 format-code-3 `MaskTileAtlas` compile
+those authoring records, but their tile mapping, hard-coded constants, and
+Frostbite blend arithmetic remain unresolved. These terrain decals are also
+separate from the mesh-material `Decal_Atlas_001` binding discussed above.
 
 ## MaxScript material boundary
 
