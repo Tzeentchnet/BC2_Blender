@@ -118,6 +118,15 @@ Images are not packed by default. Deleting the cache therefore requires
 reimporting the source texture unless the user has packed the image into a
 saved `.blend`.
 
+## External-reference coverage
+
+The audited BF3/BF4 mesh scripts only locate already converted PNG or DDS files
+by `_d`, `_s`, and `_n` filename suffixes. They do not parse Frostbite texture
+headers, mip allocations, BC formats, Xbox tiling, console block byte order,
+channel packing, or color space. They provide no storage-format evidence for
+this decoder. See the
+[external MaxScript audit](../maxscript-reference-audit.md).
+
 ## Writer requirements
 
 PC texture writing needs a validated header template, correct mip sizes, and

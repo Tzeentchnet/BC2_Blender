@@ -277,11 +277,12 @@ This is an explicit Blender compatibility correction rather than a claim that
 the still-unknown runtime interpretation of the auxiliary field has been
 fully decoded.
 
-The BF3/BF4 MaxScript references in `E:\BFTools\Battlefield` reinforce this
-decision boundary: their mesh readers use explicit `Vert_Diffuse_UV` and
+The supplied external BF3/BF4 MaxScript references reinforce this decision
+boundary: their mesh readers use explicit `Vert_Diffuse_UV` and
 `Vert_Normals_UV` semantics and offsets, keep tangent/binormal fields
 separate, and V-flip each recognized UV channel. Their standard `_d`/`_s`/`_n`
-material setup does not reproduce BC2's layered shaders.
+material setup does not reproduce BC2's layered shaders. See the
+[external MaxScript audit](maxscript-reference-audit.md).
 
 ### Normal packing and layer arithmetic
 
@@ -396,6 +397,20 @@ The result is marked `resolved terrain material map`, not an exact shader
 reproduction. The 16 m detail repeat is estimated. Full decals, mask regions,
 `MaskTileAtlas`, hard-coded constants, and Frostbite's precise blend arithmetic
 remain unresolved.
+
+## MaxScript material boundary
+
+The audited BF3 mesh scripts create a standard material by looking for PNG
+files with `_d`, `_s`, and `_n` suffixes. The BF4 script performs similar DDS
+filename matching in the mesh directory or a `textures` child directory.
+None parses `MeshShaderSet`, DBX texture references, shader-database records,
+DXBC reflection, constants, color space, packed channels, or layered shader
+arithmetic.
+
+Those scripts therefore provide no material behavior that supersedes the
+retail BC2 shader evidence documented here. Their naming convention can be a
+last-resort research hint only; it must not replace exact resource bindings.
+See the [external MaxScript audit](maxscript-reference-audit.md).
 
 ## Generalization work still needed
 

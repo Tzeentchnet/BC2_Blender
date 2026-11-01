@@ -112,6 +112,19 @@ For every supported resource variant:
 Cross-platform visual similarity is useful evidence but does not prove that
 container bytes or platform allocations are interchangeable.
 
+## External-reference constraints
+
+The audited BF3/BF4 MaxScripts reinforce several preservation requirements for
+a future mesh writer: keep the complete vertex declaration, distinguish
+position encodings and coordinate semantics, retain subset-local bone palettes,
+and do not collapse type-2 part data into type-1 skin weights.
+
+They do not provide a BC2 writer, a no-edit round trip, or transferable numeric
+offsets. Their BF3 and BF4 structure offsets differ, their bone counts and DCC
+scale are hard-coded, and their material path is filename-based. Use the
+[external MaxScript audit](maxscript-reference-audit.md) as design evidence,
+not as an encoder specification.
+
 ## Coordinate and material cautions
 
 - Preserve source-space data separately from Blender's Z-up representation.

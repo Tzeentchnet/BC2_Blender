@@ -130,10 +130,11 @@ complete vertex-layout specification.
 
 ### MaxScript cross-check
 
-The BF3 and BF4 MaxScript importers under `E:\BFTools\Battlefield` are for
-later Frostbite revisions, so their numeric layout identifiers are not copied
-into the Frostbite 1 parser. They nevertheless confirm two useful format
-rules:
+The BF3 and BF4 MaxScript importers in the supplied external reference set are
+for later Frostbite revisions, so their numeric layout identifiers are not
+copied into the Frostbite 1 parser. BF3 and BF4 use different header offsets
+and submesh record sizes, directly demonstrating that those values are
+version-specific. They nevertheless confirm useful format rules:
 
 - vertex-element offsets come from the mesh declaration, not from stride-only
   guesses;
@@ -142,11 +143,25 @@ rules:
   have separate identifiers;
 - both recognized UV channels receive an explicit V flip when converted to
   the DCC coordinate convention.
+- tangents and binormals are separate declared half-float vectors;
+- type-1 vertices carry four local byte indices and four byte weights divided
+  by 255, while a submesh palette maps local slots to global skeleton bones;
+- the BF3 v4.1 revision gates skinning on object type 1, matching the current
+  parser's need to isolate type-1 declarations from other palette-bearing
+  meshes.
+
+BF3 v4.1 also groups object-type-2 vertices by their four-byte index tuple and
+offers to detach them as vehicle parts. This is a research lead for composite
+meshes, not an implementation-ready rule: the later script does not recover
+part names, hierarchy, transforms, or pivots, and tested BC2 type-2 data does
+not share the validated type-1 layout.
 
 The scripts build simple `_d`, `_s`, and `_n` standard materials and do not
-decode Frostbite 1 shader-database layer arithmetic. They are supporting
-evidence for semantic-driven vertex decoding, not an authoritative source for
-the BC2 character material graph.
+decode Frostbite 1 shader-database layer arithmetic. Their scale of 39 and the
+BF4-only 90-degree X rotation are DCC choices, not BC2 unit or axis evidence.
+They support semantic-driven decoding but are not authoritative for BC2
+layouts, character materials, or transforms. See the complete
+[external MaxScript audit](../maxscript-reference-audit.md).
 
 The offset-24 rule is verified on the reported
 `Objects/Objects/GasSilo/GasSilo` and

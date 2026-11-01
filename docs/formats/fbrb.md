@@ -90,6 +90,14 @@ reference graph.
 
 See [`catalog.py`](../../bc2_frostbite_importer/core/catalog.py).
 
+## External-reference coverage
+
+The audited BF3/BF4 MaxScripts start from already extracted `.mesh`, `.chunk`,
+or text-dump files. They contain no FbRB signature, metadata, compression,
+entry, deletion, or string-table handling. They neither confirm nor conflict
+with this archive implementation. See the
+[external MaxScript audit](../maxscript-reference-audit.md).
+
 ## Writer requirements
 
 Before implementing FbRB output, establish and test:

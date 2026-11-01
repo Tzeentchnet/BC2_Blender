@@ -7,7 +7,8 @@ A Blender extension for browsing and importing assets from **Battlefield: Bad Co
 The reverse-engineering notes for importer and exporter authors live in
 [`docs/`](docs/README.md). They cover the PC and Xbox 360 disc layouts, MSI and
 cabinet indirection, FbRB archives, supported resource formats, shader-derived
-material behavior, validation evidence, and round-trip design constraints.
+material behavior, validation evidence, round-trip design constraints, and a
+source-by-source audit of the external BF3/BF4 MaxScript references.
 
 ## Supported source media
 

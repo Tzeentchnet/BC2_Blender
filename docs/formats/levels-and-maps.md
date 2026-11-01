@@ -14,6 +14,12 @@ validated against `MP_001`. It imports the verified static visual foundation:
 Dynamic game logic, effects, weather, collision, AI, destruction state, audio,
 and runtime culling are not reconstructed as Blender scene behavior.
 
+The external BF3/BF4 MaxScripts do not parse a level DBX graph, placement
+matrix, compact group, blueprint, or instance record. Their optional
+object-type-2 mesh detachment is only a mesh-local vehicle-part hypothesis and
+does not establish BC2 placement or instancing semantics. See the
+[external MaxScript audit](../maxscript-reference-audit.md).
+
 ## Required PC archives
 
 A multiplayer level is not self-contained. `MP_001` requires these indexed

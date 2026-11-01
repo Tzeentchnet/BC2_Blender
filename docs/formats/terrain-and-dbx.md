@@ -212,5 +212,14 @@ A DBX exporter should extend the intermediate representation to preserve raw
 encodings, exact scalar types, and unknown nodes. Do not attempt XML-to-DBX
 conversion from the current output.
 
+## External-reference coverage
+
+The audited MaxScripts contain no TerrainHeightfield, TerrainMaterialMap, or
+binary DBX parser. Their bone tools consume an already generated text dump and
+search for labels such as `LinearTransform`; that confirms only human-readable
+field naming in the dump, not DBX byte layout, numeric-array encoding, or level
+graph semantics. No terrain or DBX behavior changed from this evidence. See
+the [external MaxScript audit](../maxscript-reference-audit.md).
+
 See [`dbx.py`](../../bc2_frostbite_importer/core/dbx.py) and
 [Levels and complete maps](levels-and-maps.md).

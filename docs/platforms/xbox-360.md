@@ -87,6 +87,13 @@ Observed conventions:
 - The tested 2048 x 2048 terrain header is big-endian while its height samples
   are little-endian. Mixed byte order must be handled per field, not per file.
 
+## External-reference coverage
+
+None of the audited MaxScripts reads XGD2/XDVDFS, selects big-endian mesh
+fields, untiles Xenos surfaces, or corrects compressed-block byte order. Their
+mesh and skeleton observations must not be used as Xbox format evidence. See
+the [external MaxScript audit](../maxscript-reference-audit.md).
+
 ## Export implications
 
 A correct Xbox texture writer must reverse every read-side transform:

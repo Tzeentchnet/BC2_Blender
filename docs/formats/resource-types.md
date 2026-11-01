@@ -30,6 +30,13 @@ The texture dispatcher also recognizes `Ps3Texture`, but PS3 disc media and
 texture variants were not part of this validation effort. It must not be
 advertised as verified support.
 
+Later BF3/BF4 MaxScripts use object type 1 for skinned meshes and add a
+separate object-type-2 vehicle-part path. This corroborates keeping BC2
+type-1 skin declarations isolated, but it does not prove that later numeric
+type semantics or part fields are identical in Frostbite 1. The scripts
+provide no type-4 tree semantics or evidence for other catalog types. See the
+[external MaxScript audit](../maxscript-reference-audit.md).
+
 ## Cataloged but extracted raw
 
 | Group | Known type strings |

@@ -257,6 +257,23 @@ and a channel bag. Translation and quaternion F-Curves use linear interpolation
 between native samples, and quaternion signs are made continuous. Root motion
 is retained.
 
+## MaxScript skeleton cross-check
+
+The three audited character bone-maker scripts consume pre-generated text
+arrays named `Hierarchy`, `BoneNames`, and `ModelPose`. They corroborate the
+general model of indexed parents, named bones, a root sentinel, and linear
+transforms containing right/up/forward basis vectors plus translation.
+
+They are not Granny decoders. Bone counts are hard-coded, full matrices and
+scale/shear are not assigned, inverse binds are ignored, and an empirical
+scale of 39 is used. The BF4 variant also rotates a scene `Reference` object
+90 degrees around X. The two vehicle readers are byte-identical and create
+unnamed, unparented helpers from linear transforms. None reads animation
+sections, relocations, curve codecs, key times, or root motion.
+
+The retail inverse-bind and pose-matrix invariants remain the authoritative BC2
+validation. See the [external MaxScript audit](../maxscript-reference-audit.md).
+
 ## Validation sample
 
 | Measurement | Result |

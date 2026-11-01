@@ -213,6 +213,21 @@ blender --background --factory-startup `
   --output <OUTPUT_BLEND>
 ```
 
+## External-reference validation
+
+All eight supplied BF3/BF4 MaxScripts were reviewed against every current
+import path. They corroborate declaration-driven mesh attributes, separate UV
+semantics and tangent-frame fields, explicit V conversion, subset-local skin
+palettes, and four byte indices/weights. The BF3 v4.1 change that limits
+skinning to object type 1 also supports the importer's type-1 gate.
+
+These findings are secondary evidence only. The scripts provide no BC2 retail
+fixture, binary round trip, or coverage for discs, FbRB, Xbox texture storage,
+terrain, DBX level graphs, shader arithmetic, Granny animation, or export.
+Their type-2 vehicle-part detachment remains an unimplemented research lead.
+The full source inventory, hashes, and applicability matrix are in the
+[external MaxScript audit](maxscript-reference-audit.md).
+
 ## Known heuristics
 
 These behaviors are useful but need broader format research:
@@ -225,6 +240,8 @@ These behaviors are useful but need broader format research:
 - Skinned vertex influence offsets.
 - PC Granny field locations and curve codecs outside the validated v7 samples.
 - Mesh-set-to-MeshData resolution by path.
+- Type-2 composite part membership and hierarchy; later-engine scripts suggest
+  grouping by an index tuple, but BC2 fields and pivots are unverified.
 - Terrain sample-endian selection by smoothness.
 - Small FbRB declared-payload discrepancy tolerance.
 - Binary DBX 32-bit integer-versus-float rendering.

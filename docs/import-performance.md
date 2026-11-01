@@ -125,6 +125,18 @@ the complete `MP_001` foundation in about 5.5 seconds on the tested machine.
 Cold cabinet extraction, payload materialization, and texture conversion add
 source- and hardware-dependent time.
 
+## External script comparison
+
+The audited BF3/BF4 MaxScripts repeatedly seek to each declared field for each
+vertex and then assign mesh, UV, weight, and material data through per-element
+3ds Max calls. That code is useful for understanding declaration semantics,
+but it is not a performance model for Blender.
+
+A declaration-driven BC2 decoder should still resolve each field offset once,
+validate the complete buffer, and decode contiguous arrays in bounded batches.
+The existing NumPy/RNA bulk boundary remains appropriate. See the
+[external MaxScript audit](maxscript-reference-audit.md).
+
 ## Remaining candidates
 
 Potential future work should be benchmarked before implementation:

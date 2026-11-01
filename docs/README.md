@@ -34,6 +34,7 @@ The documents use these terms deliberately:
 | TerrainHeightfield and binary DBX | [Terrain and DBX](formats/terrain-and-dbx.md) |
 | Level graphs, compact groups, transforms, and instancing | [Levels and complete maps](formats/levels-and-maps.md) |
 | Shader database findings and normal decoding | [Shaders and materials](shaders-and-materials.md) |
+| BF3/BF4 MaxScript evidence and applicability limits | [External MaxScript reference audit](maxscript-reference-audit.md) |
 | NumPy acceleration and native Blender image loading | [Import performance](import-performance.md) |
 | Safe importer/exporter architecture | [Import and export design](import-export-design.md) |
 | Evidence, test coverage, and open questions | [Validation and unknowns](validation-and-unknowns.md) |
@@ -87,3 +88,7 @@ resources, and converted DDS files are disposable derivatives.
    retail sample.
 7. Never commit disc images, extracted game assets, shader bytecode, or other
    copyrighted payloads to this repository.
+8. Treat later-Frostbite tools as corroborating references only. Record which
+   principles transfer, which findings are heuristic, and which versioned
+   offsets or DCC choices are unsafe for BC2. See the
+   [MaxScript audit](maxscript-reference-audit.md).
