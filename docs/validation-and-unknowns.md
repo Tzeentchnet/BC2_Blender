@@ -98,6 +98,13 @@ texture-conversion, or unresolved-subset diagnostics.
   DX11 shaders.
 - `MP_001`: direct and grouped placement graph, shared meshes, terrain, water,
   and shader database resolved from retail archives.
+- PC building destruction research: 37 building or subcomponent DBX
+  documents surveyed in the indexed `MP_001` and `mp_common` archives.
+  `IND_Warehouse` matched 77 named health-state meshes to 77 visual composite
+  parts and all 224 part-link endpoints to component names. A local Blender
+  5.2.2 prototype was reopened and checked for two complete threshold views,
+  individual named and empty state toggles, and a real map placement. Runtime
+  collapse, effect timing, Xbox equivalence, and export remain unverified.
 - `MP_001` map materials: pixel-shader `RDEF` names retained for each binding;
   representative background-tree, bark, foliage, and layered-prop
   permutations checked with FXC disassembly.

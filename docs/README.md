@@ -32,7 +32,7 @@ The documents use these terms deliberately:
 | Granny skeletons, skinning, and transform animation | [Granny characters and animation](formats/granny-animation.md) |
 | ITexture, XenonTexture, tiling, and DDS | [Textures](formats/textures.md) |
 | TerrainHeightfield and binary DBX | [Terrain and DBX](formats/terrain-and-dbx.md) |
-| Level graphs, compact groups, transforms, and instancing | [Levels and complete maps](formats/levels-and-maps.md) |
+| Level graphs, transforms, instancing, and building destruction research | [Levels and complete maps](formats/levels-and-maps.md) |
 | Shader database findings and normal decoding | [Shaders and materials](shaders-and-materials.md) |
 | BF3/BF4 MaxScript evidence and applicability limits | [External MaxScript reference audit](maxscript-reference-audit.md) |
 | BC2-oriented external writers and export constraints | [External writer reference audit](external-writer-reference-audit.md) |

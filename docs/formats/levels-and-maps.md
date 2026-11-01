@@ -83,6 +83,86 @@ component mesh set remains a focused component import. Other DBX documents
 still open as XML Text datablocks. This avoids ambiguous reverse-reference
 selection when one body or vehicle component is shared by multiple entities.
 
+## Research: PC building destruction assemblies
+
+**Verified scope:** PC retail `MP_001` level and `mp_common` archives. A survey
+of `Objects/Buildings` found 37 DBX documents with part components, including
+standalone subcomponents. This is not a survey of the whole game or evidence
+for Xbox 360 behavior.
+
+The PC `IND_Warehouse` blueprint, used by 21 direct `MP_001` placements,
+contains an authored destruction graph:
+
+```text
+Entity.ObjectBlueprint.Object
+  -> GameSharedResources.StaticModelEntityData
+       Mesh -> Render.CompositeMeshAsset -> CompositeMeshSet and LOD0 MeshData
+       Components[] -> GameSharedResources.PartComponentData
+         HealthStates[] -> GameSharedResources.HealthStateData
+           Health, MeshName, Effects[]
+       PartLinks[] -> GameSharedResources.PartLinkData
+```
+
+In this sample, the component array has 57 parts and the part-link array has
+112 links. Both endpoint indices on every link match the corresponding
+component names in `Components[]`, for 224 of 224 endpoints. These component
+indices are not the global mesh part IDs. State `MeshName` values instead
+match ordered mesh-set part names case-insensitively.
+
+| PC building sample | Components | Distinct named mesh swaps | Empty lowest-health mesh names | Single-state parts |
+|---|---:|---:|---:|---:|
+| `IND_Warehouse` | 57 | 20 | 36 | 1 |
+| `House_09_15x12` | 21 | 20 | 0 | 1 |
+| `IND_SmallFactory` | 107 | 0 | 106 | 1 |
+
+For the warehouse, all 77 named health-state meshes match the 77 LOD0
+mesh-set records and have triangles in the decoded type-2 MeshData. All seven
+visible subsets split into valid part IDs, with no out-of-range IDs or
+unmatched named states. All 77 recorded bind transforms are identity in
+this particular sample; other buildings must not be assumed to share that
+property. The separate `House_09_15x12` and `IND_SmallFactory` samples also
+matched all their named states to parts with triangles.
+
+For example, warehouse `RoofPart_4` names `RoofPart_4` at health `100` and
+`RoofPart_4_dest` at health `0`. The latter state references smoke and metal
+debris effects. Other components instead have an empty `MeshName` at health
+`0`; a preview can represent those states as no mesh, rather than inventing a
+replacement. The single `ruin` component has only one named state, at health
+`0`. The other highest thresholds are `1` for 18 parts and `100` for 38 parts;
+do not assume that `100` is the universal healthy threshold or that `0` alone
+means a mesh is hidden.
+
+**Prototype validation:** a local Blender 5.2.2 scene was assembled from one
+actual `MP_001` warehouse placement. It was saved and reopened with separate
+highest-health and lowest-health views, and an individual-state view containing
+all 113 health-state collections. Switching one named swap and one empty
+state was checked after reopening. This is an analytical preview, not a
+shipped importer feature or proof that all lowest-health states can occur
+simultaneously in game. It uses neutral materials and does not recreate
+particle timing, physics, or collapse behavior.
+
+The prototype applies each mesh-set bind transform before the level placement:
+`world = level_placement @ part_bind @ vertex`, with the existing
+Frostbite-to-Blender basis conversion. The warehouse's sampled bind transforms
+are identity; its level placement includes rotation and translation. Mesh-set
+part records contain 18 little-endian `float32` values immediately after the
+NUL-terminated LOD part name, as detailed in [Meshes](meshes.md). The DBX
+fields above are semantic fields in a variable-length element stream, not
+fixed-offset structures. DBX numeric arrays use big-endian elements of their
+encoded width; the current reader does not preserve the exact raw type and
+width of each decoded health value.
+
+**Unknown:** runtime threshold comparison, the initial visibility of
+single-state parts, the meaning and timing of whole-building collapse,
+part-link propagation, spawned physics, effect timing, and Xbox 360
+equivalence. The warehouse stores `DestroyRuinPartPercentage = 75` and
+`ManyPartsDestroyedPercentage = 80`, but their runtime semantics are not
+established. Effects referenced by a health state corroborate a relationship
+between damage and effects; they do not prove that particles conceal a
+transition. The current whole-map importer does not select building health
+states, and standalone composite imports do not interpret this building DBX
+graph. These previews are not an exporter-safe destruction specification.
+
 ## Required PC archives
 
 A multiplayer level is not self-contained. `MP_001` requires these indexed

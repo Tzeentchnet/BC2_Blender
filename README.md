@@ -248,7 +248,10 @@ scoped derivatives and may likewise be deleted when Blender is closed.
   blend arithmetic are not decoded. Water geometry is complete; its Blender
   material remains an explicit approximation.
 - Effects, game logic, collision, destruction states, audio, lights, weather,
-  and animation are not reconstructed by the static map importer.
+  and animation are not reconstructed by the static map importer. It does not
+  select destructible-building health-state meshes; standalone composite
+  imports do not interpret the building's part graph. See the
+  [PC building destruction research](docs/formats/levels-and-maps.md#research-pc-building-destruction-assemblies).
 - Deleted Frostbite archive entries are intentionally omitted from the asset browser.
 - Writing modified resources, rebuilding `.fbrb` archives, cabinets, or disc images is not implemented.
 
