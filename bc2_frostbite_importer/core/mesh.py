@@ -334,6 +334,20 @@ def _pc_skinned_uv_offsets(
     return ()
 
 
+def _pc_stride_48_uv_offsets(
+    mesh_type: int,
+    stride: int,
+    part_index_offset: int | None,
+) -> tuple[int, ...]:
+    if stride != 48:
+        return ()
+    if mesh_type == 2 and part_index_offset == 36:
+        return 24, 28, 32, 40
+    # The static declaration exposes object and repeating UVs through the
+    # .zw halves at byte 28 and 36. The .xy halves are atlas selectors.
+    return 28, 36, 32, 24
+
+
 def _read_influences(
     data: bytes,
     vertex_offset: int,
@@ -477,7 +491,6 @@ def parse_meshdata(
         for header in active_headers
     }
     composite_part_data = {}
-    composite_part_offsets_by_stride: dict[int, set[int]] = {}
     if mesh_type == 2:
         for header in active_headers:
             index_base = layouts[header]
@@ -503,16 +516,6 @@ def parse_meshdata(
                 header.palette,
             )
             composite_part_data[header] = part_data
-            if part_data[1] is not None:
-                composite_part_offsets_by_stride.setdefault(
-                    header.stride,
-                    set(),
-                ).add(part_data[1])
-    pc_composite_uv_strides = {
-        stride
-        for stride, offsets in composite_part_offsets_by_stride.items()
-        if stride == 48 and offsets == {36}
-    }
     position_formats = {}
     for stride in {header.stride for header in active_headers}:
         position_formats[stride] = _position_format(
@@ -570,14 +573,13 @@ def parse_meshdata(
             if endian == "<"
             else ()
         )
-        if (
-            not explicit_uv_offsets
-            and endian == "<"
-            and header.stride in pc_composite_uv_strides
-        ):
-            # The retail PC composite declaration with its part ID at byte 36
-            # exposes four half-float coordinate pairs to the vertex shader.
-            explicit_uv_offsets = (24, 28, 32, 40)
+        if not explicit_uv_offsets and endian == "<":
+            explicit_uv_offsets = _pc_stride_48_uv_offsets(
+                mesh_type,
+                header.stride,
+                composite_part_data.get(header, ((), None))[1],
+            )
+        decoded_channels = ()
         if explicit_uv_offsets:
             decoded_channels = tuple(
                 _decode_uv_channel(
@@ -592,14 +594,20 @@ def parse_meshdata(
                 for offset in explicit_uv_offsets
             )
             if any(channel is None for channel in decoded_channels):
-                raise CorruptDataError(
-                    f"PC skinned UV channels are invalid for {header.name}"
-                )
+                if explicit_uv_offsets == (28, 36, 32, 24):
+                    explicit_uv_offsets = ()
+                    decoded_channels = ()
+                else:
+                    raise CorruptDataError(
+                        "PC declared UV channels are invalid for "
+                        f"{header.name}"
+                    )
+        if explicit_uv_offsets:
             uvs = decoded_channels[0]
             secondary_uvs = decoded_channels[1]
             additional_uvs = decoded_channels[2:]
             uv_offsets = explicit_uv_offsets
-        else:
+        if not explicit_uv_offsets:
             uv_offset = _detect_uv_offset(
                 data,
                 subset_vertex_start,
@@ -853,36 +861,82 @@ def parse_composite_lod_part_names(
 
 def parse_watermesh(data: bytes, platform: str | None = None) -> MeshAsset:
     endian = ">" if platform in {"xbox360", "ps3"} else "<"
-    if len(data) < 12:
+    if len(data) < 4:
         raise CorruptDataError("WaterMesh is too short")
-    vertex_count = struct.unpack_from(endian + "I", data, 4)[0]
-    vertex_end = 8 + vertex_count * 12
-    if vertex_count == 0 or vertex_end + 4 > len(data):
-        raise CorruptDataError("WaterMesh vertex buffer is invalid")
-    index_count = struct.unpack_from(endian + "I", data, vertex_end)[0]
-    index_start = vertex_end + 4
-    if index_count % 3 or index_start + index_count * 2 > len(data):
-        raise CorruptDataError("WaterMesh index buffer is invalid")
-    positions = tuple(
-        tuple(
-            float(value)
-            for value in struct.unpack_from(endian + "3f", data, 8 + index * 12)
+    body_count = struct.unpack_from(endian + "I", data, 0)[0]
+    if body_count > (len(data) - 4) // 8:
+        raise CorruptDataError(
+            f"WaterMesh body count is invalid: {body_count}"
         )
-        for index in range(vertex_count)
-    )
-    indices = struct.unpack_from(endian + f"{index_count}H", data, index_start)
-    if indices and max(indices) >= vertex_count:
-        raise CorruptDataError("WaterMesh index exceeds the vertex count")
-    faces = tuple(
-        (int(indices[index]), int(indices[index + 1]), int(indices[index + 2]))
-        for index in range(0, index_count, 3)
-    )
+
+    position = 4
+    positions = []
+    faces = []
+    for body_index in range(body_count):
+        if position + 4 > len(data):
+            raise CorruptDataError(
+                f"WaterMesh body {body_index} has no vertex count"
+            )
+        vertex_count = struct.unpack_from(endian + "I", data, position)[0]
+        vertex_start = position + 4
+        vertex_end = vertex_start + vertex_count * 12
+        if vertex_end + 4 > len(data):
+            raise CorruptDataError(
+                f"WaterMesh body {body_index} vertex buffer is invalid"
+            )
+        body_positions = tuple(
+            tuple(
+                float(value)
+                for value in struct.unpack_from(
+                    endian + "3f",
+                    data,
+                    vertex_start + index * 12,
+                )
+            )
+            for index in range(vertex_count)
+        )
+
+        index_count = struct.unpack_from(endian + "I", data, vertex_end)[0]
+        index_start = vertex_end + 4
+        index_end = index_start + index_count * 4
+        if index_count % 3 or index_end > len(data):
+            raise CorruptDataError(
+                f"WaterMesh body {body_index} index buffer is invalid"
+            )
+        indices = struct.unpack_from(
+            endian + f"{index_count}I",
+            data,
+            index_start,
+        )
+        if indices and max(indices) >= vertex_count:
+            raise CorruptDataError(
+                f"WaterMesh body {body_index} index exceeds the vertex count"
+            )
+
+        vertex_base = len(positions)
+        positions.extend(body_positions)
+        faces.extend(
+            (
+                vertex_base + int(indices[index]),
+                vertex_base + int(indices[index + 1]),
+                vertex_base + int(indices[index + 2]),
+            )
+            for index in range(0, index_count, 3)
+        )
+        position = index_end
+
+    if position != len(data):
+        raise CorruptDataError(
+            f"WaterMesh has {len(data) - position} trailing byte(s)"
+        )
+
+    positions_tuple = tuple(positions)
     subset = MeshSubset(
         name="Water",
-        positions=positions,
-        faces=faces,
-        uvs=tuple((0.0, 0.0) for _ in positions),
-        influences=tuple(() for _ in positions),
+        positions=positions_tuple,
+        faces=tuple(faces),
+        uvs=tuple((0.0, 0.0) for _ in positions_tuple),
+        influences=tuple(() for _ in positions_tuple),
         vertex_stride=12,
     )
     return MeshAsset(mesh_type=3, endian=endian, subsets=(subset,))

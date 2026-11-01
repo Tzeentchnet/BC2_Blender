@@ -36,16 +36,7 @@ class TerrainMaterialMap:
     endian: str
 
 
-def _smoothness(data: bytes, offset: int, endian: str, count: int) -> float:
-    values = [
-        struct.unpack_from(endian + "H", data, offset + index * 2)[0]
-        for index in range(count)
-    ]
-    if len(values) < 2:
-        return math.inf
-    return sum(abs(right - left) for left, right in zip(values, values[1:])) / (
-        len(values) - 1
-    )
+_HEIGHTFIELD_HEADER_SIZE = struct.calcsize("<6f6IB")
 
 
 def _header(
@@ -60,7 +51,9 @@ def _header(
     for endian in ("<", ">"):
         bounds = struct.unpack_from(endian + "6f", data, 0)
         resolution = struct.unpack_from(endian + "I", data, 24)[0]
-        sample_end = 44 + resolution * resolution * 2
+        sample_end = (
+            _HEIGHTFIELD_HEADER_SIZE + resolution * resolution * 2
+        )
         finite = all(math.isfinite(value) for value in bounds)
         ordered = all(bounds[index] <= bounds[index + 3] for index in range(3))
         valid = (
@@ -87,19 +80,16 @@ def parse_heightfield(
     target_resolution: int = 256,
     platform: str | None = None,
 ) -> TerrainMesh:
-    if len(data) < 46:
+    if len(data) < _HEIGHTFIELD_HEADER_SIZE + 4:
         raise CorruptDataError("TerrainHeightfield is too short")
     header_endian, bounds, resolution = _header(data, platform)
-    sample_offset = 44
+    sample_offset = _HEIGHTFIELD_HEADER_SIZE
     sample_size = resolution * resolution * 2
     if sample_offset + sample_size > len(data):
         raise CorruptDataError(
             f"Terrain height samples are truncated for {resolution}x{resolution}"
         )
-    test_count = min(resolution * 4, 8192)
-    little_score = _smoothness(data, sample_offset, "<", test_count)
-    big_score = _smoothness(data, sample_offset, ">", test_count)
-    endian = "<" if little_score <= big_score else ">"
+    endian = "<"
     target_resolution = max(2, min(int(target_resolution), 1024))
     sample_count = min(resolution, target_resolution)
     samples = [
@@ -107,8 +97,8 @@ def parse_heightfield(
         for index in range(sample_count)
     ]
     min_x, min_y, min_z, max_x, max_y, max_z = bounds
-    x_scale = (max_x - min_x) / (resolution - 1)
-    z_scale = (max_z - min_z) / (resolution - 1)
+    x_scale = (max_x - min_x) / resolution
+    z_scale = (max_z - min_z) / resolution
     height_scale = (max_y - min_y) / 65535.0
     if _np is not None:
         sample_indices = _np.asarray(samples, dtype=_np.intp)
@@ -145,10 +135,10 @@ def parse_heightfield(
         )
         faces[0::2, 0] = top_left
         faces[0::2, 1] = top_left + width
-        faces[0::2, 2] = top_left + 1
-        faces[1::2, 0] = top_left + 1
-        faces[1::2, 1] = top_left + width
-        faces[1::2, 2] = top_left + width + 1
+        faces[0::2, 2] = top_left + width + 1
+        faces[1::2, 0] = top_left
+        faces[1::2, 1] = top_left + width + 1
+        faces[1::2, 2] = top_left + 1
         return TerrainMesh(
             bounds=tuple(float(value) for value in bounds),
             source_resolution=resolution,
@@ -180,8 +170,8 @@ def parse_heightfield(
             top_right = top_left + 1
             bottom_left = top_left + width
             bottom_right = bottom_left + 1
-            faces.append((top_left, bottom_left, top_right))
-            faces.append((top_right, bottom_left, bottom_right))
+            faces.append((top_left, bottom_left, bottom_right))
+            faces.append((top_left, bottom_right, top_right))
     return TerrainMesh(
         bounds=tuple(float(value) for value in bounds),
         source_resolution=resolution,

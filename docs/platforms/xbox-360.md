@@ -85,7 +85,8 @@ Observed conventions:
 - Some resources declare many mips but store one padded allocation in the
   first size entry; see [Textures](../formats/textures.md).
 - The tested 2048 x 2048 terrain header is big-endian while its height samples
-  are little-endian. Mixed byte order must be handled per field, not per file.
+  begin at byte `0x31` and are little-endian. Mixed byte order must be handled
+  per field, not per file.
 
 ## External-reference coverage
 

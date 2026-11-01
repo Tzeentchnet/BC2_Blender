@@ -32,6 +32,7 @@ from bc2_frostbite_importer.core.mesh import (
     parse_composite_lod_part_names,
     parse_composite_lod_parts,
     parse_meshdata,
+    parse_watermesh,
     split_mesh_subset_by_parts,
 )
 from bc2_frostbite_importer.core.repository import AssetRepository
@@ -63,6 +64,18 @@ def make_meshdata(endian: str = ">") -> bytes:
     indices = struct.pack(endian + "3H", 0, 1, 2)
     metadata.extend(struct.pack(endian + "III", len(vertices), len(indices), 0))
     return bytes(metadata + vertices + indices)
+
+
+def make_watermesh(endian: str, bodies) -> bytes:
+    data = bytearray(struct.pack(endian + "I", len(bodies)))
+    for positions, faces in bodies:
+        data.extend(struct.pack(endian + "I", len(positions)))
+        for position in positions:
+            data.extend(struct.pack(endian + "3f", *position))
+        indices = tuple(index for face in faces for index in face)
+        data.extend(struct.pack(endian + "I", len(indices)))
+        data.extend(struct.pack(endian + f"{len(indices)}I", *indices))
+    return bytes(data)
 
 
 def make_composite_meshdata() -> bytes:
@@ -369,9 +382,9 @@ def make_xdvdfs_image(path: Path, archive: bytes):
 
 def make_heightfield(header_endian: str, sample_endian: str) -> bytes:
     resolution = 4
-    data = bytearray(44 + resolution * resolution * 2)
+    data = bytearray(49 + resolution * resolution * 2)
     struct.pack_into(
-        header_endian + "6f",
+        header_endian + "6f6IB",
         data,
         0,
         -2.0,
@@ -380,13 +393,19 @@ def make_heightfield(header_endian: str, sample_endian: str) -> bytes:
         2.0,
         10.0,
         2.0,
+        resolution,
+        0,
+        0,
+        resolution * 256,
+        0,
+        1,
+        0,
     )
-    struct.pack_into(header_endian + "I", data, 24, resolution)
     for index in range(resolution * resolution):
         struct.pack_into(
             sample_endian + "H",
             data,
-            44 + index * 2,
+            49 + index * 2,
             index * 100,
         )
     return bytes(data)
@@ -463,6 +482,44 @@ class MeshTests(unittest.TestCase):
                 self.assertEqual(len(subset.positions), 3)
                 self.assertEqual(subset.faces, ((0, 1, 2),))
                 self.assertEqual(subset.positions[1], (1.0, 0.0, 0.0))
+
+    def test_watermesh_uses_platform_endian_uint32_indices(self):
+        positions = (
+            (0.0, 2.0, 0.0),
+            (1.0, 2.0, 0.0),
+            (1.0, 2.0, 1.0),
+            (0.0, 2.0, 1.0),
+        )
+        faces = ((2, 3, 0), (0, 1, 2))
+        for endian, platform in ((">", "xbox360"), ("<", "pc")):
+            with self.subTest(platform=platform):
+                mesh = parse_watermesh(
+                    make_watermesh(endian, ((positions, faces),)),
+                    platform,
+                )
+                subset = mesh.subsets[0]
+                self.assertEqual(subset.positions, positions)
+                self.assertEqual(subset.faces, faces)
+
+    def test_watermesh_combines_bodies_and_consumes_exact_payload(self):
+        triangle = (
+            (0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (0.0, 0.0, 1.0),
+        )
+        data = make_watermesh(
+            "<",
+            (
+                (triangle, ((0, 1, 2),)),
+                (triangle, ((0, 2, 1),)),
+                ((), ()),
+            ),
+        )
+        subset = parse_watermesh(data, "pc").subsets[0]
+        self.assertEqual(len(subset.positions), 6)
+        self.assertEqual(subset.faces, ((0, 1, 2), (3, 5, 4)))
+        with self.assertRaisesRegex(CorruptDataError, "trailing byte"):
+            parse_watermesh(data + b"\0", "pc")
 
     def test_composite_shared_indices_and_part_splitting(self):
         mesh = parse_meshdata(
@@ -598,8 +655,14 @@ class MeshTests(unittest.TestCase):
                     vertex = bytearray(stride)
                     struct.pack_into("<eee", vertex, 0, *position)
                     vertex[8] = 57
-                    struct.pack_into("<ee", vertex, 24, *primary_uv)
-                    struct.pack_into("<ee", vertex, 28, *secondary_uv)
+                    primary_offset = 28 if stride == 48 else 24
+                    secondary_offset = 36 if stride == 48 else 28
+                    struct.pack_into(
+                        "<ee", vertex, primary_offset, *primary_uv
+                    )
+                    struct.pack_into(
+                        "<ee", vertex, secondary_offset, *secondary_uv
+                    )
                     vertices.extend(vertex)
                 indices = struct.pack("<3H", 0, 1, 2)
                 metadata.extend(
@@ -609,7 +672,10 @@ class MeshTests(unittest.TestCase):
                     bytes(metadata + vertices + indices),
                     "pc",
                 ).subsets[0]
-                self.assertEqual(subset.uv_offsets, (24, 28))
+                self.assertEqual(
+                    subset.uv_offsets,
+                    (28, 36, 32, 24) if stride == 48 else (24, 28),
+                )
                 self.assertEqual(
                     subset.influences,
                     (((4, 1.0),), ((4, 1.0),), ((4, 1.0),)),
@@ -710,7 +776,7 @@ class MeshTests(unittest.TestCase):
         self.assertEqual(split[31].uv_offsets, (24, 28, 32, 40))
         self.assertEqual(len(split[31].additional_uvs), 2)
 
-    def test_stride_48_uses_primary_and_secondary_uv_channels(self):
+    def test_stride_48_uses_declared_uv_channels(self):
         metadata = bytearray(struct.pack("<IHB", 1, 0, 1))
         metadata.extend(b"surface\0")
         metadata.extend(
@@ -734,12 +800,19 @@ class MeshTests(unittest.TestCase):
             ((1.0, 0.0, 0.0), (0.8, 0.3), (1.0, 0.0), (0.9, 0.2)),
             ((0.0, 1.0, 0.0), (0.2, 0.9), (0.0, 1.0), (0.1, 0.8)),
         )
-        for position, packed_vector, primary_uv, secondary_uv in values:
+        for index, (
+            position,
+            packed_vector,
+            primary_uv,
+            secondary_uv,
+        ) in enumerate(values):
             vertex = bytearray(48)
             struct.pack_into("<eee", vertex, 0, *position)
             struct.pack_into("<ee", vertex, 8, *packed_vector)
-            struct.pack_into("<ee", vertex, 24, *primary_uv)
-            struct.pack_into("<ee", vertex, 28, *secondary_uv)
+            struct.pack_into("<ee", vertex, 24, 0.25, index / 10.0)
+            struct.pack_into("<ee", vertex, 28, *primary_uv)
+            struct.pack_into("<ee", vertex, 32, 0.75, index / 20.0)
+            struct.pack_into("<ee", vertex, 36, *secondary_uv)
             vertices.extend(vertex)
         indices = struct.pack("<3H", 0, 1, 2)
         metadata.extend(
@@ -750,9 +823,15 @@ class MeshTests(unittest.TestCase):
             "pc",
         )
         subset = parsed.subsets[0]
-        self.assertEqual(subset.uv_offsets, (24, 28))
+        self.assertEqual(subset.uv_offsets, (28, 36, 32, 24))
         self.assertEqual(subset.uvs[1], (1.0, 0.0))
         self.assertAlmostEqual(subset.secondary_uvs[2][1], 0.8, places=3)
+        self.assertAlmostEqual(
+            subset.additional_uvs[0][2][1], 0.1, places=3
+        )
+        self.assertAlmostEqual(
+            subset.additional_uvs[1][1][1], 0.1, places=3
+        )
 
     def test_pc_skinned_stride_64_uses_declared_uv_channels(self):
         metadata = bytearray(struct.pack("<IHB", 1, 0, 1))
@@ -1013,6 +1092,8 @@ class TerrainTests(unittest.TestCase):
                 self.assertEqual(terrain.sample_endian, sample_endian)
                 self.assertEqual(len(terrain.positions), 16)
                 self.assertEqual(len(terrain.faces), 18)
+                self.assertEqual(tuple(terrain.faces[0]), (0, 4, 5))
+                self.assertEqual(tuple(terrain.faces[1]), (0, 5, 1))
 
     def test_heightfield_uses_requested_even_sample_count(self):
         terrain = parse_heightfield(
@@ -1022,7 +1103,7 @@ class TerrainTests(unittest.TestCase):
         )
         self.assertEqual(len(terrain.positions), 9)
         self.assertEqual(len(terrain.faces), 8)
-        self.assertEqual(tuple(terrain.positions[-1][:2]), (2.0, 2.0))
+        self.assertEqual(tuple(terrain.positions[-1][:2]), (1.0, 1.0))
 
     def test_parses_terrain_material_map_byte_orders(self):
         for endian, platform in (("<", "pc"), (">", "xbox360")):

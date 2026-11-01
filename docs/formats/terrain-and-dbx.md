@@ -2,14 +2,16 @@
 
 ## TerrainHeightfield
 
-The tested TerrainHeightfield starts with a platform-endian spatial header:
+The tested TerrainHeightfield starts with a platform-endian spatial and
+metadata header followed by little-endian height samples:
 
 | Offset | Type | Meaning |
 |---:|---|---|
 | `0x00` | `float32[6]` | min X, min Y, min Z, max X, max Y, max Z |
 | `0x18` | `uint32` | square resolution |
-| `0x1C..0x2B` | 16 bytes | unknown |
-| `0x2C` | `uint16[resolution * resolution]` | height samples |
+| `0x1C` | `uint32[5]` | LOD metadata; partially understood |
+| `0x30` | `uint8` | zero in tested resources |
+| `0x31` | little-endian `uint16[resolution * resolution]` | height samples |
 
 Verified header byte order:
 
@@ -18,39 +20,41 @@ Verified header byte order:
 | PC | little-endian |
 | Xbox 360 | big-endian |
 
-The tested Xbox resource had a 2048 x 2048 grid and little-endian height
-samples even though its bounds and resolution were big-endian. Header byte
-order is selected from the known platform and validated against finite ordered
-bounds, a resolution from 2 through 8192, and the available byte length. When
-platform metadata is unavailable, both header interpretations are scored.
-The PC `MP_001.Heightfield-000` sample has a little-endian header but
-big-endian height samples, confirming that sample order cannot be inferred
-from the platform header alone.
-
-Height-sample byte order is independent. The parser compares average
-adjacent-sample differences for little- and big-endian interpretations. This
-smoothness comparison is a heuristic.
+The tested Xbox resource has a 2048 x 2048 grid and little-endian height
+samples even though its bounds, resolution, and metadata are big-endian.
+Tested PC resources also use little-endian samples. Header byte order is
+selected from the known platform and validated against finite ordered bounds,
+a resolution from 2 through 8192, and the available byte length. When platform
+metadata is unavailable, both header interpretations are scored. Sample byte
+order is fixed little-endian; it is not selected by a smoothness heuristic.
 
 Sample conversion is:
 
 ```text
-x = min_x + column * (max_x - min_x) / (resolution - 1)
-z = min_z + row    * (max_z - min_z) / (resolution - 1)
+x = min_x + column * (max_x - min_x) / resolution
+z = min_z + row    * (max_z - min_z) / resolution
 y = min_y + raw_u16 * (max_y - min_y) / 65535
 ```
 
 The core parser returns positions as `(x, z, height)`. Blender's default axis
-conversion creates `(x, -z, height)`.
+conversion creates `(x, -z, height)`. Each grid quad is split along its
+top-left to bottom-right diagonal, matching the retail terrain query.
 
 The Blender setting limits the number of vertices per edge to 1024 and now
 defaults to 1024. If downsampling is requested, the parser distributes exactly
 the requested number of sample indices evenly across the source edge and
-always includes its first and final rows and columns. NumPy-backed position and
-topology generation keeps a full 1024 x 1024 tile practical; a pure-Python
-fallback remains available.
+always includes its first and final serialized rows and columns. Because the
+bounds describe the complete grid domain, the last serialized sample lies one
+source cell short of the maximum bound. NumPy-backed position and topology
+generation keeps a full 1024 x 1024 tile practical; a pure-Python fallback
+remains available.
 
 An exporter must retain the original resolution and raw samples. A downsampled
 preview mesh is not a reversible terrain representation.
+
+The PC `MP_001.Heightfield-000` resource has 129,818 bytes after its samples.
+The suffix begins with a table of little-endian offsets `0, 2, 4, ...` and is
+probably LOD data; it remains undecoded.
 
 ### `MP_001` terrain composition
 
@@ -79,8 +83,19 @@ than 1 m below the coarse triangles. `MP_001.Heightfield-000` therefore
 defaults to its complete 1,048,576-vertex source grid. This fixes local high
 terrain shelves; it is not a global Z-offset correction.
 
+The former byte-`0x2C` parser started five bytes before the sample grid and
+then selected big-endian words by apparent smoothness. On PC MP_001 that
+produced a false height range of approximately `0.12..482.43` m and adjacent
+jumps up to `482.31` m. The verified byte-`0x31` little-endian grid is
+approximately `109.30..276.49` m, with a maximum adjacent edge of `39.93` m
+and maximum isolated four-neighbor deviation of `8.16` m. Correcting the
+header boundary, byte order, spacing, and quad diagonal removes the imported
+terrain spikes rather than filtering authored samples.
+
 The associated WaterMesh has 569 vertices and 1,013 triangles. Its unplaced
-height is approximately 130.5 through 133.25.
+height is approximately 130.5 through 133.25. Its triangle list uses 32-bit
+indices; the corrected topology references every vertex and restores the
+previously missing harbor surface.
 
 ## TerrainMaterialMap
 
@@ -125,10 +140,52 @@ source-backed layer choices cover jungle ground, grass, soil, asphalt, gravel,
 cliff/stone, and rubble-sand families.
 
 This graph is an implemented physical-material approximation. Its 16 m detail
-repeat is estimated, and exact Frostbite constants, full terrain decals,
-`MaskTileAtlas` data, mask regions, and blend arithmetic remain unknown.
-Material indices and names are preserved as custom metadata so later work can
-replace the graph without re-decoding the resource.
+repeat is estimated. Material indices and names are preserved as custom
+metadata so later work can replace the graph without re-decoding the resource.
+
+## Terrain visual decals and blending
+
+The physical-material index map above is not the complete visual blend model.
+The retail Xbox 360 `MP_001` terrain DBX provides verified structural evidence
+for a separate decal hierarchy:
+
+| Instance type | Count | Observed role |
+|---|---:|---|
+| `Terrain.TerrainFullDecal` | 9 | terrain-wide material layer with optional tiled masks |
+| `Terrain.TerrainGroupDecal` | 2 | ordered child-decal group |
+| `Terrain.TerrainSplineDecal` | 20 | material layer linked to a level spline |
+
+A full decal retains its terrain-material reference, enable flag,
+`MaskTextureType`, pixels-per-meter value, grid-cell size/resolution, and
+authoring mask entries. Each mask entry has `PosMin`, `PosMax`, a source PNG
+name, and an enable flag. The runtime archive does not contain those PNGs.
+Instead it contains `MP_001.MaskTileAtlas.res` and `MP_001.Visual.res`.
+
+The Xbox atlas header identifies a 2048 x 1024, one-mip texture with format
+code `3` and a 1,048,576-byte block payload. That format code is not yet
+implemented by the texture decoder. `VisualTerrain` retains compiled terrain
+shader paths and the runtime tile/material records, but their record
+boundaries and mapping back to the DBX mask regions are not decoded.
+
+The level DBX separately contains 22 `TerrainSplineData` records: 20 Road, one
+River, and one Lake plane. Spline control points use a four-component
+`Position` value whose first three components are the Frostbite position.
+Plane-point records reference the affected control point and retain segment
+count, left/right edges, and user-mask values. The spline decals link the Road
+splines to road, road-line, and dirt-road materials.
+
+The public
+[`Bad-Company-2-Map-Editor`](https://github.com/Powback/Bad-Company-2-Map-Editor)
+corroborates the spline relationships, but only triangulates a plane when
+`PlaneType` is `Lake`; it does not implement Road/River rendering, full decals,
+the mask atlas, or blend arithmetic. The importer now reports the full/group/
+spline record counts in map diagnostics rather than silently implying that
+the physical-material approximation includes them.
+
+Still unknown are format-code-3 texture decoding, `VisualTerrain` tile records,
+the exact mask-atlas region mapping, layer composition order at runtime, and
+the shader arithmetic/constants. These remain blockers for faithful terrain
+decal rendering.
 
 See [`terrain.py`](../../bc2_frostbite_importer/core/terrain.py).
 

@@ -82,10 +82,22 @@ usable Blender preview:
   scanning starts at byte 16 so packed normal/tangent fields at earlier
   offsets are not misread as plausible UVs. Tested preferred offsets include
   16, 20, 24, 28, and 32 bytes depending on stride.
-- For tested 48-byte static map layouts, UV0 is at byte 24 and UV1 is at byte
-  28. UV0 can legitimately tile beyond `0..1`; UV1 is usually constrained to
-  that range. The parser retains UV1 when the immediately following
-  half-float pair passes structural scoring.
+- The common retail PC 48-byte static declaration stores
+  `R16G16B16A16_FLOAT` inputs at bytes 24 and 32. The inspected vertex shaders
+  consume their `.zw` halves as the object and repeating coordinates, while
+  the `.xy` halves carry selector/atlas coordinates:
+
+  | Shader route | Byte offset | Blender layer |
+  |---|---:|---|
+  | `v3.zw -> o8.xy` | 28 | `UVMap` |
+  | `v4.zw -> o8.zw` | 36 | `UV1` |
+  | `v4.xy -> o9.xy` | 32 | `UV2` |
+  | `v3.xy -> o9.zw` | 24 | `UV3` |
+
+  This declaration is verified on Ship System, Harbour, PileBricks, GasSilo,
+  and IND_Silo_Medium. The importer uses it only when the declared object and
+  repeating pairs decode structurally; other legitimate 48-byte declarations
+  fall back to per-mesh detection.
 - The retail PC stride-48 composite declaration whose repeated part-ID field
   is at byte 36 exposes four half-float shader-coordinate pairs:
 
@@ -252,12 +264,12 @@ They support semantic-driven decoding but are not authoritative for BC2
 layouts, character materials, or transforms. See the complete
 [external MaxScript audit](../maxscript-reference-audit.md).
 
-The offset-24 rule is verified on the reported
+Retail shader declarations correct the earlier offset-24 interpretation for
 `Objects/Objects/GasSilo/GasSilo` and
-`Objects/Architecture/Industry/IND_Silo_Medium/IND_Silo_Medium` MeshData.
-Interpreting packed fields at byte 8 as UVs produced degenerate layouts;
-offset 24 yields the expected tiled cylindrical ranges, while offset 28
-provides the secondary object-map coordinates.
+`Objects/Architecture/Industry/IND_Silo_Medium/IND_Silo_Medium`. Their object
+maps use byte 28, while byte 36 supplies the tiled cylindrical detail ranges.
+Bytes 24 and 32 remain preserved as shader selectors rather than being
+discarded or mislabeled as the two color UVs.
 
 The PC `US_01_Body` LOD0 sample verifies the skinned offsets across 10,513
 vertices in 13 visible stride-64 subsets. Every four-byte weight tuple sums to
@@ -300,18 +312,31 @@ assigns those surfaces to visible LOD0 subsets. See
 
 ## WaterMesh
 
-WaterMesh has a simpler tested layout using platform byte order:
+WaterMesh uses platform byte order: little-endian on PC and big-endian on Xbox
+360. The implemented layout is:
 
-| Offset | Type | Meaning |
-|---:|---|---|
-| `0x00` | `uint32` | unknown |
-| `0x04` | `uint32` | vertex count |
-| `0x08` | `float32[vertex_count][3]` | positions |
-| after vertices | `uint32` | index count |
-| next | `uint16[index_count]` | triangle-list indices |
+| Location | Type | Meaning |
+|---|---|---|
+| start | `uint32` | body count |
+| per body | `uint32` | vertex count |
+| next | `float32[vertex_count][3]` | positions |
+| next | `uint32` | index count |
+| next | `uint32[index_count]` | triangle-list indices local to this body |
 
-The index count must be divisible by three. The current importer has no water
-UV or material decoding.
+The index count must be divisible by three, every index must be below its
+body's vertex count, and the final body must consume the resource exactly.
+Multiple bodies are joined with rebased indices. Empty bodies are valid.
+
+The verified Xbox 360 `MP_001` resource is 18,996 bytes: one body, 569
+vertices, and 3,039 indices forming 1,013 triangles. The 32-bit interpretation
+references all 569 vertices and consumes the payload exactly. The former
+16-bit interpretation happened to produce 1,013 malformed triangles, but
+referenced only vertices `0..306` and silently left 6,078 bytes unread, which
+removed the harbor water from the imported topology. The same body/u32-index
+layout is independently corroborated for all 36 PC terrain bundles by
+[`bfbc2core/water.py`](https://github.com/mathewsbinny/bfbc2-tool-suite/blob/main/core/bfbc2core/water.py).
+
+The current importer has no water UV or exact material decoding.
 
 ## Blender coordinate conversion
 
@@ -342,10 +367,13 @@ mesh:
 
 The verified `MP_001` set contains 178 unique LOD0 MeshData resources and 211
 geometry/material variants for 5,380 placed objects. All resources parse, with
-observed strides of 32, 48, 64, 68, 72, and 76 bytes.
+observed strides of 32, 48, 64, 68, 72, and 76 bytes. Of their visible
+subsets, 347 use the common 28/36/32/24 static declaration; other subsets
+retain their distinct detected or declaration-backed layouts.
 
-Identified OcRGB object-occlusion bindings use `UV1`; other recovered bindings
-continue to use `UVMap` unless shader evidence establishes another source.
+In the common static layered permutation, identified OcRGB object bindings
+use `UVMap` at byte 28 and repeating details use `UV1` at byte 36. Binding
+routing remains shader-specific for other declarations.
 
 This is Blender instancing, not reconstruction of Frostbite runtime culling or
 destruction systems. See [Levels and complete maps](levels-and-maps.md).

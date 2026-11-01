@@ -343,9 +343,11 @@ The saved validation scene reopens with these collection counts:
 ## Remaining map work
 
 - Terrain physical-material indices are decoded and approximated with source
-  detail textures. Exact terrain shader constants, decals, mask regions,
-  blend arithmetic, and atlas masks are not decoded.
-- Water geometry imports, but its material is an explicit approximation.
+  detail textures. Full/group/spline decal records and their authoring mask
+  bounds are now identified, but compiled `VisualTerrain` records, atlas
+  regions, exact shader constants, and blend arithmetic are not decoded.
+- Water geometry imports with its complete 32-bit topology, including the
+  `MP_001` harbor. Its material is an explicit approximation.
 - Shader binding recovery does not yet recover every shader constant,
   arithmetic operation, UV source, swizzle, or permutation.
 - Static cull trees are visibility structures and are not required for the

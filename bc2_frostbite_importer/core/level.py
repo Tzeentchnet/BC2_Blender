@@ -19,6 +19,12 @@ GROUP_TYPES = {
     "GameSharedResources.StaticModelGroupEntityData",
 }
 
+TERRAIN_DECAL_TYPES = (
+    "Terrain.TerrainFullDecal",
+    "Terrain.TerrainGroupDecal",
+    "Terrain.TerrainSplineDecal",
+)
+
 PC_CHARACTER_SHADER_ARCHIVE = "Dist/win32/levels/mp_001/level-00.fbrb"
 PC_CHARACTER_SHADER_PATH = "Levels/mp_001/shaders/Dx11_Single.res"
 
@@ -674,6 +680,32 @@ class LevelResolver:
             terrain_document.instance(terrain_guid)
             or terrain_document.primary_instance
         )
+        decal_counts = tuple(
+            (
+                decal_type,
+                sum(
+                    instance.attribute("type") == decal_type
+                    for instance in terrain_document.instances
+                ),
+            )
+            for decal_type in TERRAIN_DECAL_TYPES
+        )
+        if any(count for _, count in decal_counts):
+            summary = ", ".join(
+                f"{decal_type.rsplit('.', 1)[-1]}={count}"
+                for decal_type, count in decal_counts
+                if count
+            )
+            self._issues.append(
+                LevelIssue(
+                    code="unsupported_terrain_visual_decals",
+                    message=(
+                        "Terrain visual decal records are not rendered "
+                        f"({summary})"
+                    ),
+                    reference=terrain_partition,
+                )
+            )
         material_map_reference = _field_reference(
             terrain_data,
             "MaterialMap",
