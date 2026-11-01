@@ -86,17 +86,39 @@ usable Blender preview:
   28. UV0 can legitimately tile beyond `0..1`; UV1 is usually constrained to
   that range. The parser retains UV1 when the immediately following
   half-float pair passes structural scoring.
-- For tested skinned layouts with a palette, four byte-sized palette indices
-  are stored at vertex offset `8` and four byte weights at offset `12`.
-- `bones_per_vertex == 1` still uses the first per-vertex palette-index byte.
-  A subset palette can contain multiple rigid attachment bones; assigning
-  every such vertex to palette entry zero is incorrect.
+- The tested little-endian stride-64 skinned-character declaration is
+  explicit rather than heuristic. It exposes four half-float UV pairs:
+
+  | Vertex input | Byte offset | Blender layer | Representative shader use |
+  |---|---:|---|---|
+  | `v6.xy` | 40 | `UVMap` | primary color and primary normal |
+  | `v3.xy` | 16 | `UV1` | alternate camouflage/detail coordinates |
+  | `v6.zw` | 44 | `UV2` | dirt/camouflage masks |
+  | `v7.xy` | 48 | `UV3` | baked character occlusion |
+
+  DX11 vertex shaders 424 and 920 both declare these offsets and write the
+  values to pixel interpolants `o10.xy`, `o10.zw`, `o11.xy`, and `o11.zw`.
+  Decoding offsets 24 and 28 as UVs is incorrect for this layout because those
+  bytes are packed tangent-frame inputs.
+- For tested type-1 skinned layouts with a palette, four byte-sized palette
+  indices are stored at vertex offset `8` and four byte weights at offset
+  `12`.
+- `bones_per_vertex == 1` in that skinned layout still uses the first
+  per-vertex palette-index byte. A subset palette can contain multiple rigid
+  attachment bones; assigning every such vertex to palette entry zero is
+  incorrect.
 - Weights are normalized to sum to one. If no usable weights exist, the first
   palette entry receives full weight.
+- Type-2 composite and type-4 tree meshes also carry palettes with
+  `bones_per_vertex == 1`, but they do not use the validated skinned vertex
+  declaration. Their part/hierarchy semantics remain undecoded, so the parser
+  preserves its conservative first-palette-entry fallback instead of treating
+  packed static vertex data as a bone index.
 
-Normals, tangents, colors, arbitrary additional UV sets, morph data, and every
-vertex declaration variant are not yet decoded generically. Do not treat the
-preview decoder as a complete vertex-layout specification.
+Normals, tangents, colors, morph data, arbitrary UV declarations outside the
+verified static and PC skinned layouts, and every vertex declaration variant
+are not yet decoded generically. Do not treat the preview decoder as a
+complete vertex-layout specification.
 
 The offset-24 rule is verified on the reported
 `Objects/Objects/GasSilo/GasSilo` and
@@ -108,7 +130,8 @@ provides the secondary object-map coordinates.
 The PC `US_01_Body` LOD0 sample verifies the skinned offsets across 10,513
 vertices in 13 visible stride-64 subsets. Every four-byte weight tuple sums to
 255, every nonzero palette index is in range, 61 of the 147 source skeleton
-bones are used, and source bone indices range from 1 through 146.
+bones are used, source bone indices range from 1 through 146, and all four UV
+channels persist through Blender save/reopen.
 
 The tested MedKit results were:
 
@@ -136,8 +159,11 @@ material assignments.
 
 The PC native character path currently obtains the skeleton reference from the
 matching DBX `Render.SkinnedMeshAsset` descriptor rather than decoding the
-`SkinnedMeshSet` payload itself. See
-[Granny characters and animation](granny-animation.md).
+`SkinnedMeshSet` payload itself. The same descriptor's first `ShaderSets`
+entry supplies the default surface table; normalized longest-name matching
+assigns those surfaces to visible LOD0 subsets. See
+[Granny characters and animation](granny-animation.md) and
+[Shaders and materials](../shaders-and-materials.md).
 
 ## WaterMesh
 
@@ -175,7 +201,8 @@ mesh:
 - subset vertex ranges are concatenated;
 - triangle indices are offset into the combined vertex range;
 - one material slot and polygon material index are retained per subset;
-- UV0 and an available secondary channel become Blender `UVMap` and `UV1`;
+- available UV channels become Blender `UVMap`, `UV1`, `UV2`, and `UV3` in
+  source declaration order;
 - a MeshData resource is parsed only once;
 - a Blender mesh datablock is created per geometry/shader-set variant;
 - every placement of that variant links the same datablock.

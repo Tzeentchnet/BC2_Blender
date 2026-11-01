@@ -501,6 +501,101 @@ def _test_reflected_material_roles():
         raise AssertionError("Layered material omitted source occlusion")
 
 
+def _test_character_material_graph():
+    surface = SurfaceShader(
+        "ArmStandard",
+        "Characters/US/Shaders/ArmStandard/GUID",
+        (
+            "Characters/US/US_Models/US_01_Body_Mesh/"
+            "Characters/US/US_Models/Shaders/US_01_Mesh_ArmStandard"
+        ),
+    )
+    bindings = (
+        ShaderTextureBinding(
+            1, "Characters/US/US_Textures/ArmStandard_01_Nm"
+        ),
+        ShaderTextureBinding(
+            2, "Characters/US/US_Textures/Cloth_Detail_01_Nm"
+        ),
+        ShaderTextureBinding(
+            3, "Characters/US/US_Textures/DirtMap_01_C"
+        ),
+        ShaderTextureBinding(
+            4, "Characters/US/US_Textures/ArmStandard_01"
+        ),
+        ShaderTextureBinding(
+            5, "Characters/US/US_Textures/Camo_Digital"
+        ),
+        ShaderTextureBinding(
+            6, "Characters/US/US_Textures/Cloth_Detail_01"
+        ),
+        ShaderTextureBinding(
+            7, "Characters/US/US_Textures/DirtMap_01"
+        ),
+        ShaderTextureBinding(
+            8, "Characters/US/US_Textures/Occlusion/Occlusion_Assault"
+        ),
+    )
+    roles = blender_addon._character_binding_roles(surface, bindings)
+    if roles != (
+        "NORMAL",
+        "DETAIL_NORMAL",
+        "DIRT_COLOR",
+        "BASE_COLOR",
+        "CAMO",
+        "DETAIL_COLOR",
+        "DIRT_MASK",
+        "OCCLUSION",
+    ):
+        raise AssertionError(f"Character binding roles are incorrect: {roles}")
+    if (
+        blender_addon._character_binding_uv_map(surface, "CAMO") != "UV2"
+        or blender_addon._character_binding_uv_map(
+            surface, "OCCLUSION"
+        )
+        != "UV3"
+        or blender_addon._character_binding_uv_scale(
+            surface, "DETAIL_NORMAL"
+        )
+        != (7.0, 7.0)
+    ):
+        raise AssertionError("Character shader UV mapping is incorrect")
+
+    material = bpy.data.materials.new("BC2 Character Graph")
+    nodes, links, shader = blender_addon._material_nodes(material)
+    texture_nodes = []
+    for binding, role in zip(bindings, roles):
+        node = nodes.new("ShaderNodeTexImage")
+        texture_nodes.append((binding, role, node))
+    color_output, _, model = blender_addon._character_color_output(
+        nodes,
+        links,
+        texture_nodes,
+    )
+    normal_output, normal_model = blender_addon._character_normal_output(
+        nodes,
+        links,
+        texture_nodes,
+    )
+    links.new(color_output, shader.inputs["Base Color"])
+    links.new(normal_output, shader.inputs["Normal"])
+    if not shader.inputs["Base Color"].is_linked:
+        raise AssertionError("Character material has no Base Color graph")
+    if not shader.inputs["Normal"].is_linked:
+        raise AssertionError("Character material has no normal graph")
+    if "camouflage" not in model or "dirt" not in model:
+        raise AssertionError("Character color graph omitted shader layers")
+    if "red/green" not in normal_model or "alpha/green" not in normal_model:
+        raise AssertionError("Character normal packing is incorrect")
+    if not any(
+        node.type == "VECT_MATH"
+        and node.operation == "NORMALIZE"
+        and node.name.startswith("BC2 character normalized normal")
+        for node in nodes
+    ):
+        raise AssertionError("Character detail normal was not combined")
+
+
 def _test_degenerate_subset_materials():
     numpy_module = blender_addon._np
     try:
@@ -680,6 +775,7 @@ def main():
     _test_verified_normal_graph()
     _test_shader_key_alias()
     _test_reflected_material_roles()
+    _test_character_material_graph()
     _test_degenerate_subset_materials()
     _test_armature_and_action(bpy.context)
     print(

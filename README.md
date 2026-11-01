@@ -47,10 +47,11 @@ For a source checkout, install the repository root as an extension or add `bc2_f
 
 For a PC character, importing a `SkinnedMeshSet` resolves the skeleton
 reference in its DBX descriptor, creates the complete armature, names vertex
-groups from the source bone palette, and adds Armature modifiers. Importing a
-`GrannyAnimation` then adds an Action to the matching armature. If that
-armature is not already present, the animation's referenced skeleton is
-created automatically.
+groups from the source bone palette, adds Armature modifiers, resolves the
+default `MeshShaderSet`, and builds source-backed materials from the retail
+DX11 database. Importing a `GrannyAnimation` then adds an Action to the
+matching armature. If that armature is not already present, the animation's
+referenced skeleton is created automatically.
 
 The provided Xbox example indexes 630 Frostbite archives and 251,251 active assets. The provided PC example exposes 625 extractable Frostbite archives through the installer database.
 
@@ -60,7 +61,7 @@ The provided Xbox example indexes 630 Frostbite archives and 251,251 active asse
 |---|---|
 | `MeshData` | Creates one Blender mesh object per visible subset, including UVs, materials, and available bone-weight vertex groups. PC little-endian and Xbox 360 big-endian layouts are supported. |
 | Rigid, composite, and tree mesh sets | Resolves a matching LOD `MeshData` resource when available, preferring LOD0. |
-| PC `SkinnedMeshSet` | Resolves LOD0 geometry plus the DBX skeleton reference, creates all source bones, uses named vertex groups, and binds every subset with an Armature modifier. Console mesh sets remain geometry-only. |
+| PC `SkinnedMeshSet` | Resolves LOD0 geometry, the DBX skeleton reference, the default surface set, and source DX11 texture bindings; creates all source bones, four verified character UV layers, named vertex groups, one material per visible subset, and Armature modifiers. Console mesh sets remain geometry-only. |
 | PC `GrannyModel` | Creates a native Blender armature while preserving the complete source hierarchy, local transforms, source flags, and physics-joint metadata. |
 | PC `GrannyAnimation` | Creates a Blender 5.2 layered/slotted Action on the matching armature, sampled at the source time step with root motion and quaternion continuity. |
 | `WaterMesh` | Creates native water geometry. |
@@ -115,6 +116,16 @@ ground-contact check measures a -1.09-unit median forest-origin offset. All 485
 visible subset slots resolve by source naming. The diagnostics Text preserves
 the ten distinct nonvisual-reference descriptions from 24 raw placements.
 
+The validated PC `US_01_Body` character resolves all 13 visible subset
+materials by exact shader-database key and loads 34 unique file-backed source
+images. Its stride-64 vertex declaration maps source UVs at byte offsets 40,
+16, 44, and 48 to Blender `UVMap`, `UV1`, `UV2`, and `UV3`. Representative
+retail DX11 permutations establish red/green primary normals,
+alpha/green repeated cloth-detail normals, 15x dirt sampling, camouflage and
+cloth modulation, source dirt masks, and baked occlusion. The Blender graph
+reproduces those high-level relationships while labeling the remaining
+lighting/specular and per-surface blend differences as approximations.
+
 ## Cache behavior
 
 The cache location is configurable in the add-on preferences. It contains:
@@ -137,9 +148,11 @@ scoped derivatives and may likewise be deleted when Blender is closed.
   v7 skeletons and transform animations. Xbox 360/PS3 Granny variants, vector
   tracks, nonidentity animated scale/shear, and curve codecs outside the
   documented set are rejected explicitly.
-- Character geometry currently receives source-named weights and placeholder
-  subset materials; automatic character shader/texture assembly is not yet
-  wired into the individual skinned-character workflow.
+- PC character materials are currently validated with the `US_01_Body`
+  default shader set and use `MP_001`'s duplicated shared-character DX11
+  database as the deterministic binding source. Character heads, eyes,
+  eyelashes, alternate kits, and exact Frostbite lighting/specular arithmetic
+  still require additional validation.
 - Complete-map assembly is currently validated only for the PC retail
   `MP_001` graph. Xbox whole-map assembly is not yet implemented.
 - Representative map color, alpha, normal, OcRGB, and detail bindings are
@@ -221,7 +234,9 @@ blender --background --factory-startup --python tests\benchmark_blender_import.p
 The tests cover PC/Xbox mesh byte order, accelerated and fallback Xbox texture
 paths, DDS generation, terrain sampling, DBX conversion, an end-to-end
 synthetic XDVDFS -> FbRB -> MeshData path, bounded Granny skeleton/animation
-fixtures, and Blender-native mesh, armature, Action, and image creation.
+fixtures, the verified four-channel PC character UV declaration, character
+binding roles and packed-normal graphs, and Blender-native mesh, armature,
+Action, material, and image creation.
 
 For optional validation with legally owned PC media:
 
@@ -246,5 +261,7 @@ blender --background --factory-startup `
 ```
 
 It imports `US_01_Body`, `ske01`, `StandIdle`, and `RunForward`; checks bind
-invariance and sampled pose matrices; then saves, reopens, and verifies the
-armature, skinned subsets, modifiers, and Actions.
+invariance, sampled pose matrices, four source UV channels, 13 exact material
+keys, source-backed DDS images, Base Color and packed-normal graphs; then
+saves, reopens, and verifies the armature, skinned subsets, materials,
+modifiers, and Actions.

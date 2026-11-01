@@ -431,6 +431,53 @@ class MeshTests(unittest.TestCase):
             (((4, 1.0),), ((9, 1.0),), ((4, 1.0),)),
         )
 
+    def test_composite_palette_does_not_select_skinned_layout(self):
+        for stride in (48, 64):
+            with self.subTest(stride=stride):
+                metadata = bytearray(struct.pack("<IHB", 2, 0, 1))
+                metadata.extend(b"composite\0")
+                metadata.extend(
+                    struct.pack(
+                        "<IIIIBBBBH",
+                        1,
+                        3,
+                        0,
+                        0,
+                        stride,
+                        3,
+                        1,
+                        2,
+                        2,
+                    )
+                )
+                metadata.extend(struct.pack("<2H", 4, 9))
+                vertices = bytearray()
+                values = (
+                    ((0.0, 0.0, 0.0), (0.0, 0.0), (0.1, 0.2)),
+                    ((1.0, 0.0, 0.0), (1.0, 0.0), (0.9, 0.2)),
+                    ((0.0, 1.0, 0.0), (0.0, 1.0), (0.1, 0.8)),
+                )
+                for position, primary_uv, secondary_uv in values:
+                    vertex = bytearray(stride)
+                    struct.pack_into("<eee", vertex, 0, *position)
+                    vertex[8] = 57
+                    struct.pack_into("<ee", vertex, 24, *primary_uv)
+                    struct.pack_into("<ee", vertex, 28, *secondary_uv)
+                    vertices.extend(vertex)
+                indices = struct.pack("<3H", 0, 1, 2)
+                metadata.extend(
+                    struct.pack("<III", len(vertices), len(indices), 0)
+                )
+                subset = parse_meshdata(
+                    bytes(metadata + vertices + indices),
+                    "pc",
+                ).subsets[0]
+                self.assertEqual(subset.uv_offsets, (24, 28))
+                self.assertEqual(
+                    subset.influences,
+                    (((4, 1.0),), ((4, 1.0),), ((4, 1.0),)),
+                )
+
     def test_stride_48_uses_primary_and_secondary_uv_channels(self):
         metadata = bytearray(struct.pack("<IHB", 1, 0, 1))
         metadata.extend(b"surface\0")
@@ -474,6 +521,85 @@ class MeshTests(unittest.TestCase):
         self.assertEqual(subset.uv_offsets, (24, 28))
         self.assertEqual(subset.uvs[1], (1.0, 0.0))
         self.assertAlmostEqual(subset.secondary_uvs[2][1], 0.8, places=3)
+
+    def test_pc_skinned_stride_64_uses_declared_uv_channels(self):
+        metadata = bytearray(struct.pack("<IHB", 1, 0, 1))
+        metadata.extend(b"character\0")
+        metadata.extend(
+            struct.pack(
+                "<IIIIBBBBH",
+                1,
+                3,
+                0,
+                0,
+                64,
+                3,
+                4,
+                1,
+                1,
+            )
+        )
+        metadata.extend(struct.pack("<H", 7))
+        vertices = bytearray()
+        channels = (
+            (
+                (0.1, 0.2),
+                (0.3, 0.4),
+                (0.5, 0.6),
+                (0.7, 0.8),
+            ),
+            (
+                (0.9, 0.2),
+                (0.4, 0.5),
+                (0.6, 0.7),
+                (0.8, 0.9),
+            ),
+            (
+                (0.1, 0.9),
+                (0.5, 0.6),
+                (0.7, 0.8),
+                (0.9, 0.1),
+            ),
+        )
+        positions = (
+            (0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+        )
+        for position, vertex_channels in zip(positions, channels):
+            vertex = bytearray(64)
+            struct.pack_into("<eee", vertex, 0, *position)
+            vertex[12] = 255
+            struct.pack_into("<ee", vertex, 16, *vertex_channels[1])
+            struct.pack_into("<eeee", vertex, 24, 0.8, -0.5, 0.3, 1.0)
+            struct.pack_into(
+                "<eeee",
+                vertex,
+                40,
+                *vertex_channels[0],
+                *vertex_channels[2],
+            )
+            struct.pack_into("<ee", vertex, 48, *vertex_channels[3])
+            vertices.extend(vertex)
+        indices = struct.pack("<3H", 0, 1, 2)
+        metadata.extend(
+            struct.pack("<III", len(vertices), len(indices), 0)
+        )
+        subset = parse_meshdata(
+            bytes(metadata + vertices + indices),
+            "pc",
+        ).subsets[0]
+        self.assertEqual(subset.uv_offsets, (40, 16, 44, 48))
+        self.assertAlmostEqual(subset.uvs[1][0], 0.9, places=3)
+        self.assertAlmostEqual(
+            subset.secondary_uvs[2][1], 0.6, places=3
+        )
+        self.assertAlmostEqual(
+            subset.additional_uvs[0][0][0], 0.5, places=3
+        )
+        self.assertAlmostEqual(
+            subset.additional_uvs[1][2][1], 0.1, places=3
+        )
 
     def test_selects_one_position_format_for_related_subsets(self):
         half_data = bytearray()

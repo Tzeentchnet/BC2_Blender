@@ -51,6 +51,7 @@ def _settings():
             "unit_scale": 1.0,
             "flip_v": True,
             "include_z_only": False,
+            "import_textures": True,
         },
     )()
 
@@ -143,6 +144,8 @@ def main():
     arguments = _arguments()
     output = Path(arguments.output)
     output.parent.mkdir(parents=True, exist_ok=True)
+    bpy.ops.object.select_all(action="SELECT")
+    bpy.ops.object.delete(use_global=False)
     repository = AssetRepository(arguments.iso, arguments.cache)
     try:
         if repository.needs_scan():
@@ -195,6 +198,98 @@ def main():
             raise AssertionError(
                 f"US_01 topology is {(vertex_count, triangle_count)}"
             )
+        for obj in mesh_objects:
+            if [layer.name for layer in obj.data.uv_layers] != [
+                "UVMap",
+                "UV1",
+                "UV2",
+                "UV3",
+            ]:
+                raise AssertionError(
+                    f"{obj.name} does not expose four source UV channels"
+                )
+            if json.loads(obj.data["bc2_uv_offsets"]) != [
+                40,
+                16,
+                44,
+                48,
+            ]:
+                raise AssertionError(
+                    f"{obj.name} uses incorrect character UV offsets"
+                )
+        materials = [obj.data.materials[0] for obj in mesh_objects]
+        if any(
+            material.get("bc2_material_status")
+            != "resolved character material graph"
+            for material in materials
+        ):
+            raise AssertionError("US_01 has an unresolved source material")
+        if any(
+            material.get("bc2_shader_key_match") != "exact"
+            for material in materials
+        ):
+            raise AssertionError("US_01 material keys did not resolve exactly")
+        if armature.get("bc2_resolved_material_count") != 13:
+            raise AssertionError("US_01 did not resolve all 13 materials")
+        for material in materials:
+            shader = next(
+                node
+                for node in material.node_tree.nodes
+                if node.type == "BSDF_PRINCIPLED"
+            )
+            roles = {
+                binding["role"]
+                for binding in json.loads(
+                    material["bc2_texture_bindings"]
+                )
+            }
+            if not shader.inputs["Base Color"].is_linked:
+                raise AssertionError(
+                    f"{material.name} has no source Base Color graph"
+                )
+            if "NORMAL" in roles and not shader.inputs["Normal"].is_linked:
+                raise AssertionError(
+                    f"{material.name} has no source normal graph"
+                )
+        arm_material = next(
+            material
+            for material in materials
+            if material.get("bc2_surface_name") == "ArmStandard"
+        )
+        arm_roles = {
+            binding["role"]
+            for binding in json.loads(
+                arm_material["bc2_texture_bindings"]
+            )
+        }
+        if not {
+            "BASE_COLOR",
+            "NORMAL",
+            "DETAIL_COLOR",
+            "DETAIL_NORMAL",
+            "CAMO",
+            "DIRT_COLOR",
+            "DIRT_MASK",
+            "OCCLUSION",
+        } <= arm_roles:
+            raise AssertionError("ArmStandard omitted shader texture roles")
+        source_images = {
+            node.image.name: node.image
+            for material in materials
+            for node in material.node_tree.nodes
+            if node.type == "TEX_IMAGE" and node.image is not None
+        }
+        if len(source_images) < 20:
+            raise AssertionError(
+                f"US_01 loaded only {len(source_images)} source images"
+            )
+        for image in source_images.values():
+            if image.source != "FILE" or not Path(
+                bpy.path.abspath(image.filepath)
+            ).is_file():
+                raise AssertionError(
+                    f"{image.name} is not backed by a source DDS file"
+                )
         skeleton_names = {bone.name for bone in skeleton.bones}
         for obj in mesh_objects:
             if any(
@@ -337,12 +432,29 @@ def main():
             for obj in reopened_meshes
         ):
             raise AssertionError("Saved scene lost an Armature modifier")
+        reopened_materials = [
+            obj.data.materials[0] for obj in reopened_meshes
+        ]
+        if any(
+            material.get("bc2_material_status")
+            != "resolved character material graph"
+            for material in reopened_materials
+        ):
+            raise AssertionError("Saved scene lost character material graphs")
+        if any(
+            [layer.name for layer in obj.data.uv_layers]
+            != ["UVMap", "UV1", "UV2", "UV3"]
+            for obj in reopened_meshes
+        ):
+            raise AssertionError("Saved scene lost character UV channels")
 
         metrics = {
             "armature_bones": len(reopened_armature.data.bones),
             "mesh_subsets": len(reopened_meshes),
             "vertices": vertex_count,
             "triangles": triangle_count,
+            "materials": len(reopened_materials),
+            "source_images": len(source_images),
             "actions": {
                 name: {
                     "duration": animations[name].duration,

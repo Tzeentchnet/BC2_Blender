@@ -242,6 +242,13 @@ Armature creation:
 6. Names mesh vertex groups from the global palette indices.
 7. Adds linear-blend Armature modifiers to every visible subset.
 
+Character material resolution is separate from Granny decoding. The matching
+`Render.SkinnedMeshAsset` DBX supplies the default surface set, while the
+retail DX11 database supplies texture bindings and shader evidence. The tested
+stride-64 mesh exposes four shader-selected UV channels. See
+[Meshes](meshes.md) and
+[Shaders and materials](../shaders-and-materials.md).
+
 Animation import samples from time zero through the inclusive duration at the
 source time step. Rest-local versus animated-local transforms are converted to
 Blender pose-bone deltas. The Blender 5.2 Action uses a slot, a keyframe layer,
@@ -258,6 +265,9 @@ is retained.
 | `US_01_Body` visible subsets | 13 |
 | vertices / triangles | 10,513 / 9,883 |
 | source bones used by the mesh | 61 |
+| exact visible material keys | 13 / 13 |
+| source-backed character images | 34 |
+| retained character UV layers | 4 |
 | `StandIdle` duration / inclusive frames | about 3.0 s / 91 at 30 Hz |
 | `RunForward` duration / inclusive frames | about 0.6 s / 19 at 30 Hz |
 | transform tracks in each clip | 39 |

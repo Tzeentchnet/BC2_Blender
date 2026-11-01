@@ -19,6 +19,9 @@ GROUP_TYPES = {
     "GameSharedResources.StaticModelGroupEntityData",
 }
 
+PC_CHARACTER_SHADER_ARCHIVE = "Dist/win32/levels/mp_001/level-00.fbrb"
+PC_CHARACTER_SHADER_PATH = "Levels/mp_001/shaders/Dx11_Single.res"
+
 
 @dataclass(frozen=True)
 class FrostbiteTransform:
@@ -242,6 +245,18 @@ def index_pc_level_archives(
     return archive_paths
 
 
+def index_pc_character_shader_archive(
+    repository: AssetRepository,
+) -> str:
+    if repository.kind != "PC_ISO":
+        raise ExtractionError(
+            "Character shader materials currently require a PC retail ISO"
+        )
+    repository.index_archive_path(PC_CHARACTER_SHADER_ARCHIVE)
+    repository.materialize_archive_payload(PC_CHARACTER_SHADER_ARCHIVE)
+    return PC_CHARACTER_SHADER_ARCHIVE
+
+
 class LevelResolver:
     def __init__(
         self,
@@ -417,6 +432,17 @@ class LevelResolver:
             )
         self._meshes[key] = definition
         return definition
+
+    def resolve_mesh(
+        self,
+        mesh_reference: str,
+        shader_set_override: str | None = None,
+    ) -> MeshDefinition:
+        return self._mesh(mesh_reference, shader_set_override)
+
+    @property
+    def issues(self) -> tuple[LevelIssue, ...]:
+        return tuple(self._issues)
 
     def _direct_placements(
         self,

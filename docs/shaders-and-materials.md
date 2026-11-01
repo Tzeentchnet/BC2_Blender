@@ -197,6 +197,107 @@ after normal, mask, noise, occlusion, and detail families have been excluded.
 Duplicate path/slot records from alternate render passes are retained as
 metadata but do not create duplicate color layers.
 
+## PC US_01 skinned-character materials
+
+### Descriptor and database selection
+
+`Characters/US/US_Models/US_01_Body_Mesh.dbx` contains two
+`MeshShaderSetAsset` references. The first is the default appearance; the
+second contains kit-upgrade overrides. Individual character import uses the
+first set and leaves variation selection for future work.
+
+The shared `mp_common` archive contains the mesh, descriptor, skeleton, and
+textures, but no DX11 shader database. Retail level shader databases duplicate
+the shared character permutations. The importer deterministically indexes:
+
+```text
+Dist/win32/levels/mp_001/level-00.fbrb
+Levels/mp_001/shaders/Dx11_Single.res
+```
+
+on demand for PC character materials. All 13 visible `US_01_Body` LOD0
+surfaces resolve by exact database key. Ten additional default-set surfaces,
+including face, eye, eyelash, teeth, and headgear families, are not present in
+this body LOD and therefore are not assigned by this sample.
+
+### Verified visible binding families
+
+Representative exact bindings are:
+
+| Surface family | Source roles observed |
+|---|---|
+| `ArmStandard`, `LegStandard` | primary normal, repeated cloth-detail normal, dirt color, base texture, camouflage, repeated cloth detail, dirt mask, baked occlusion |
+| `Gloves` | primary and cloth-detail normals, dirt color/mask, glove base, cloth detail, leather auxiliary, specular, baked occlusion |
+| `MOLLE`, `Kits`, `Pouches` | primary and cloth-detail normals, base, repeated cloth detail, dirt color/mask, baked occlusion; MOLLE also binds a material mask |
+| `Boots`, `Buckles`, `Straps`, pads, holster, grenades | primary normal where present, base color, dirt color/mask, baked occlusion, with source specular on selected families |
+| Beretta attachment | dummy/base color, dirt color, and dirt mask; the inspected binding has no primary normal |
+
+Primary-color choice is not "the first color-looking texture." The importer
+scores remaining candidates against the surface name and its paired primary
+normal. This selects `Glove_01` rather than the auxiliary `leather_C`, and
+selects resources such as `Boots_01_LOW`, `AssaultKit_01`, and
+`Beretta_dummy` when their shader surface names differ.
+
+### Verified character UV declaration
+
+The relevant skinned vertex shaders declare four texture-coordinate sources:
+
+| Pixel input | Mesh byte offset | Blender layer |
+|---|---:|---|
+| `v10.xy` from `v6.xy` | 40 | `UVMap` |
+| `v10.zw` from `v3.xy` | 16 | `UV1` |
+| `v11.xy` from `v6.zw` | 44 | `UV2` |
+| `v11.zw` from `v7.xy` | 48 | `UV3` |
+
+This is why the generic stride-64 guess at bytes 24/28 was wrong for skinned
+characters: those bytes are tangent-frame inputs. Primary color and normal
+usually use `UVMap`; selected camouflage/detail paths use `UV1` or `UV2`;
+dirt masks use `UV1`/`UV2`; baked occlusion uses `UV3`.
+
+### Normal packing and layer arithmetic
+
+The inspected `ps_5_0` permutations reconstruct the primary normal from red
+and green:
+
+```text
+x = red * 2 - 1
+y = green * 2 - 1
+z = sqrt(max(1 - x*x - y*y, 0))
+```
+
+Cloth-detail normals use DXT5nm-style alpha/green storage. The shaders repeat
+them by surface: 7x for `ArmStandard`, 8x for `LegStandard`, 10x for gloves,
+5x for MOLLE and pouches, and 15x for kits. The importer decodes both packed
+normals, transforms them through Blender normal-map nodes, adds the detail
+deviation to the primary normal, and normalizes. This reproduces the verified
+packing and repeated-detail relationship; it is labeled an approximation
+because the game combines the tangent vectors before its complete lighting
+calculation and some permutations weight detail with base alpha.
+
+Representative color permutations also establish:
+
+- dirt color is commonly sampled at 15x UV and multiplied by `2.5`;
+- a separate source dirt map selects between dirt and the clean material;
+- baked occlusion is sampled through the fourth UV channel and multiplies the
+  final color;
+- `ArmStandard` camouflage repeats `(2, 3)`;
+- `LegStandard` camouflage repeats `(2, 4)`;
+- cloth detail modulates the base/camouflage result.
+
+The Blender graph preserves those source relationships. Frostbite uses
+surface-specific dirt remaps, hard-coded tints, specular exponents, distance
+terms, outdoor lighting, and alternate render permutations. Those parts are
+represented conservatively with Principled roughness/specular settings and
+are explicitly recorded as approximations in material custom properties.
+
+### Validation result
+
+The retail integration scene resolves 13/13 visible materials, loads 34 unique
+file-backed DDS images, retains all four UV layers, and has connected Base
+Color graphs for every subset. Every surface with a source primary normal has
+a connected packed-normal graph. Materials, images, UV layers, armature
+modifiers, `StandIdle`, and `RunForward` persist after save/reopen.
+
 ### Verified representative map families
 
 FXC disassembly of retail `MP_001` permutations established these patterns:

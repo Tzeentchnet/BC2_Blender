@@ -114,6 +114,9 @@ missing-texture, texture-conversion, or unresolved-subset diagnostics.
 - PC `US_01_Body`: 13 visible skinned subsets, 10,513 vertices, 9,883
   triangles, and 61 used bones mapped into the complete 147-bone `ske01`
   hierarchy.
+- PC `US_01_Body` materials: 13/13 exact default shader keys, 34 unique
+  file-backed DDS images, four UV layers from verified offsets 40/16/44/48,
+  and connected Base Color plus source-normal graphs where bound.
 - PC `ske01`: local transforms composed against every transposed stored
   inverse-world matrix with a maximum identity residual below `7.5e-7`.
 - PC rifle third-person `StandIdle` and `RunForward`: 39 named transform
@@ -141,6 +144,9 @@ Current tests cover:
 
 - little- and big-endian MeshData, including mesh-wide half/float selection;
 - one-influence palette-index handling for rigid skinned subsets;
+- composite/static palettes remain isolated from the skinned index and UV
+  declarations;
+- the declared four-channel little-endian stride-64 skinned UV layout;
 - bounded PC Granny wrapper, section, relocation, skeleton, and constant-curve
   fixtures;
 - PC L8-to-DDS conversion;
@@ -176,7 +182,9 @@ creation, the pure-Python mesh fallback, native file-backed DDS loading,
 combined subset material indices and secondary UV layers (including Blender's
 degenerate-face cleanup), linked map instances, placement matrices, map
 texture roles, layered OcRGB/detail construction, and the verified DXT5nm node
-graph.
+graph. It also checks character texture-role selection, primary red/green
+normal decode, alpha/green cloth-detail decode, and the combined character
+normal graph.
 
 An optional real-media integration runner performs a complete import, saves the
 blend, reopens it, and checks placement count, linked mesh count, exact child
@@ -191,9 +199,10 @@ blender --background --factory-startup `
   --output <OUTPUT_BLEND> --level MP_001
 ```
 
-The PC character integration runner imports and binds `US_01_Body`, adds
-`StandIdle` and `RunForward`, validates sampled pose matrices, and verifies the
-saved/reopened scene:
+The PC character integration runner imports and binds `US_01_Body`, resolves
+all 13 visible default materials, loads native DDS images, adds `StandIdle` and
+`RunForward`, validates sampled pose matrices, and verifies the saved/reopened
+scene:
 
 ```powershell
 blender --background --factory-startup `
@@ -209,7 +218,8 @@ These behaviors are useful but need broader format research:
 - MeshData payload-header search.
 - Half-float versus float position scoring across all related subsets sharing
   a vertex stride.
-- UV offset selection from stride and value ranges.
+- UV offset selection from stride and value ranges outside the verified
+  48-byte static and 64-byte PC skinned declarations.
 - Skinned vertex influence offsets.
 - PC Granny field locations and curve codecs outside the validated v7 samples.
 - Mesh-set-to-MeshData resolution by path.
@@ -227,8 +237,8 @@ naive alternative choose incorrectly.
 
 ## Unsupported or incomplete areas
 
-- Full vertex declarations, normals, tangents, colors, and arbitrary
-  additional UV sets.
+- Full vertex declarations, normals, tangents, colors, and arbitrary UV
+  layouts beyond the verified static and PC skinned declarations.
 - Complete shader arithmetic, constants, swizzles, UV sources, and all texture
   semantics.
 - Xbox 360/PS3 Granny skeleton/model and animation conversion.

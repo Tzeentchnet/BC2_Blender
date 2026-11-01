@@ -41,7 +41,9 @@ from .core.io import safe_cache_name
 from .core.level import (
     LevelResolver,
     MeshDefinition,
+    PC_CHARACTER_SHADER_PATH,
     SurfaceShader,
+    index_pc_character_shader_archive,
     index_pc_level_archives,
 )
 from .core.mesh import MeshAsset, parse_meshdata, parse_watermesh
@@ -484,7 +486,13 @@ def _create_mesh_objects(
     *,
     collection=None,
     bone_names=None,
+    subset_materials=None,
 ):
+    if (
+        subset_materials is not None
+        and len(subset_materials) != len(parsed.subsets)
+    ):
+        raise ValueError("Subset material count does not match mesh subsets")
     collection = collection or _new_collection(
         context, Path(asset["path"]).stem
     )
@@ -507,12 +515,25 @@ def _create_mesh_objects(
                 subset.secondary_uvs,
                 flip_v=settings.flip_v,
             )
+        for channel_index, channel in enumerate(
+            subset.additional_uvs,
+            start=2,
+        ):
+            _add_uv_layer(
+                mesh,
+                f"UV{channel_index}",
+                channel,
+                flip_v=settings.flip_v,
+            )
         mesh["bc2_uv_offsets"] = json.dumps(
             subset.uv_offsets,
             separators=(",", ":"),
         )
-        material = bpy.data.materials.new(subset.name)
-        material.diffuse_color = (0.8, 0.8, 0.8, 1.0)
+        if subset_materials is None:
+            material = bpy.data.materials.new(subset.name)
+            material.diffuse_color = (0.8, 0.8, 0.8, 1.0)
+        else:
+            material = subset_materials[subset_index]
         mesh.materials.append(material)
         obj = bpy.data.objects.new(
             f"{subset_index:02d}_{subset.name}", mesh
@@ -771,6 +792,20 @@ def _create_character(
     skeleton_asset, skeleton = _read_referenced_skeleton(
         repository, mesh_set_asset
     )
+    (
+        subset_materials,
+        material_diagnostics,
+        material_summary,
+    ) = _resolve_character_subset_materials(
+        repository,
+        mesh_set_asset,
+        parsed,
+        (
+            str(mesh_set_asset["archive_path"]),
+            str(mesh_asset["archive_path"]),
+        ),
+        settings,
+    )
     collection = _new_collection(
         context, Path(mesh_set_asset["path"]).stem
     )
@@ -788,8 +823,27 @@ def _create_character(
         settings,
         collection=collection,
         bone_names=tuple(bone.name for bone in skeleton.bones),
+        subset_materials=subset_materials,
     )
     _bind_meshes_to_armature(objects, armature_obj)
+    diagnostics_text = bpy.data.texts.new(
+        f"BC2_{Path(mesh_set_asset['path']).stem}_"
+        "Material_Diagnostics.json"
+    )
+    diagnostics_text.write(
+        json.dumps(
+            {
+                "summary": material_summary,
+                "issues": material_diagnostics,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    armature_obj["bc2_material_diagnostics_text"] = diagnostics_text.name
+    armature_obj["bc2_resolved_material_count"] = material_summary[
+        "resolved_materials"
+    ]
     context.view_layer.objects.active = armature_obj
     armature_obj.select_set(True)
     return armature_obj, objects
@@ -1113,6 +1167,16 @@ def _combined_level_mesh(
     uvs = []
     secondary_uvs = []
     has_secondary_uvs = False
+    additional_uvs = [
+        []
+        for _ in range(
+            max(
+                (len(subset.additional_uvs) for subset in parsed.subsets),
+                default=0,
+            )
+        )
+    ]
+    has_additional_uvs = [False] * len(additional_uvs)
     material_indices = []
     for subset_index, subset in enumerate(parsed.subsets):
         vertex_offset = len(positions)
@@ -1126,6 +1190,16 @@ def _combined_level_mesh(
             secondary_uvs.extend(
                 (0.0, 0.0) for _ in subset.positions
             )
+        for channel_index, channel_values in enumerate(additional_uvs):
+            if channel_index < len(subset.additional_uvs):
+                channel_values.extend(
+                    subset.additional_uvs[channel_index]
+                )
+                has_additional_uvs[channel_index] = True
+            else:
+                channel_values.extend(
+                    (0.0, 0.0) for _ in subset.positions
+                )
         faces.extend(
             tuple(vertex_offset + vertex for vertex in face)
             for face in subset.faces
@@ -1148,6 +1222,17 @@ def _combined_level_mesh(
             secondary_uvs,
             flip_v=settings.flip_v,
         )
+    for channel_index, (channel_values, present) in enumerate(
+        zip(additional_uvs, has_additional_uvs),
+        start=2,
+    ):
+        if present:
+            _add_uv_layer(
+                mesh,
+                f"UV{channel_index}",
+                channel_values,
+                flip_v=settings.flip_v,
+            )
     mesh["bc2_uv_offsets"] = json.dumps(
         [subset.uv_offsets for subset in parsed.subsets],
         separators=(",", ":"),
@@ -1379,6 +1464,163 @@ def _binding_roles(bindings):
     return tuple(roles)
 
 
+_CHARACTER_NON_COLOR_ROLES = {
+    "NORMAL",
+    "DETAIL_NORMAL",
+    "DIRT_NORMAL",
+    "DIRT_MASK",
+    "MASK",
+    "OCCLUSION",
+    "ROUGHNESS",
+    "SPECULAR",
+}
+
+
+def _texture_stem(path: str) -> str:
+    return PurePosixPath(path).name.casefold().removesuffix(".res")
+
+
+def _character_binding_roles(
+    surface: SurfaceShader,
+    bindings,
+) -> tuple[str, ...]:
+    roles = []
+    for binding in bindings:
+        stem = _texture_stem(binding.path)
+        if "occlusion" in stem or "ambientocclusion" in stem:
+            role = "OCCLUSION"
+        elif "dirtmap" in stem:
+            if stem.endswith(("_nm", "_n", "_normal")):
+                role = "DIRT_NORMAL"
+            elif stem.endswith(("_c", "_color")):
+                role = "DIRT_COLOR"
+            else:
+                role = "DIRT_MASK"
+        elif stem.endswith(("_nm", "_n", "_normal", "_normalmap")):
+            role = (
+                "DETAIL_NORMAL"
+                if "detail" in stem
+                else "NORMAL"
+            )
+        elif "detail" in stem:
+            role = "DETAIL_COLOR"
+        elif "camo" in stem:
+            role = "CAMO"
+        elif "mask" in stem:
+            role = "MASK"
+        elif stem.endswith(("_s", "_sp", "_spec", "_specular")):
+            role = "SPECULAR"
+        else:
+            role = "COLOR_CANDIDATE"
+        roles.append(role)
+
+    normal_stems = {
+        _texture_stem(binding.path).removesuffix("_normalmap")
+        .removesuffix("_normal")
+        .removesuffix("_nm")
+        .removesuffix("_n")
+        for binding, role in zip(bindings, roles)
+        if role == "NORMAL"
+    }
+    surface_tokens = tuple(
+        token
+        for token in surface.name.casefold().replace("-", "_").split("_")
+        if len(token) >= 3 and token not in {"mesh", "body", "standard"}
+    )
+    candidates = [
+        index
+        for index, role in enumerate(roles)
+        if role == "COLOR_CANDIDATE"
+    ]
+    if candidates:
+        def score(index: int) -> tuple[int, int]:
+            stem = _texture_stem(bindings[index].path)
+            normalized = stem.removesuffix("_low").removesuffix("_c")
+            value = sum(
+                len(token) * 10
+                for token in surface_tokens
+                if token in normalized
+            )
+            if any(
+                normalized == normal
+                or normalized.startswith(normal + "_")
+                or normal.startswith(normalized + "_")
+                for normal in normal_stems
+            ):
+                value += 500
+            if stem.endswith("_c"):
+                value += 5
+            return value, -index
+
+        primary = max(candidates, key=score)
+        for index in candidates:
+            roles[index] = (
+                "BASE_COLOR" if index == primary else "AUX_COLOR"
+            )
+    return tuple(roles)
+
+
+def _is_character_surface(surface: SurfaceShader) -> bool:
+    return surface.database_key.casefold().startswith("characters/")
+
+
+def _character_binding_uv_map(
+    surface: SurfaceShader,
+    role: str,
+) -> str:
+    name = _normalized_surface_name(surface.name)
+    if role == "OCCLUSION":
+        return "UV3"
+    if role == "CAMO":
+        return "UV2" if "armstandard" in name else "UV1"
+    if role == "DIRT_MASK":
+        if any(
+            value in name
+            for value in ("legstandard", "molle", "pouches")
+        ):
+            return "UV1"
+        return "UV2"
+    if role in {"DETAIL_COLOR", "DETAIL_NORMAL"} and any(
+        value in name
+        for value in ("legstandard", "molle", "pouches")
+    ):
+        return "UV1"
+    if (
+        role in {"BASE_COLOR", "DIRT_COLOR"}
+        and name.endswith("meshberetta")
+        and "holster" not in name
+    ):
+        return "UV1"
+    return "UVMap"
+
+
+def _character_binding_uv_scale(
+    surface: SurfaceShader,
+    role: str,
+) -> tuple[float, float]:
+    name = _normalized_surface_name(surface.name)
+    if role == "DIRT_COLOR":
+        return 15.0, 15.0
+    if role == "CAMO":
+        if "armstandard" in name:
+            return 2.0, 3.0
+        if "legstandard" in name:
+            return 2.0, 4.0
+    if role in {"DETAIL_COLOR", "DETAIL_NORMAL"}:
+        repeats = (
+            ("armstandard", 7.0),
+            ("legstandard", 8.0),
+            ("gloves", 10.0),
+            ("molle", 5.0),
+            ("pouches", 5.0),
+            ("kits", 15.0),
+        )
+        for marker, scale in repeats:
+            if marker in name:
+                return scale, scale
+    return 1.0, 1.0
+
+
 def _unique_role_nodes(texture_nodes, role: str):
     result = []
     seen = set()
@@ -1483,11 +1725,14 @@ def _signed_channel(nodes, links, source, name: str, location):
     return subtract.outputs[0]
 
 
-def _dxt5nm_output(
+def _packed_normal_output(
     nodes,
     links,
     image_node,
     *,
+    x_channel: str,
+    y_channel: str,
+    label: str,
     uv_scale: float = 1.0,
     detail_weight: float | None = None,
 ):
@@ -1504,18 +1749,24 @@ def _dxt5nm_output(
     separate = nodes.new("ShaderNodeSeparateColor")
     separate.location = (-480, -100)
     links.new(image_node.outputs["Color"], separate.inputs["Color"])
+    channels = {
+        "RED": separate.outputs["Red"],
+        "GREEN": separate.outputs["Green"],
+        "BLUE": separate.outputs["Blue"],
+        "ALPHA": image_node.outputs["Alpha"],
+    }
     x_output = _signed_channel(
         nodes,
         links,
-        image_node.outputs["Alpha"],
-        "DXT5nm X",
+        channels[x_channel],
+        f"{label} X",
         (-280, 120),
     )
     y_output = _signed_channel(
         nodes,
         links,
-        separate.outputs["Green"],
-        "DXT5nm Y",
+        channels[y_channel],
+        f"{label} Y",
         (-280, -120),
     )
 
@@ -1591,6 +1842,37 @@ def _dxt5nm_output(
     return normalize.outputs["Vector"]
 
 
+def _dxt5nm_output(
+    nodes,
+    links,
+    image_node,
+    *,
+    uv_scale: float = 1.0,
+    detail_weight: float | None = None,
+):
+    return _packed_normal_output(
+        nodes,
+        links,
+        image_node,
+        x_channel="ALPHA",
+        y_channel="GREEN",
+        label="DXT5nm",
+        uv_scale=uv_scale,
+        detail_weight=detail_weight,
+    )
+
+
+def _rg_normal_output(nodes, links, image_node):
+    return _packed_normal_output(
+        nodes,
+        links,
+        image_node,
+        x_channel="RED",
+        y_channel="GREEN",
+        label="Character RG normal",
+    )
+
+
 def _standard_normal_output(nodes, links, image_node):
     normal_map = nodes.new("ShaderNodeNormalMap")
     normal_map.location = (300, -260)
@@ -1598,6 +1880,164 @@ def _standard_normal_output(nodes, links, image_node):
     normal_map.inputs["Strength"].default_value = 1.0
     links.new(image_node.outputs["Color"], normal_map.inputs["Color"])
     return normal_map.outputs["Normal"]
+
+
+def _character_color_output(nodes, links, texture_nodes):
+    base_colors = _unique_role_nodes(texture_nodes, "BASE_COLOR")
+    if not base_colors:
+        return None, None, "no character base-color binding"
+    base_node = base_colors[0][1]
+    color_output = base_node.outputs["Color"]
+    model_parts = ["shader-selected base color"]
+
+    camo = _unique_role_nodes(texture_nodes, "CAMO")
+    detail = _unique_role_nodes(texture_nodes, "DETAIL_COLOR")
+    if camo:
+        multiply = nodes.new("ShaderNodeMixRGB")
+        multiply.name = "BC2 character base x camouflage"
+        multiply.label = "Base x camouflage"
+        multiply.blend_type = "MULTIPLY"
+        multiply.inputs["Fac"].default_value = 1.0
+        links.new(color_output, multiply.inputs["Color1"])
+        links.new(camo[0][1].outputs["Color"], multiply.inputs["Color2"])
+        color_output = multiply.outputs["Color"]
+        model_parts.append("camouflage modulation")
+
+    if detail:
+        combine = nodes.new("ShaderNodeMixRGB")
+        combine.name = "BC2 character cloth detail"
+        combine.label = "Repeated cloth detail"
+        if camo:
+            combine.blend_type = "MULTIPLY"
+            combine.inputs["Fac"].default_value = 1.0
+        else:
+            combine.blend_type = "OVERLAY"
+            combine.inputs["Fac"].default_value = 0.35
+        links.new(color_output, combine.inputs["Color1"])
+        links.new(detail[0][1].outputs["Color"], combine.inputs["Color2"])
+        color_output = combine.outputs["Color"]
+        if camo:
+            scale = nodes.new("ShaderNodeVectorMath")
+            scale.name = "BC2 character detail x2"
+            scale.label = "Shader detail gain x2"
+            scale.operation = "SCALE"
+            scale.inputs["Scale"].default_value = 2.0
+            links.new(color_output, scale.inputs[0])
+            color_output = scale.outputs["Vector"]
+        model_parts.append("repeated cloth detail")
+    elif camo:
+        scale = nodes.new("ShaderNodeVectorMath")
+        scale.name = "BC2 character camouflage x2"
+        scale.label = "Shader camouflage gain x2"
+        scale.operation = "SCALE"
+        scale.inputs["Scale"].default_value = 2.0
+        links.new(color_output, scale.inputs[0])
+        color_output = scale.outputs["Vector"]
+
+    dirt_colors = _unique_role_nodes(texture_nodes, "DIRT_COLOR")
+    dirt_masks = _unique_role_nodes(texture_nodes, "DIRT_MASK")
+    if dirt_colors and dirt_masks:
+        dirt_scale = nodes.new("ShaderNodeVectorMath")
+        dirt_scale.name = "BC2 character dirt x2.5"
+        dirt_scale.label = "Shader dirt gain x2.5"
+        dirt_scale.operation = "SCALE"
+        dirt_scale.inputs["Scale"].default_value = 2.5
+        links.new(dirt_colors[0][1].outputs["Color"], dirt_scale.inputs[0])
+        separate = nodes.new("ShaderNodeSeparateColor")
+        separate.name = "BC2 character dirt mask"
+        separate.label = "Dirt mask red"
+        links.new(dirt_masks[0][1].outputs["Color"], separate.inputs["Color"])
+        mix = nodes.new("ShaderNodeMixRGB")
+        mix.name = "BC2 character dirt blend"
+        mix.label = "Dirt to clean surface"
+        mix.blend_type = "MIX"
+        links.new(separate.outputs["Red"], mix.inputs["Fac"])
+        links.new(dirt_scale.outputs["Vector"], mix.inputs["Color1"])
+        links.new(color_output, mix.inputs["Color2"])
+        color_output = mix.outputs["Color"]
+        model_parts.append("UV-masked dirt blend")
+
+    occlusion = _unique_role_nodes(texture_nodes, "OCCLUSION")
+    if occlusion:
+        separate = nodes.new("ShaderNodeSeparateColor")
+        separate.name = "BC2 character occlusion"
+        separate.label = "Character occlusion red"
+        links.new(occlusion[0][1].outputs["Color"], separate.inputs["Color"])
+        multiply = nodes.new("ShaderNodeMixRGB")
+        multiply.name = "BC2 character color x occlusion"
+        multiply.label = "Color x baked occlusion"
+        multiply.blend_type = "MULTIPLY"
+        multiply.inputs["Fac"].default_value = 1.0
+        links.new(color_output, multiply.inputs["Color1"])
+        links.new(separate.outputs["Red"], multiply.inputs["Color2"])
+        color_output = multiply.outputs["Color"]
+        model_parts.append("baked occlusion")
+    return color_output, base_node, ", ".join(model_parts)
+
+
+def _character_normal_output(nodes, links, texture_nodes):
+    primary = _unique_role_nodes(texture_nodes, "NORMAL")
+    if not primary:
+        return None, "no character normal binding"
+    normal_output = _rg_normal_output(nodes, links, primary[0][1])
+    model = "verified PC character primary normal in red/green"
+    detail = _unique_role_nodes(texture_nodes, "DETAIL_NORMAL")
+    if detail:
+        detail_output = _dxt5nm_output(nodes, links, detail[0][1])
+        geometry = nodes.new("ShaderNodeNewGeometry")
+        geometry.name = "BC2 character geometric normal"
+        geometry.label = "Geometric normal"
+        subtract = nodes.new("ShaderNodeVectorMath")
+        subtract.name = "BC2 character detail normal delta"
+        subtract.label = "Detail normal delta"
+        subtract.operation = "SUBTRACT"
+        links.new(detail_output, subtract.inputs[0])
+        links.new(geometry.outputs["Normal"], subtract.inputs[1])
+        add = nodes.new("ShaderNodeVectorMath")
+        add.name = "BC2 character combined normal"
+        add.label = "Primary + detail delta"
+        add.operation = "ADD"
+        links.new(normal_output, add.inputs[0])
+        links.new(subtract.outputs["Vector"], add.inputs[1])
+        normalize = nodes.new("ShaderNodeVectorMath")
+        normalize.name = "BC2 character normalized normal"
+        normalize.label = "Normalize combined normal"
+        normalize.operation = "NORMALIZE"
+        links.new(add.outputs["Vector"], normalize.inputs[0])
+        normal_output = normalize.outputs["Vector"]
+        model += ", alpha/green repeated detail approximation"
+    return normal_output, model
+
+
+def _configure_character_principled(
+    surface: SurfaceShader,
+    nodes,
+    links,
+    shader,
+    texture_nodes,
+):
+    name = _normalized_surface_name(surface.name)
+    roughness = 0.62
+    metallic = 0.0
+    if any(value in name for value in ("buckles", "beretta")):
+        roughness = 0.3
+        metallic = 0.35
+    elif any(
+        value in name
+        for value in ("boots", "gloves", "holster", "pads", "grenades")
+    ):
+        roughness = 0.48
+    shader.inputs["Roughness"].default_value = roughness
+    shader.inputs["Metallic"].default_value = metallic
+
+    specular = _unique_role_nodes(texture_nodes, "SPECULAR")
+    specular_input = shader.inputs.get("Specular IOR Level")
+    if specular and specular_input is not None:
+        grayscale = nodes.new("ShaderNodeRGBToBW")
+        grayscale.name = "BC2 character specular level"
+        grayscale.label = "Source specular level"
+        links.new(specular[0][1].outputs["Color"], grayscale.inputs["Color"])
+        links.new(grayscale.outputs["Val"], specular_input)
 
 
 def _texture_asset(repository, path: str, preferred_archives):
@@ -1708,7 +2148,12 @@ def _surface_material(
     if resolved_shader_key != surface.database_key:
         material["bc2_resolved_shader_key"] = resolved_shader_key
 
-    roles = _binding_roles(shader_material.textures)
+    character_surface = _is_character_surface(surface)
+    roles = (
+        _character_binding_roles(surface, shader_material.textures)
+        if character_surface
+        else _binding_roles(shader_material.textures)
+    )
     material["bc2_texture_bindings"] = json.dumps(
         [
             {
@@ -1758,14 +2203,18 @@ def _surface_material(
                     repository,
                     texture_asset,
                     raw,
-                    non_color=role in {
-                        "NORMAL",
-                        "MASK",
-                        "NOISE",
-                        "OCCLUSION",
-                        "ROUGHNESS",
-                        "SPECULAR",
-                    },
+                    non_color=(
+                        role in _CHARACTER_NON_COLOR_ROLES
+                        if character_surface
+                        else role in {
+                            "NORMAL",
+                            "MASK",
+                            "NOISE",
+                            "OCCLUSION",
+                            "ROUGHNESS",
+                            "SPECULAR",
+                        }
+                    ),
                 )
                 image_cache[image_key] = loaded
             except (BC2Error, OSError, RuntimeError, ValueError) as exc:
@@ -1781,14 +2230,18 @@ def _surface_material(
         image, converted = loaded
         if image is None or converted is None:
             continue
-        if role in {
-            "NORMAL",
-            "MASK",
-            "NOISE",
-            "OCCLUSION",
-            "ROUGHNESS",
-            "SPECULAR",
-        }:
+        if (
+            role in _CHARACTER_NON_COLOR_ROLES
+            if character_surface
+            else role in {
+                "NORMAL",
+                "MASK",
+                "NOISE",
+                "OCCLUSION",
+                "ROUGHNESS",
+                "SPECULAR",
+            }
+        ):
             image.colorspace_settings.name = "Non-Color"
         node = nodes.new("ShaderNodeTexImage")
         node.image = image
@@ -1801,7 +2254,11 @@ def _surface_material(
             binding.parameters,
             separators=(",", ":"),
         )
-        uv_map = _binding_uv_map(binding.path, role)
+        uv_map = (
+            _character_binding_uv_map(surface, role)
+            if character_surface
+            else _binding_uv_map(binding.path, role)
+        )
         uv_node = uv_nodes.get(uv_map)
         if uv_node is None:
             uv_node = nodes.new("ShaderNodeUVMap")
@@ -1810,13 +2267,71 @@ def _surface_material(
             uv_node.label = uv_map
             uv_node.location = (-1050, 400 - len(uv_nodes) * 180)
             uv_nodes[uv_map] = uv_node
-        links.new(uv_node.outputs["UV"], node.inputs["Vector"])
+        uv_scale = (
+            _character_binding_uv_scale(surface, role)
+            if character_surface
+            else (1.0, 1.0)
+        )
+        if uv_scale == (1.0, 1.0):
+            links.new(uv_node.outputs["UV"], node.inputs["Vector"])
+        else:
+            scale_node = nodes.new("ShaderNodeVectorMath")
+            scale_node.name = (
+                f"BC2 {role} UV x{uv_scale[0]:g},x{uv_scale[1]:g}"
+            )
+            scale_node.label = (
+                f"{role} UV x{uv_scale[0]:g}, x{uv_scale[1]:g}"
+            )
+            scale_node.operation = "MULTIPLY"
+            scale_node.inputs[1].default_value = (
+                uv_scale[0],
+                uv_scale[1],
+                1.0,
+            )
+            links.new(uv_node.outputs["UV"], scale_node.inputs[0])
+            links.new(scale_node.outputs["Vector"], node.inputs["Vector"])
         node["bc2_uv_map"] = uv_map
+        node["bc2_uv_scale"] = uv_scale
         texture_nodes.append((binding, role, node))
         if role == "NORMAL" and normal_node is None:
             normal_node = node
             normal_format = converted.format_name
             normal_path = binding.path
+
+    if character_surface:
+        _configure_character_principled(
+            surface,
+            nodes,
+            links,
+            shader,
+            texture_nodes,
+        )
+        color_output, _, color_model = _character_color_output(
+            nodes,
+            links,
+            texture_nodes,
+        )
+        material["bc2_color_model"] = color_model
+        if color_output is not None:
+            links.new(color_output, shader.inputs["Base Color"])
+        normal_output, normal_model = _character_normal_output(
+            nodes,
+            links,
+            texture_nodes,
+        )
+        material["bc2_normal_model"] = normal_model
+        if normal_output is not None:
+            links.new(normal_output, shader.inputs["Normal"])
+        material["bc2_material_family"] = "PC skinned character"
+        material["bc2_material_evidence"] = (
+            "PC DX11 bindings and representative retail shader disassembly"
+        )
+        material["bc2_material_status"] = (
+            "resolved character material graph"
+            if color_output is not None
+            else "resolved character bindings without base color"
+        )
+        return material
 
     color_output, color_node, color_model = _layered_color_output(
         nodes,
@@ -1870,6 +2385,141 @@ def _surface_material(
         else "resolved bindings without color graph"
     )
     return material
+
+
+def _resolve_character_subset_materials(
+    repository,
+    mesh_set_asset,
+    parsed: MeshAsset,
+    preferred_archives,
+    settings: BC2Settings,
+):
+    descriptor_path = _resource_partition(mesh_set_asset["path"]) + ".dbx"
+    descriptor_asset = repository.catalog.find_asset(
+        descriptor_path,
+        preferred_archives,
+    )
+    if descriptor_asset is None:
+        raise BC2Error(
+            f"Character mesh descriptor is not indexed: {descriptor_path}"
+        )
+    _, descriptor_raw = repository.read_asset(
+        int(descriptor_asset["id"]),
+        max_size=256 << 20,
+    )
+    descriptor = parse_dbx(descriptor_raw)
+    mesh_instance = descriptor.primary_instance
+    mesh_guid = (
+        mesh_instance.attribute("guid")
+        if mesh_instance is not None
+        else None
+    )
+    if not mesh_guid:
+        raise BC2Error(
+            f"Character descriptor has no primary mesh instance: "
+            f"{descriptor_path}"
+        )
+    mesh_reference = (
+        descriptor_path.removesuffix(".dbx") + "/" + mesh_guid
+    )
+    resolver = LevelResolver(
+        repository,
+        "CHARACTER",
+        tuple(preferred_archives),
+    )
+    definition = resolver.resolve_mesh(mesh_reference)
+    diagnostics = [
+        {
+            "code": issue.code,
+            "message": issue.message,
+            "reference": issue.reference or "",
+        }
+        for issue in resolver.issues
+    ]
+
+    import_textures = getattr(settings, "import_textures", True)
+    shader_database = None
+    shader_database_path = None
+    material_archives = tuple(preferred_archives)
+    if import_textures:
+        shader_archive = index_pc_character_shader_archive(repository)
+        material_archives = tuple(
+            dict.fromkeys((*preferred_archives, shader_archive))
+        )
+        _, shader_raw = repository.read_asset_path(
+            PC_CHARACTER_SHADER_PATH,
+            max_size=1 << 30,
+            preferred_archives=material_archives,
+        )
+        shader_database = parse_shader_database(shader_raw)
+        shader_database_path = PC_CHARACTER_SHADER_PATH
+        if shader_database.trailing_bytes:
+            diagnostics.append(
+                {
+                    "code": "shader_database_trailing_bytes",
+                    "reference": PC_CHARACTER_SHADER_PATH,
+                    "message": (
+                        f"{shader_database.trailing_bytes} unparsed byte(s) "
+                        "remain after the shader database"
+                    ),
+                }
+            )
+
+    assignments = _surface_assignments(parsed, definition)
+    material_cache = {}
+    image_cache = {}
+    materials = []
+    for subset, (surface, match) in zip(parsed.subsets, assignments):
+        if surface is None:
+            diagnostics.append(
+                {
+                    "code": "unresolved_character_surface",
+                    "reference": subset.name,
+                    "message": (
+                        "Character subset could not be matched to its "
+                        "default MeshShaderSet"
+                    ),
+                }
+            )
+            material = _diagnostic_material(
+                material_cache,
+                subset.name,
+                f"BC2 Missing {PurePosixPath(subset.name).name}",
+                "Character subset has no resolved source surface",
+            )
+            material["bc2_material_status"] = "unresolved character surface"
+        else:
+            material = _surface_material(
+                repository,
+                surface,
+                shader_database,
+                material_archives,
+                material_cache,
+                image_cache,
+                diagnostics,
+                import_textures,
+            )
+            material["bc2_subset_match"] = match
+        materials.append(material)
+
+    resolved_materials = sum(
+        material.get("bc2_material_status")
+        == "resolved character material graph"
+        for material in materials
+    )
+    summary = {
+        "mesh_reference": mesh_reference,
+        "shader_set_reference": definition.shader_set_reference or "",
+        "shader_database": shader_database_path or "",
+        "subsets": len(parsed.subsets),
+        "source_surfaces": len(definition.surfaces),
+        "resolved_materials": resolved_materials,
+        "source_images": sum(
+            image is not None for image, _ in image_cache.values()
+        ),
+        "diagnostics": len(diagnostics),
+    }
+    return tuple(materials), diagnostics, summary
 
 
 _TERRAIN_LAYER_PATTERNS = {

@@ -19,6 +19,9 @@ class MeshSubset:
     vertex_stride: int
     secondary_uvs: tuple[tuple[float, float], ...] = ()
     uv_offsets: tuple[int, ...] = ()
+    additional_uvs: tuple[
+        tuple[tuple[float, float], ...], ...
+    ] = ()
 
 
 @dataclass(frozen=True)
@@ -306,6 +309,18 @@ def _decode_uv_channel(
     return tuple(values)
 
 
+def _pc_skinned_uv_offsets(
+    mesh_type: int,
+    stride: int,
+    palette: tuple[int, ...],
+) -> tuple[int, ...]:
+    if mesh_type == 1 and stride == 64 and palette:
+        # Retail PC character declarations expose v6.xy, v3.xy, v6.zw,
+        # and v7.xy from these four byte offsets.
+        return 40, 16, 44, 48
+    return ()
+
+
 def _read_influences(
     data: bytes,
     vertex_offset: int,
@@ -313,10 +328,11 @@ def _read_influences(
     stride: int,
     bones_per_vertex: int,
     palette: tuple[int, ...],
+    mesh_type: int,
 ) -> tuple[tuple[tuple[int, float], ...], ...]:
     if not palette:
         return tuple(() for _ in range(vertex_count))
-    if stride < 16:
+    if mesh_type != 1 or bones_per_vertex <= 0 or stride < 16:
         return tuple(((palette[0], 1.0),) for _ in range(vertex_count))
     result = []
     for index in range(vertex_count):
@@ -411,18 +427,49 @@ def parse_meshdata(
             )
             for vertex in range(header.vertex_count)
         )
-        uv_offset = _detect_uv_offset(
-            data,
-            subset_vertex_start,
-            header.vertex_count,
-            header.stride,
-            endian,
+        explicit_uv_offsets = (
+            _pc_skinned_uv_offsets(
+                mesh_type,
+                header.stride,
+                header.palette,
+            )
+            if endian == "<"
+            else ()
         )
-        if uv_offset is None:
+        if explicit_uv_offsets:
+            decoded_channels = tuple(
+                _decode_uv_channel(
+                    data,
+                    subset_vertex_start,
+                    header.vertex_count,
+                    header.stride,
+                    offset,
+                    endian,
+                )
+                for offset in explicit_uv_offsets
+            )
+            if any(channel is None for channel in decoded_channels):
+                raise CorruptDataError(
+                    f"PC skinned UV channels are invalid for {header.name}"
+                )
+            uvs = decoded_channels[0]
+            secondary_uvs = decoded_channels[1]
+            additional_uvs = decoded_channels[2:]
+            uv_offsets = explicit_uv_offsets
+        else:
+            uv_offset = _detect_uv_offset(
+                data,
+                subset_vertex_start,
+                header.vertex_count,
+                header.stride,
+                endian,
+            )
+        if not explicit_uv_offsets and uv_offset is None:
             uvs = tuple((0.0, 0.0) for _ in range(header.vertex_count))
             secondary_uvs = ()
+            additional_uvs = ()
             uv_offsets = ()
-        else:
+        elif not explicit_uv_offsets:
             decoded_uvs = _decode_uv_channel(
                 data,
                 subset_vertex_start,
@@ -447,6 +494,7 @@ def parse_meshdata(
                 if secondary_offset + 4 <= header.stride
                 else None
             ) or ()
+            additional_uvs = ()
             uv_offsets = (
                 (uv_offset, secondary_offset)
                 if secondary_uvs
@@ -472,6 +520,7 @@ def parse_meshdata(
             header.stride,
             header.bones_per_vertex,
             header.palette,
+            mesh_type,
         )
         subsets.append(
             MeshSubset(
@@ -483,6 +532,7 @@ def parse_meshdata(
                 vertex_stride=header.stride,
                 secondary_uvs=secondary_uvs,
                 uv_offsets=uv_offsets,
+                additional_uvs=additional_uvs,
             )
         )
     if not subsets:
