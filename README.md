@@ -45,6 +45,13 @@ For a source checkout, install the repository root as an extension or add `bc2_f
    - Other data
 6. Select an asset and click **Import Selected**, or use **Extract Raw**.
 
+For a PC character, importing a `SkinnedMeshSet` resolves the skeleton
+reference in its DBX descriptor, creates the complete armature, names vertex
+groups from the source bone palette, and adds Armature modifiers. Importing a
+`GrannyAnimation` then adds an Action to the matching armature. If that
+armature is not already present, the animation's referenced skeleton is
+created automatically.
+
 The provided Xbox example indexes 630 Frostbite archives and 251,251 active assets. The provided PC example exposes 625 extractable Frostbite archives through the installer database.
 
 ## Native Blender import support
@@ -52,7 +59,10 @@ The provided Xbox example indexes 630 Frostbite archives and 251,251 active asse
 | Asset | Current behavior |
 |---|---|
 | `MeshData` | Creates one Blender mesh object per visible subset, including UVs, materials, and available bone-weight vertex groups. PC little-endian and Xbox 360 big-endian layouts are supported. |
-| Rigid, skinned, composite, and tree mesh sets | Resolves a matching LOD `MeshData` resource when available, preferring LOD0. |
+| Rigid, composite, and tree mesh sets | Resolves a matching LOD `MeshData` resource when available, preferring LOD0. |
+| PC `SkinnedMeshSet` | Resolves LOD0 geometry plus the DBX skeleton reference, creates all source bones, uses named vertex groups, and binds every subset with an Armature modifier. Console mesh sets remain geometry-only. |
+| PC `GrannyModel` | Creates a native Blender armature while preserving the complete source hierarchy, local transforms, source flags, and physics-joint metadata. |
+| PC `GrannyAnimation` | Creates a Blender 5.2 layered/slotted Action on the matching armature, sampled at the source time step with root motion and quaternion continuity. |
 | `WaterMesh` | Creates native water geometry. |
 | `ITexture` | Converts PC texture resources to DDS and creates an Image plus node material. |
 | `XenonTexture` | Untiles Xbox 360 surfaces, fixes compressed-block byte order, converts to DDS, and creates an Image plus node material. DXT1, DXT3, DXT5, ARGB8888, and L8 headers are recognized. Grouped, padded mip allocations import their base level so Blender can generate lower display mips. |
@@ -123,7 +133,13 @@ scoped derivatives and may likewise be deleted when Blender is closed.
 
 ## Current limitations
 
-- Granny skeletons and animation curves are cataloged and can be extracted, but are not yet converted into Blender armatures/actions.
+- Native Granny conversion is currently limited to validated PC little-endian
+  v7 skeletons and transform animations. Xbox 360/PS3 Granny variants, vector
+  tracks, nonidentity animated scale/shear, and curve codecs outside the
+  documented set are rejected explicitly.
+- Character geometry currently receives source-named weights and placeholder
+  subset materials; automatic character shader/texture assembly is not yet
+  wired into the individual skinned-character workflow.
 - Complete-map assembly is currently validated only for the PC retail
   `MP_001` graph. Xbox whole-map assembly is not yet implemented.
 - Representative map color, alpha, normal, OcRGB, and detail bindings are
@@ -204,8 +220,8 @@ blender --background --factory-startup --python tests\benchmark_blender_import.p
 
 The tests cover PC/Xbox mesh byte order, accelerated and fallback Xbox texture
 paths, DDS generation, terrain sampling, DBX conversion, an end-to-end
-synthetic XDVDFS -> FbRB -> MeshData path, and Blender-native mesh/image
-creation.
+synthetic XDVDFS -> FbRB -> MeshData path, bounded Granny skeleton/animation
+fixtures, and Blender-native mesh, armature, Action, and image creation.
 
 For optional validation with legally owned PC media:
 
@@ -219,3 +235,16 @@ blender --background --factory-startup `
 This saves and reopens the map blend, then verifies placement, linked-mesh,
 terrain, and diagnostics counts. Images remain native file-backed DDS resources
 unless `--pack-images` is supplied.
+
+The equivalent PC character integration check is:
+
+```powershell
+blender --background --factory-startup `
+  --python tests\blender_character_integration.py -- `
+  --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
+  --output <OUTPUT_BLEND>
+```
+
+It imports `US_01_Body`, `ske01`, `StandIdle`, and `RunForward`; checks bind
+invariance and sampled pose matrices; then saves, reopens, and verifies the
+armature, skinned subsets, modifiers, and Actions.

@@ -26,10 +26,17 @@ from bpy.types import (
     UIList,
 )
 from bpy_extras.io_utils import ImportHelper
-from mathutils import Matrix
+from mathutils import Matrix, Quaternion
 
-from .core.dbx import dbx_to_xml
+from .core.dbx import dbx_to_xml, parse_dbx
 from .core.errors import BC2Error
+from .core.granny import (
+    GrannyAnimation,
+    GrannyBone,
+    GrannySkeleton,
+    parse_granny_animation,
+    parse_granny_model,
+)
 from .core.io import safe_cache_name
 from .core.level import (
     LevelResolver,
@@ -452,7 +459,7 @@ def _add_uv_layer(
     return uv_layer
 
 
-def _create_vertex_groups(obj, influences):
+def _create_vertex_groups(obj, influences, bone_names=None):
     groups = {}
     for vertex_index, vertex_influences in enumerate(influences):
         for bone, weight in vertex_influences:
@@ -460,7 +467,11 @@ def _create_vertex_groups(obj, influences):
                 vertex_index
             )
     for bone, weights in groups.items():
-        group = obj.vertex_groups.new(name=f"Bone_{bone:03d}")
+        if bone_names is not None and 0 <= bone < len(bone_names):
+            name = bone_names[bone]
+        else:
+            name = f"Bone_{bone:03d}"
+        group = obj.vertex_groups.new(name=name)
         for weight, vertex_indices in weights.items():
             group.add(vertex_indices, weight, "REPLACE")
 
@@ -470,8 +481,13 @@ def _create_mesh_objects(
     parsed: MeshAsset,
     asset,
     settings: BC2Settings,
+    *,
+    collection=None,
+    bone_names=None,
 ):
-    collection = _new_collection(context, Path(asset["path"]).stem)
+    collection = collection or _new_collection(
+        context, Path(asset["path"]).stem
+    )
     created = []
     for subset_index, subset in enumerate(parsed.subsets):
         mesh = bpy.data.meshes.new(f"{subset.name}_Mesh")
@@ -502,7 +518,7 @@ def _create_mesh_objects(
             f"{subset_index:02d}_{subset.name}", mesh
         )
         collection.objects.link(obj)
-        _create_vertex_groups(obj, subset.influences)
+        _create_vertex_groups(obj, subset.influences, bone_names)
         obj["bc2_asset_path"] = asset["path"]
         obj["bc2_archive_path"] = asset["archive_path"]
         obj["bc2_platform"] = asset["platform"]
@@ -511,6 +527,440 @@ def _create_mesh_objects(
         bpy.context.view_layer.objects.active = created[0]
         created[0].select_set(True)
     return created
+
+
+def _source_transform_matrix(
+    translation: tuple[float, float, float],
+    rotation: tuple[float, float, float, float],
+    scale_shear: tuple[float, ...] | None = None,
+) -> Matrix:
+    x, y, z, w = rotation
+    matrix = (
+        Matrix.Translation(translation)
+        @ Quaternion((w, x, y, z)).to_matrix().to_4x4()
+    )
+    if scale_shear is not None:
+        scale_matrix = Matrix.Identity(4)
+        for row in range(3):
+            for column in range(3):
+                scale_matrix[row][column] = scale_shear[row * 3 + column]
+        matrix @= scale_matrix
+    return matrix
+
+
+def _convert_skeleton_matrix(matrix: Matrix, settings: BC2Settings) -> Matrix:
+    if settings.axis_conversion:
+        basis = Matrix(
+            (
+                (1.0, 0.0, 0.0, 0.0),
+                (0.0, 0.0, -1.0, 0.0),
+                (0.0, 1.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0, 1.0),
+            )
+        )
+        result = basis @ matrix @ basis.transposed()
+    else:
+        result = matrix.copy()
+    result.translation *= settings.unit_scale
+    return result
+
+
+def _skeleton_local_matrices(
+    skeleton: GrannySkeleton,
+    settings: BC2Settings,
+) -> tuple[Matrix, ...]:
+    return tuple(
+        _convert_skeleton_matrix(
+            _source_transform_matrix(
+                bone.translation,
+                bone.rotation,
+                bone.scale_shear,
+            ),
+            settings,
+        )
+        for bone in skeleton.bones
+    )
+
+
+def _skeleton_world_matrices(
+    skeleton: GrannySkeleton,
+    local_matrices: tuple[Matrix, ...],
+) -> tuple[Matrix, ...]:
+    world_matrices = []
+    for bone, local_matrix in zip(skeleton.bones, local_matrices):
+        if bone.parent_index < 0:
+            world_matrices.append(local_matrix)
+        else:
+            world_matrices.append(
+                world_matrices[bone.parent_index] @ local_matrix
+            )
+    return tuple(world_matrices)
+
+
+def _bone_display_lengths(
+    skeleton: GrannySkeleton,
+    world_matrices: tuple[Matrix, ...],
+    unit_scale: float,
+) -> tuple[float, ...]:
+    child_lengths = [[] for _ in skeleton.bones]
+    for index, bone in enumerate(skeleton.bones):
+        if bone.parent_index >= 0:
+            distance = (
+                world_matrices[index].translation
+                - world_matrices[bone.parent_index].translation
+            ).length
+            if distance > 1e-6:
+                child_lengths[bone.parent_index].append(distance)
+    minimum = max(0.005, 0.02 * unit_scale)
+    maximum = max(minimum, 0.25 * unit_scale)
+    lengths = []
+    for index, bone in enumerate(skeleton.bones):
+        if child_lengths[index]:
+            length = sum(child_lengths[index]) / len(child_lengths[index])
+        elif bone.parent_index >= 0:
+            length = (
+                world_matrices[index].translation
+                - world_matrices[bone.parent_index].translation
+            ).length * 0.35
+        else:
+            length = minimum
+        lengths.append(max(minimum, min(maximum, length)))
+    return tuple(lengths)
+
+
+def _create_armature_object(
+    context,
+    skeleton: GrannySkeleton,
+    asset,
+    settings: BC2Settings,
+    *,
+    collection=None,
+):
+    name = Path(asset["path"]).stem
+    collection = collection or _new_collection(context, name)
+    armature = bpy.data.armatures.new(f"{name}_Armature")
+    obj = bpy.data.objects.new(name, armature)
+    collection.objects.link(obj)
+    local_matrices = _skeleton_local_matrices(skeleton, settings)
+    world_matrices = _skeleton_world_matrices(skeleton, local_matrices)
+    lengths = _bone_display_lengths(
+        skeleton, world_matrices, settings.unit_scale
+    )
+
+    for selected in context.selected_objects:
+        selected.select_set(False)
+    obj.select_set(True)
+    context.view_layer.objects.active = obj
+    bpy.ops.object.mode_set(mode="EDIT")
+    try:
+        edit_bones = []
+        for index, (bone, matrix, length) in enumerate(
+            zip(skeleton.bones, world_matrices, lengths)
+        ):
+            edit_bone = armature.edit_bones.new(bone.name)
+            edit_bone.length = length
+            edit_bone.matrix = matrix
+            edit_bones.append(edit_bone)
+        for edit_bone, bone in zip(edit_bones, skeleton.bones):
+            if bone.parent_index >= 0:
+                edit_bone.parent = edit_bones[bone.parent_index]
+                edit_bone.use_connect = False
+    finally:
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+    for blender_bone, source_bone in zip(
+        armature.bones, skeleton.bones
+    ):
+        blender_bone["bc2_source_flags"] = source_bone.flags
+        if source_bone.name.casefold().startswith("physjnt_"):
+            blender_bone["bc2_physics_joint"] = True
+    obj["bc2_asset_path"] = asset["path"]
+    obj["bc2_archive_path"] = asset["archive_path"]
+    obj["bc2_platform"] = asset["platform"]
+    obj["bc2_bone_count"] = len(skeleton.bones)
+    return obj
+
+
+def _bind_meshes_to_armature(objects, armature_obj):
+    for obj in objects:
+        modifier = obj.modifiers.new(name="Armature", type="ARMATURE")
+        modifier.object = armature_obj
+        modifier.use_deform_preserve_volume = False
+        obj.parent = armature_obj
+
+
+def _resource_partition(path: str) -> str:
+    lower = path.casefold()
+    if lower.endswith(".res"):
+        return path[:-4]
+    return path
+
+
+def _reference_resource_path(reference: str) -> str:
+    if not reference or reference.casefold() == "null" or "/" not in reference:
+        raise BC2Error("DBX skeleton reference is missing or invalid")
+    return reference.rsplit("/", 1)[0] + ".res"
+
+
+def _skeleton_path_for_resource(repository, resource_asset) -> str:
+    descriptor_path = _resource_partition(resource_asset["path"]) + ".dbx"
+    descriptor = repository.catalog.find_asset(
+        descriptor_path,
+        (resource_asset["archive_path"],),
+    )
+    if descriptor is None:
+        raise BC2Error(
+            f"Skeleton descriptor is not indexed: {descriptor_path}"
+        )
+    _, raw = repository.read_asset(
+        int(descriptor["id"]), max_size=256 << 20
+    )
+    instance = parse_dbx(raw).primary_instance
+    if instance is None:
+        raise BC2Error(f"DBX descriptor has no primary instance: {descriptor_path}")
+    field = instance.child("field", "Skeleton")
+    reference = field.attribute("ref") if field is not None else None
+    return _reference_resource_path(reference or "")
+
+
+def _read_referenced_skeleton(repository, resource_asset):
+    skeleton_path = _skeleton_path_for_resource(repository, resource_asset)
+    skeleton_asset = repository.catalog.find_asset(
+        skeleton_path,
+        (resource_asset["archive_path"],),
+    )
+    if skeleton_asset is None:
+        raise BC2Error(
+            f"Referenced Granny skeleton is not indexed: {skeleton_path}"
+        )
+    asset, raw = repository.read_asset(
+        int(skeleton_asset["id"]), max_size=256 << 20
+    )
+    skeleton = parse_granny_model(raw, asset["platform"])
+    return asset, skeleton
+
+
+def _find_skeleton_armature(skeleton_path: str):
+    folded = skeleton_path.casefold()
+    candidates = []
+    if bpy.context.active_object is not None:
+        candidates.append(bpy.context.active_object)
+    candidates.extend(bpy.context.selected_objects)
+    candidates.extend(bpy.data.objects)
+    visited = set()
+    for obj in candidates:
+        if obj.name_full in visited:
+            continue
+        visited.add(obj.name_full)
+        if (
+            obj.type == "ARMATURE"
+            and str(obj.get("bc2_asset_path", "")).casefold() == folded
+        ):
+            return obj
+    return None
+
+
+def _create_character(
+    context,
+    repository,
+    mesh_set_asset,
+    parsed: MeshAsset,
+    mesh_asset,
+    settings: BC2Settings,
+):
+    skeleton_asset, skeleton = _read_referenced_skeleton(
+        repository, mesh_set_asset
+    )
+    collection = _new_collection(
+        context, Path(mesh_set_asset["path"]).stem
+    )
+    armature_obj = _create_armature_object(
+        context,
+        skeleton,
+        skeleton_asset,
+        settings,
+        collection=collection,
+    )
+    objects = _create_mesh_objects(
+        context,
+        parsed,
+        mesh_asset,
+        settings,
+        collection=collection,
+        bone_names=tuple(bone.name for bone in skeleton.bones),
+    )
+    _bind_meshes_to_armature(objects, armature_obj)
+    context.view_layer.objects.active = armature_obj
+    armature_obj.select_set(True)
+    return armature_obj, objects
+
+
+def _new_action_channelbag(action, armature_obj):
+    slot = action.slots.new(id_type="OBJECT", name=armature_obj.name)
+    layer = action.layers.new(name="Animation")
+    strip = layer.strips.new(type="KEYFRAME")
+    return strip.channelbag(slot, ensure=True)
+
+
+def _add_action_curve(
+    channelbag,
+    data_path: str,
+    array_index: int,
+    group_name: str,
+    frames: tuple[float, ...],
+    values: tuple[float, ...],
+):
+    curve = channelbag.fcurves.new(
+        data_path,
+        index=array_index,
+        group_name=group_name,
+    )
+    curve.keyframe_points.add(len(frames))
+    for point, frame, value in zip(
+        curve.keyframe_points, frames, values
+    ):
+        point.co = (frame, value)
+        point.interpolation = "LINEAR"
+    curve.update()
+
+
+def _create_animation_action(
+    context,
+    armature_obj,
+    skeleton: GrannySkeleton,
+    animation: GrannyAnimation,
+    settings: BC2Settings,
+):
+    source_names = {bone.name for bone in skeleton.bones}
+    armature_names = {bone.name for bone in armature_obj.data.bones}
+    missing_source = [
+        track.name for track in animation.tracks
+        if track.name not in source_names
+    ]
+    missing_armature = [
+        track.name for track in animation.tracks
+        if track.name not in armature_names
+    ]
+    if missing_source or missing_armature:
+        missing = sorted(set(missing_source + missing_armature))
+        raise BC2Error(
+            "Animation tracks do not match the selected skeleton: "
+            + ", ".join(missing[:8])
+        )
+
+    source_fps = max(1, round(1.0 / animation.time_step))
+    interval_count = max(1, round(animation.duration / animation.time_step))
+    sample_count = interval_count + 1
+    if sample_count > 1_000_000:
+        raise BC2Error(
+            f"Animation sample count is unsafe: {sample_count:,}"
+        )
+    times = tuple(
+        min(animation.duration, index * animation.time_step)
+        for index in range(sample_count)
+    )
+    frames = tuple(float(index + 1) for index in range(sample_count))
+    local_rest = _skeleton_local_matrices(skeleton, settings)
+    rest_by_name = {
+        bone.name: local_rest[index]
+        for index, bone in enumerate(skeleton.bones)
+    }
+
+    action = bpy.data.actions.new(animation.name)
+    action.use_fake_user = True
+    channelbag = _new_action_channelbag(action, armature_obj)
+    for track in animation.tracks:
+        pose_bone = armature_obj.pose.bones[track.name]
+        pose_bone.rotation_mode = "QUATERNION"
+        locations = []
+        rotations = []
+        previous_rotation = None
+        for time in times:
+            animated_local = _convert_skeleton_matrix(
+                _source_transform_matrix(
+                    track.translation.evaluate(time),
+                    track.rotation_at(time),
+                ),
+                settings,
+            )
+            basis = rest_by_name[track.name].inverted_safe() @ animated_local
+            location, rotation, _ = basis.decompose()
+            if (
+                previous_rotation is not None
+                and rotation.dot(previous_rotation) < 0.0
+            ):
+                rotation.negate()
+            locations.append(tuple(location))
+            rotations.append(tuple(rotation))
+            previous_rotation = rotation.copy()
+        location_path = pose_bone.path_from_id("location")
+        rotation_path = pose_bone.path_from_id("rotation_quaternion")
+        for axis in range(3):
+            _add_action_curve(
+                channelbag,
+                location_path,
+                axis,
+                track.name,
+                frames,
+                tuple(value[axis] for value in locations),
+            )
+        for axis in range(4):
+            _add_action_curve(
+                channelbag,
+                rotation_path,
+                axis,
+                track.name,
+                frames,
+                tuple(value[axis] for value in rotations),
+            )
+
+    action["bc2_duration_seconds"] = animation.duration
+    action["bc2_time_step_seconds"] = animation.time_step
+    action["bc2_source_fps"] = source_fps
+    action["bc2_track_count"] = len(animation.tracks)
+    armature_obj.animation_data_create()
+    armature_obj.animation_data.action = action
+    context.scene.render.fps = source_fps
+    context.scene.render.fps_base = 1.0
+    context.scene.frame_start = 1
+    context.scene.frame_end = sample_count
+    context.scene.frame_set(1)
+    return action
+
+
+def _import_granny_animation(
+    context,
+    repository,
+    resource_asset,
+    raw: bytes,
+    settings: BC2Settings,
+):
+    animation = parse_granny_animation(
+        raw,
+        resource_asset["platform"],
+        Path(resource_asset["path"]).stem,
+    )
+    skeleton_asset, skeleton = _read_referenced_skeleton(
+        repository, resource_asset
+    )
+    armature_obj = _find_skeleton_armature(skeleton_asset["path"])
+    if armature_obj is None:
+        armature_obj = _create_armature_object(
+            context,
+            skeleton,
+            skeleton_asset,
+            settings,
+        )
+    action = _create_animation_action(
+        context,
+        armature_obj,
+        skeleton,
+        animation,
+        settings,
+    )
+    action["bc2_asset_path"] = resource_asset["path"]
+    action["bc2_archive_path"] = resource_asset["archive_path"]
+    return armature_obj, action
 
 
 def _create_terrain_object(
@@ -2489,6 +2939,7 @@ class BC2_OT_import_selected(Operator):
                 "CompositeMeshSet",
                 "TreeMeshSet",
             }:
+                source_asset = repository.catalog.asset(selected.asset_id)
                 asset, raw = repository.read_asset(
                     selected.asset_id, max_size=1 << 30, resolve_mesh=True
                 )
@@ -2497,8 +2948,58 @@ class BC2_OT_import_selected(Operator):
                     asset["platform"],
                     include_z_only=settings.include_z_only,
                 )
-                objects = _create_mesh_objects(context, parsed, asset, settings)
-                self.report({"INFO"}, f"Imported {len(objects)} mesh object(s)")
+                if (
+                    asset_type == "SkinnedMeshSet"
+                    and source_asset["platform"] == "pc"
+                ):
+                    armature, objects = _create_character(
+                        context,
+                        repository,
+                        source_asset,
+                        parsed,
+                        asset,
+                        settings,
+                    )
+                    self.report(
+                        {"INFO"},
+                        f"Imported {len(objects)} skinned mesh object(s) "
+                        f"on {len(armature.data.bones)} bones",
+                    )
+                else:
+                    objects = _create_mesh_objects(
+                        context, parsed, asset, settings
+                    )
+                    self.report(
+                        {"INFO"}, f"Imported {len(objects)} mesh object(s)"
+                    )
+            elif asset_type == "GrannyModel":
+                asset, raw = repository.read_asset(
+                    selected.asset_id, max_size=256 << 20
+                )
+                skeleton = parse_granny_model(raw, asset["platform"])
+                armature = _create_armature_object(
+                    context, skeleton, asset, settings
+                )
+                self.report(
+                    {"INFO"},
+                    f"Imported armature with {len(armature.data.bones)} bones",
+                )
+            elif asset_type == "GrannyAnimation":
+                asset, raw = repository.read_asset(
+                    selected.asset_id, max_size=256 << 20
+                )
+                armature, action = _import_granny_animation(
+                    context,
+                    repository,
+                    asset,
+                    raw,
+                    settings,
+                )
+                self.report(
+                    {"INFO"},
+                    f"Imported {action.name} on {armature.name} "
+                    f"({int(action['bc2_track_count'])} tracks)",
+                )
             elif asset_type == "WaterMesh":
                 asset, raw = repository.read_asset(
                     selected.asset_id, max_size=1 << 30

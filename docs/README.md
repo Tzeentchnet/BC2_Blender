@@ -29,6 +29,7 @@ The documents use these terms deliberately:
 | Cross-platform Frostbite archives | [FbRB archives](formats/fbrb.md) |
 | Resource type names and current support | [Resource type catalog](formats/resource-types.md) |
 | MeshData, mesh sets, and WaterMesh | [Meshes](formats/meshes.md) |
+| Granny skeletons, skinning, and transform animation | [Granny characters and animation](formats/granny-animation.md) |
 | ITexture, XenonTexture, tiling, and DDS | [Textures](formats/textures.md) |
 | TerrainHeightfield and binary DBX | [Terrain and DBX](formats/terrain-and-dbx.md) |
 | Level graphs, compact groups, transforms, and instancing | [Levels and complete maps](formats/levels-and-maps.md) |
@@ -48,7 +49,7 @@ Xbox XGD2 -> XDVDFS ---------------------> FbRB -> resource
 
 Both paths converge at the FbRB parser. The importer then catalogs active
 entries in SQLite and dispatches selected resources to mesh, texture, terrain,
-water, or DBX readers.
+water, Granny skeleton/animation, or DBX readers.
 
 The source media is always read-only. Cached cabinets, extracted archives,
 resources, and converted DDS files are disposable derivatives.
@@ -64,6 +65,7 @@ resources, and converted DDS files are disposable derivatives.
 | FbRB | [`core/fbrb.py`](../bc2_frostbite_importer/core/fbrb.py) |
 | SQLite catalog | [`core/catalog.py`](../bc2_frostbite_importer/core/catalog.py) |
 | Mesh and water | [`core/mesh.py`](../bc2_frostbite_importer/core/mesh.py) |
+| Granny skeleton and animation | [`core/granny.py`](../bc2_frostbite_importer/core/granny.py) |
 | Texture conversion | [`core/texture.py`](../bc2_frostbite_importer/core/texture.py) |
 | Terrain | [`core/terrain.py`](../bc2_frostbite_importer/core/terrain.py) |
 | DBX | [`core/dbx.py`](../bc2_frostbite_importer/core/dbx.py) |

@@ -13,7 +13,7 @@ the browser is not necessarily decoded.
 |---|---|---|
 | `MeshData` | Mesh | Native geometry, UV preview, and available weight groups |
 | `RigidMeshSet` | Mesh | Resolves a naming-matched LOD MeshData, preferring LOD0 |
-| `SkinnedMeshSet` | Mesh | Resolves MeshData; no armature creation |
+| `SkinnedMeshSet` | Mesh | PC: resolves MeshData and the DBX skeleton reference, then creates a bound armature; console: geometry-only |
 | `CompositeMeshSet` | Mesh | Resolves MeshData; no part hierarchy decoding |
 | `TreeMeshSet` | Mesh | Resolves MeshData; no tree-specific semantics |
 | `WaterMesh` | Mesh | Native positions and triangle geometry |
@@ -23,6 +23,8 @@ the browser is not necessarily decoded.
 | non-resource path ending `.dbx` | Level / DBX | Binary DBX converted to an XML Text datablock |
 | PC level DBX graph | Level / DBX | Complete static map assembly with direct/grouped placements, terrain, water, and DX11-bound materials |
 | `Dx11ShaderDatabase` | Other | Material keys and indexed texture bindings parsed during PC complete-map import |
+| `GrannyModel` | Animation | PC little-endian skeleton converted to a native armature |
+| `GrannyAnimation` | Animation | PC transform tracks converted to a Blender 5.2 Action on the matching armature |
 
 The texture dispatcher also recognizes `Ps3Texture`, but PS3 disc media and
 texture variants were not part of this validation effort. It must not be
@@ -34,7 +36,7 @@ advertised as verified support.
 |---|---|
 | Mesh-like | `OccluderMesh`, `SootMesh` |
 | Terrain/environment | `Terrain`, `VisualTerrain`, `VisualWater`, `IrradianceVolume`, `TerrainMaterialMap`, `WeatherSystem` |
-| Animation/model | `AimAnimation`, `AnimTreeInfo`, `DeltaAnimation`, `GrannyAnimation`, `GrannyModel`, `RagdollResource` |
+| Animation/model | `AimAnimation`, `AnimTreeInfo`, `DeltaAnimation`, `RagdollResource` |
 | Audio | `Wave`, `ImpulseResponse` |
 | UI/video | `SwfMovie`, `BinkMemory` |
 | Physics/other | `HavokPhysicsData`, `Dx9ShaderDatabase` |

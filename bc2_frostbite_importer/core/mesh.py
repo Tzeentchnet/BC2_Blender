@@ -316,24 +316,35 @@ def _read_influences(
 ) -> tuple[tuple[tuple[int, float], ...], ...]:
     if not palette:
         return tuple(() for _ in range(vertex_count))
-    if bones_per_vertex <= 1 or stride < 16:
+    if stride < 16:
         return tuple(((palette[0], 1.0),) for _ in range(vertex_count))
     result = []
     for index in range(vertex_count):
         start = vertex_offset + index * stride
         indices = data[start + 8 : start + 12]
         weights = data[start + 12 : start + 16]
+        if bones_per_vertex <= 1:
+            palette_index = indices[0]
+            if palette_index >= len(palette):
+                raise CorruptDataError(
+                    f"MeshData palette index {palette_index} exceeds "
+                    f"{len(palette)} entries at vertex {index}"
+                )
+            bone = palette[palette_index]
+            result.append(((bone, 1.0),))
+            continue
         total = sum(weights)
         influences = []
         if total:
             for palette_index, weight in zip(indices, weights):
                 if not weight:
                     continue
-                bone = (
-                    palette[palette_index]
-                    if palette_index < len(palette)
-                    else palette[0]
-                )
+                if palette_index >= len(palette):
+                    raise CorruptDataError(
+                        f"MeshData palette index {palette_index} exceeds "
+                        f"{len(palette)} entries at vertex {index}"
+                    )
+                bone = palette[palette_index]
                 influences.append((bone, weight / total))
         if not influences:
             influences.append((palette[0], 1.0))

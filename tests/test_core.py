@@ -18,6 +18,10 @@ from bc2_frostbite_importer.core.dbx import (
     parse_dbx,
 )
 from bc2_frostbite_importer.core.errors import CorruptDataError
+from bc2_frostbite_importer.core.granny import (
+    parse_granny_animation,
+    parse_granny_model,
+)
 from bc2_frostbite_importer.core.level import FrostbiteTransform, LevelResolver
 from bc2_frostbite_importer.core.mesh import (
     _position_format,
@@ -52,6 +56,180 @@ def make_meshdata(endian: str = ">") -> bytes:
     indices = struct.pack(endian + "3H", 0, 1, 2)
     metadata.extend(struct.pack(endian + "III", len(vertices), len(indices), 0))
     return bytes(metadata + vertices + indices)
+
+
+def make_granny_container(
+    section_data: list[bytes],
+    section_relocations: list[list[tuple[int, int, int]]],
+) -> bytes:
+    section_count = 8
+    if (
+        len(section_data) != section_count
+        or len(section_relocations) != section_count
+    ):
+        raise ValueError("Synthetic Granny fixture requires eight sections")
+    descriptor_start = 32 + 72
+    data_start = descriptor_start + section_count * 44
+    granny = bytearray(data_start)
+    magic = bytes.fromhex(
+        "29de6cc0baa4532b25f5b7a5f666e2"
+        "eec80100000000000000000000000000"
+    )
+    granny[:32] = magic
+    data_offsets = []
+    for payload in section_data:
+        data_offsets.append(len(granny))
+        granny.extend(payload)
+    relocation_offsets = []
+    for relocations in section_relocations:
+        relocation_offsets.append(len(granny))
+        for relocation in relocations:
+            granny.extend(struct.pack("<3I", *relocation))
+    file_size = len(granny)
+    struct.pack_into(
+        "<18I",
+        granny,
+        32,
+        7,
+        file_size,
+        0,
+        72,
+        section_count,
+        6,
+        0,
+        0,
+        0,
+        0x80000028,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    )
+    for index, payload in enumerate(section_data):
+        size = len(payload)
+        struct.pack_into(
+            "<11I",
+            granny,
+            descriptor_start + index * 44,
+            0,
+            data_offsets[index],
+            size,
+            size,
+            4,
+            size,
+            size,
+            relocation_offsets[index],
+            len(section_relocations[index]),
+            file_size,
+            0,
+        )
+    return bytes(granny)
+
+
+def granny_wrapper(strings: list[str], granny: bytes, *, animation: bool) -> bytes:
+    header = (
+        struct.pack("<III", 10, 0, len(strings))
+        if animation
+        else struct.pack("<II", 10, len(strings))
+    )
+    result = bytearray(header)
+    for value in strings:
+        encoded = value.encode("latin-1")
+        result.extend(struct.pack("<H", len(encoded)))
+        result.extend(encoded)
+    result.extend(b"\0" * 4)
+    result.extend(granny)
+    return bytes(result)
+
+
+def make_granny_model() -> bytes:
+    strings = ["<file>", "root", "child"]
+    section = bytearray(184 + 2 * 152)
+    struct.pack_into("<I", section, 172, 2)
+    records = (
+        (1, -1, (0.0, 0.0, 0.0)),
+        (2, 0, (1.0, 0.0, 0.0)),
+    )
+    identity_3 = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+    identity_4 = (
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    )
+    for index, (name_index, parent, translation) in enumerate(records):
+        offset = 184 + index * 152
+        struct.pack_into("<IiI", section, offset, name_index, parent, 0)
+        struct.pack_into("<3f", section, offset + 12, *translation)
+        struct.pack_into("<4f", section, offset + 24, 0.0, 0.0, 0.0, 1.0)
+        struct.pack_into("<9f", section, offset + 40, *identity_3)
+        struct.pack_into("<16f", section, offset + 76, *identity_4)
+    sections = [bytes(section)] + [b""] * 7
+    relocations = [[(176, 0, 184)]] + [[] for _ in range(7)]
+    return granny_wrapper(
+        strings,
+        make_granny_container(sections, relocations),
+        animation=False,
+    )
+
+
+def make_granny_animation() -> bytes:
+    strings = [
+        "<file>",
+        "root",
+        "group",
+        "CurveDataHeader_D4Constant32f",
+        "CurveDataHeader_D3Constant32f",
+        "CurveDataHeader_DaIdentity",
+    ]
+    section = bytearray(548)
+    struct.pack_into("<I", section, 76, 1)
+    struct.pack_into("<I", section, 204, 2)
+    struct.pack_into("<I", section, 216, 1)
+    struct.pack_into("<II", section, 340, 1, 0)
+    struct.pack_into("<BBH4f", section, 400, 5, 0, 0, 0.0, 0.0, 0.0, 1.0)
+    struct.pack_into("<BBH3f", section, 424, 4, 0, 0, 1.0, 2.0, 3.0)
+    struct.pack_into("<IfffI", section, 504, 0, 1.0, 1.0 / 30.0, 1.0, 1)
+    type_section = bytearray(160)
+    struct.pack_into("<II", type_section, 0, 1, 3)
+    struct.pack_into("<II", type_section, 64, 1, 4)
+    struct.pack_into("<II", type_section, 128, 1, 5)
+    sections = [bytes(section)] + [b""] * 5 + [bytes(type_section), b""]
+    relocations = [
+        [
+            (80, 0, 500),
+            (500, 0, 504),
+            (524, 0, 528),
+            (528, 0, 204),
+            (220, 0, 340),
+            (348, 6, 0),
+            (352, 0, 400),
+            (356, 6, 64),
+            (360, 0, 424),
+            (364, 6, 128),
+        ]
+    ] + [[] for _ in range(7)]
+    return granny_wrapper(
+        strings,
+        make_granny_container(sections, relocations),
+        animation=True,
+    )
 
 
 def make_fbrb(
@@ -216,6 +394,43 @@ class MeshTests(unittest.TestCase):
                 self.assertEqual(subset.faces, ((0, 1, 2),))
                 self.assertEqual(subset.positions[1], (1.0, 0.0, 0.0))
 
+    def test_one_influence_vertices_use_their_palette_indices(self):
+        metadata = bytearray(struct.pack("<IHB", 1, 0, 1))
+        metadata.extend(b"rigid\0")
+        metadata.extend(
+            struct.pack(
+                "<IIIIBBBBH",
+                1,
+                3,
+                0,
+                0,
+                16,
+                3,
+                1,
+                2,
+                2,
+            )
+        )
+        metadata.extend(struct.pack("<2H", 4, 9))
+        vertices = bytearray()
+        for index, position in enumerate(
+            ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0))
+        ):
+            vertex = bytearray(16)
+            struct.pack_into("<eee", vertex, 0, *position)
+            vertex[8] = index % 2
+            vertex[12] = 255
+            vertices.extend(vertex)
+        indices = struct.pack("<3H", 0, 1, 2)
+        metadata.extend(struct.pack("<III", len(vertices), len(indices), 0))
+        subset = parse_meshdata(
+            bytes(metadata + vertices + indices), "pc"
+        ).subsets[0]
+        self.assertEqual(
+            subset.influences,
+            (((4, 1.0),), ((9, 1.0),), ((4, 1.0),)),
+        )
+
     def test_stride_48_uses_primary_and_secondary_uv_channels(self):
         metadata = bytearray(struct.pack("<IHB", 1, 0, 1))
         metadata.extend(b"surface\0")
@@ -300,6 +515,33 @@ class MeshTests(unittest.TestCase):
             ),
             "FLOAT",
         )
+
+
+class GrannyTests(unittest.TestCase):
+    def test_parses_pc_skeleton_hierarchy_and_transforms(self):
+        skeleton = parse_granny_model(make_granny_model(), "pc")
+        self.assertEqual([bone.name for bone in skeleton.bones], ["root", "child"])
+        self.assertEqual(skeleton.bones[0].parent_index, -1)
+        self.assertEqual(skeleton.bones[1].parent_index, 0)
+        self.assertEqual(skeleton.bones[1].translation, (1.0, 0.0, 0.0))
+
+    def test_parses_constant_animation_curves(self):
+        animation = parse_granny_animation(
+            make_granny_animation(), "pc", "Synthetic"
+        )
+        self.assertEqual(animation.name, "Synthetic")
+        self.assertAlmostEqual(animation.duration, 1.0)
+        self.assertEqual(len(animation.tracks), 1)
+        track = animation.tracks[0]
+        self.assertEqual(track.name, "root")
+        self.assertEqual(track.rotation_at(0.5), (0.0, 0.0, 0.0, 1.0))
+        self.assertEqual(
+            track.translation.evaluate(0.5), (1.0, 2.0, 3.0)
+        )
+
+    def test_rejects_truncated_granny_container(self):
+        with self.assertRaises(CorruptDataError):
+            parse_granny_model(make_granny_model()[:-1], "pc")
 
 
 class TextureTests(unittest.TestCase):

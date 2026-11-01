@@ -8,8 +8,8 @@ Keep the layers independent so each can be tested without Blender:
 2. **Platform resolver**: direct Xbox archive locators or PC MSI/CAB mapping.
 3. **FbRB reader**: archive metadata, active entries, and payload extraction.
 4. **Catalog**: persistent paths, types, offsets, platform, and errors.
-5. **Resource decoder**: mesh, texture, terrain, typed DBX, shader database,
-   level graph, and future types.
+5. **Resource decoder**: mesh, texture, terrain, Granny skeleton/animation,
+   typed DBX, shader database, level graph, and future types.
 6. **DCC adapter**: axes, units, UV convention, linked instances, materials,
    diagnostics, and native objects.
 
@@ -56,6 +56,8 @@ at least:
 - unknown metadata blocks and padding;
 - original vertex declaration and attribute encodings;
 - texture header, mip allocations, tiling mode, and channel semantics;
+- Granny wrapper strings, section/relocation tables, source bone transforms,
+  inverse bind matrices, curve codecs, knots, controls, and original timing;
 - DBX typed nodes and raw encodings;
 - direct/group placement order, enumerations, and source transforms;
 - shader/database references and material constants;

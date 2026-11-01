@@ -111,6 +111,17 @@ missing-texture, texture-conversion, or unresolved-subset diagnostics.
   determinants, and no former X/Z reflection.
 - `IND_SmallFactory`: sparse metal override merged over the complete default
   shader set with no unresolved visible subsets.
+- PC `US_01_Body`: 13 visible skinned subsets, 10,513 vertices, 9,883
+  triangles, and 61 used bones mapped into the complete 147-bone `ske01`
+  hierarchy.
+- PC `ske01`: local transforms composed against every transposed stored
+  inverse-world matrix with a maximum identity residual below `7.5e-7`.
+- PC rifle third-person `StandIdle` and `RunForward`: 39 named transform
+  tracks each, all matching `ske01`; source durations of approximately 3.0 and
+  0.6 seconds; 91 and 19 inclusive samples at 30 Hz.
+- Saved/reopened animated character scene: bind-pose deformation below
+  `2.5e-7` Blender units and maximum sampled source-to-Blender pose-matrix
+  error below `3.8e-6`.
 
 The earlier individual-asset examples were reopened without extraction caches
 in Blender 5.2.2 LTS, confirming that their required images were packed and
@@ -129,6 +140,9 @@ python -m unittest discover -s tests -v
 Current tests cover:
 
 - little- and big-endian MeshData, including mesh-wide half/float selection;
+- one-influence palette-index handling for rigid skinned subsets;
+- bounded PC Granny wrapper, section, relocation, skeleton, and constant-curve
+  fixtures;
 - PC L8-to-DDS conversion;
 - generated L8 DDS output for decoded material-index images;
 - Xbox tiled L8 conversion;
@@ -156,11 +170,13 @@ blender --background --factory-startup --python tests\blender_smoke.py
 ```
 
 It checks bulk topology transfer, coordinate conversion, modern UV attribute
-assignment, smooth flags, batched vertex weights, terrain creation, the
-pure-Python mesh fallback, native file-backed DDS loading, combined subset
-material indices and secondary UV layers (including Blender's degenerate-face
-cleanup), linked map instances, placement matrices, map texture roles, layered
-OcRGB/detail construction, and the verified DXT5nm node graph.
+assignment, smooth flags, named and numbered vertex weights, native armature
+construction, Armature modifiers, Blender 5.2 layered/slotted Actions, terrain
+creation, the pure-Python mesh fallback, native file-backed DDS loading,
+combined subset material indices and secondary UV layers (including Blender's
+degenerate-face cleanup), linked map instances, placement matrices, map
+texture roles, layered OcRGB/detail construction, and the verified DXT5nm node
+graph.
 
 An optional real-media integration runner performs a complete import, saves the
 blend, reopens it, and checks placement count, linked mesh count, exact child
@@ -175,6 +191,17 @@ blender --background --factory-startup `
   --output <OUTPUT_BLEND> --level MP_001
 ```
 
+The PC character integration runner imports and binds `US_01_Body`, adds
+`StandIdle` and `RunForward`, validates sampled pose matrices, and verifies the
+saved/reopened scene:
+
+```powershell
+blender --background --factory-startup `
+  --python tests\blender_character_integration.py -- `
+  --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
+  --output <OUTPUT_BLEND>
+```
+
 ## Known heuristics
 
 These behaviors are useful but need broader format research:
@@ -184,6 +211,7 @@ These behaviors are useful but need broader format research:
   a vertex stride.
 - UV offset selection from stride and value ranges.
 - Skinned vertex influence offsets.
+- PC Granny field locations and curve codecs outside the validated v7 samples.
 - Mesh-set-to-MeshData resolution by path.
 - Terrain sample-endian selection by smoothness.
 - Small FbRB declared-payload discrepancy tolerance.
@@ -203,7 +231,8 @@ naive alternative choose incorrectly.
   additional UV sets.
 - Complete shader arithmetic, constants, swizzles, UV sources, and all texture
   semantics.
-- Granny skeleton/model and animation conversion.
+- Xbox 360/PS3 Granny skeleton/model and animation conversion.
+- Granny vector tracks, animated scale/shear, and unimplemented curve codecs.
 - Full DBX type coverage and lossless round trip.
 - Nonstatic level systems such as effects, game logic, lights, sound,
   animation, destruction states, and collision.

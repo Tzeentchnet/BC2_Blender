@@ -23,6 +23,13 @@ from bc2_frostbite_importer.core.level import (
     MeshDefinition,
     SurfaceShader,
 )
+from bc2_frostbite_importer.core.granny import (
+    GrannyAnimation,
+    GrannyBone,
+    GrannyCurve,
+    GrannySkeleton,
+    GrannyTransformTrack,
+)
 from bc2_frostbite_importer.core.mesh import MeshAsset, MeshSubset
 from bc2_frostbite_importer.core.shaderdb import (
     ShaderDatabase,
@@ -527,6 +534,139 @@ def _test_degenerate_subset_materials():
         blender_addon._np = numpy_module
 
 
+def _test_armature_and_action(context):
+    identity_3 = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+    identity_4 = (
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    )
+    skeleton = GrannySkeleton(
+        (
+            GrannyBone(
+                "root",
+                -1,
+                0,
+                (0.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0, 1.0),
+                identity_3,
+                identity_4,
+            ),
+            GrannyBone(
+                "child",
+                0,
+                0,
+                (1.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0, 1.0),
+                identity_3,
+                identity_4,
+            ),
+        )
+    )
+    settings = SimpleNamespace(
+        axis_conversion=True,
+        unit_scale=2.0,
+        flip_v=True,
+    )
+    asset = {
+        "path": "Characters/Test/Skeleton.res",
+        "archive_path": "Dist/Test.fbrb",
+        "platform": "pc",
+    }
+    armature = blender_addon._create_armature_object(
+        context, skeleton, asset, settings
+    )
+    if len(armature.data.bones) != 2:
+        raise AssertionError("Synthetic armature has the wrong bone count")
+    if armature.data.bones["child"].parent.name != "root":
+        raise AssertionError("Synthetic armature hierarchy is incorrect")
+    _assert_vector(
+        armature.data.bones["child"].matrix_local.translation,
+        (2.0, 0.0, 0.0),
+    )
+
+    subset = MeshSubset(
+        name="Skinned",
+        positions=((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+        faces=((0, 1, 2),),
+        uvs=((0.0, 0.0), (1.0, 0.0), (0.0, 1.0)),
+        influences=(((0, 1.0),), ((1, 1.0),), ((1, 1.0),)),
+        vertex_stride=16,
+    )
+    objects = blender_addon._create_mesh_objects(
+        context,
+        MeshAsset(1, "<", (subset,)),
+        asset,
+        settings,
+        bone_names=("root", "child"),
+    )
+    blender_addon._bind_meshes_to_armature(objects, armature)
+    if {group.name for group in objects[0].vertex_groups} != {
+        "root",
+        "child",
+    }:
+        raise AssertionError("Skinned mesh groups do not use source bone names")
+    if objects[0].modifiers["Armature"].object != armature:
+        raise AssertionError("Skinned mesh is not bound to its armature")
+
+    identity_rotation = GrannyCurve(
+        "D4Constant32f", 0, (0.0,), ((0.0, 0.0, 0.0, 1.0),)
+    )
+    root_translation = GrannyCurve(
+        "DaK32fC32f",
+        1,
+        (0.0, 1.0),
+        ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0)),
+    )
+    child_translation = GrannyCurve(
+        "DaK32fC32f",
+        1,
+        (0.0, 1.0),
+        ((1.0, 0.0, 0.0), (1.0, 1.0, 0.0)),
+    )
+    animation = GrannyAnimation(
+        "SyntheticAction",
+        1.0,
+        0.5,
+        1.0,
+        (
+            GrannyTransformTrack(
+                "root", 0, identity_rotation, root_translation, "DaIdentity"
+            ),
+            GrannyTransformTrack(
+                "child", 0, identity_rotation, child_translation, "DaIdentity"
+            ),
+        ),
+    )
+    action = blender_addon._create_animation_action(
+        context, armature, skeleton, animation, settings
+    )
+    if len(action.slots) != 1 or len(action.layers) != 1:
+        raise AssertionError("Blender 5.2 Action slots/layers were not created")
+    channelbag = action.layers[0].strips[0].channelbags[0]
+    if len(channelbag.fcurves) != 14:
+        raise AssertionError("Synthetic Action has the wrong F-Curve count")
+    context.scene.frame_set(3)
+    _assert_vector(armature.pose.bones["root"].matrix.translation, (2.0, 0.0, 0.0))
+    _assert_vector(
+        armature.pose.bones["child"].matrix.translation,
+        (4.0, 0.0, 2.0),
+    )
+
+
 def main():
     if blender_addon._np is None:
         raise AssertionError("Blender NumPy is unavailable")
@@ -541,8 +681,9 @@ def main():
     _test_shader_key_alias()
     _test_reflected_material_roles()
     _test_degenerate_subset_materials()
+    _test_armature_and_action(bpy.context)
     print(
-        "PASS Blender mesh, terrain, linked map, material, fallback, and DDS paths",
+        "PASS Blender mesh, rig, action, terrain, map, material, fallback, and DDS paths",
         flush=True,
     )
 
