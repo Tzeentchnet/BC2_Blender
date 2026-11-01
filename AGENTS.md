@@ -38,6 +38,11 @@ formats.
 Source media is read-only. Never add disc images, extracted assets, shader
 bytecode, caches, or generated game data to the project.
 
+## Local validation media
+
+- PC retail ISO (local-only; never copy into the workspace):
+  `F:\GitHub\BC2PC\Battlefield.Bad.Company.2.2010.Digital.Illusions.EA.DVD\Disc01\Disc01.iso`
+
 ## Validation
 
 For parser or importer changes, run the smallest relevant tests and then the
