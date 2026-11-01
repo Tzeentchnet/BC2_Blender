@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+
+.vscode/
+.idea/
+
+*.blend
+*.blend[1-9]
+*.zip
+*.iso
+*.fbrb
+*.res
+
+parse_debug.log
+bc2_blender_cache/

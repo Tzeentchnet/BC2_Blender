@@ -1,0 +1,203 @@
+# Bad Company 2 Frostbite Importer for Blender 5.2
+
+A Blender extension for browsing and importing assets from **Battlefield: Bad Company 2** Frostbite 1 disc images. It reads the source media directly and does not ship game files.
+
+## Technical documentation
+
+The reverse-engineering notes for importer and exporter authors live in
+[`docs/`](docs/README.md). They cover the PC and Xbox 360 disc layouts, MSI and
+cabinet indirection, FbRB archives, supported resource formats, shader-derived
+material behavior, validation evidence, and round-trip design constraints.
+
+## Supported source media
+
+- **Xbox 360 ISO / XGD2**: pure-Python XDVDFS reader. A scan indexes the active entries in all Frostbite `.fbrb` archives.
+- **PC retail ISO**: ISO9660 reader plus Windows Installer metadata and Microsoft LZX cabinet extraction. The archive list is scanned immediately; individual archives are indexed on demand to avoid unpacking the entire DVD.
+
+PC retail-disc extraction currently requires Windows because the installer database and `expand.exe` are used for the original cabinets. Xbox 360 disc reading is platform-independent.
+
+## Installation
+
+1. Build or download the extension ZIP.
+2. In Blender 5.2, open **Edit > Preferences > Get Extensions**.
+3. Use **Install from Disk** and select the ZIP.
+4. Enable **Bad Company 2 Frostbite Importer** if Blender does not enable it automatically.
+
+For a source checkout, install the repository root as an extension or add `bc2_frostbite_importer` as a legacy add-on during development.
+
+## Workflow
+
+1. Open **File > Import > Bad Company 2 / Frostbite 1**, or use the **Frostbite** tab in the 3D View sidebar.
+2. Select a PC or Xbox 360 ISO and click **Scan Disc**.
+3. For a PC ISO, filter the archive list and click **Index Selected Archive**. Cabinet files are staged in the configured cache only when needed.
+4. To assemble a complete supported PC map, enter its level name (currently
+   validated with `MP_001`) in **Complete PC Map** and click **Import Map**.
+   The add-on automatically indexes the level, terrain, and shared multiplayer
+   archives.
+5. For individual assets, filter the indexed asset list by type:
+   - Meshes
+   - Textures
+   - Terrain
+   - Animation
+   - Levels / DBX
+   - Audio
+   - UI / Video
+   - Other data
+6. Select an asset and click **Import Selected**, or use **Extract Raw**.
+
+The provided Xbox example indexes 630 Frostbite archives and 251,251 active assets. The provided PC example exposes 625 extractable Frostbite archives through the installer database.
+
+## Native Blender import support
+
+| Asset | Current behavior |
+|---|---|
+| `MeshData` | Creates one Blender mesh object per visible subset, including UVs, materials, and available bone-weight vertex groups. PC little-endian and Xbox 360 big-endian layouts are supported. |
+| Rigid, skinned, composite, and tree mesh sets | Resolves a matching LOD `MeshData` resource when available, preferring LOD0. |
+| `WaterMesh` | Creates native water geometry. |
+| `ITexture` | Converts PC texture resources to DDS and creates an Image plus node material. |
+| `XenonTexture` | Untiles Xbox 360 surfaces, fixes compressed-block byte order, converts to DDS, and creates an Image plus node material. DXT1, DXT3, DXT5, ARGB8888, and L8 headers are recognized. Grouped, padded mip allocations import their base level so Blender can generate lower display mips. |
+| `TerrainHeightfield` | Creates a Blender terrain mesh with configurable sampling. The 1024-edge default preserves the complete `MP_001` playable heightfield; lower settings are explicit previews. |
+| Binary `.dbx` | Converts the Frostbite binary document to XML in a Blender Text datablock. |
+| PC complete map | Resolves direct and compact-group placements into linked Blender objects; imports all level heightfields and water; combines mesh subsets; assigns surface materials through the level DX11 shader database; and creates a JSON diagnostics Text datablock. |
+| Other resources | Extracts the original resource to the cache without pretending that a native import succeeded. |
+
+The axis option converts Frostbite Y-up coordinates to Blender Z-up coordinates. DirectX V coordinates can be flipped during mesh import.
+
+Blender's bundled NumPy is used when available for bulk mesh, topology, UV,
+terrain, and Xbox texture operations. The importer retains pure-Python
+fallbacks. Converted textures remain file-backed DDS images loaded through
+Blender's native image subsystem instead of expanding pixels in Python.
+
+### Complete-map organization
+
+The PC map importer creates a `BC2_<LEVEL>` collection with Direct, Forest,
+Middlegrowth, Rigid Group, Static Group, Terrain, Water, and Diagnostics child
+collections. Repeated placements share mesh datablocks. `MP_001` resolves to
+5,380 placed static objects backed by 178 unique MeshData resources and 211
+geometry/material variants.
+
+Mesh materials use exact database keys and retain every recovered binding as
+metadata. DXBC `RDEF` reflection preserves the pixel-shader parameter name for
+each texture slot. The importer uses those names together with source texture
+families to construct primary-color, layered detail/OcRGB, occlusion, cutout,
+and normal graphs. The shader-validated `Nm_General_001` detail normal uses the
+game's alpha/green DXT5nm decode, 8x UV repeat, and
+`base + 0.4 * detail` combine. Graphs that still approximate unimplemented
+shader arithmetic are labeled in material custom properties.
+
+Static 48-byte map layouts retain UV0 and UV1 at the verified byte offsets 24
+and 28. OcRGB object maps use UV1. Placement matrices are reconstructed from
+the source column-major transform without the former X/Z reflection, so signs
+and other readable texture content are no longer mirrored. Sparse shader-set
+overrides are merged over mesh defaults; this restores the complete default
+SmallFactory surface set while retaining its intended metal substitutions.
+
+The `MP_001` physical-material map is decoded to a file-backed L8 image and
+drives source grass, dirt, tarmac, gravel, stone, seabed, and default-ground
+textures across all terrain tiles. This is a source-backed approximation;
+terrain decals and exact shader blend constants remain future work.
+
+The validated `MP_001` scene reopens with 5,380 placements, 211 linked mesh
+datablocks, 13 terrain tiles, one water mesh, 418 exact shader-key matches, 417
+connected Base Color graphs, and 185 available file-backed images.
+Terrain and water remain in the heightfield's already-world-space frame; a
+ground-contact check measures a -1.09-unit median forest-origin offset. All 485
+visible subset slots resolve by source naming. The diagnostics Text preserves
+the ten distinct nonvisual-reference descriptions from 24 raw placements.
+
+## Cache behavior
+
+The cache location is configurable in the add-on preferences. It contains:
+
+- the persistent SQLite asset catalog;
+- the extracted PC installer database;
+- PC cabinets staged on demand;
+- extracted `.fbrb` archives;
+- decompressed map-archive payloads used for direct asset seeking;
+- raw resources and converted DDS textures.
+
+Cabinets can be large. They may be deleted from the cache when Blender is closed; the add-on recreates them from the ISO when needed.
+Complete-map payload caches are also substantial: the three verified
+`MP_001` payloads total about 730 MB. They are reusable, source-fingerprint
+scoped derivatives and may likewise be deleted when Blender is closed.
+
+## Current limitations
+
+- Granny skeletons and animation curves are cataloged and can be extracted, but are not yet converted into Blender armatures/actions.
+- Complete-map assembly is currently validated only for the PC retail
+  `MP_001` graph. Xbox whole-map assembly is not yet implemented.
+- Representative map color, alpha, normal, OcRGB, and detail bindings are
+  reflected and connected, but general shader constants, exact UV sources,
+  swizzles, blend arithmetic, and every permutation are not decoded.
+  Unresolved bindings and subset matches are retained in diagnostics rather
+  than silently guessed.
+- Console texture formats outside the listed formats are rejected explicitly.
+- Terrain physical-material indices and source detail layers are imported, but
+  exact repeat constants, decals, atlas masks, and blend arithmetic are not
+  decoded. Water geometry uses an explicitly approximate Blender material.
+- Effects, game logic, collision, destruction states, audio, lights, weather,
+  and animation are not reconstructed by the static map importer.
+- Deleted Frostbite archive entries are intentionally omitted from the asset browser.
+- Writing modified resources, rebuilding `.fbrb` archives, cabinets, or disc images is not implemented.
+
+## Export roadmap
+
+Export is intentionally secondary to reliable import. Future work can add:
+
+1. Blender mesh-to-`MeshData` writing with strict vertex-layout preservation.
+2. DDS-to-`ITexture` / `XenonTexture` encoding.
+3. DBX round-tripping.
+4. Lossless `.fbrb` repacking.
+5. Optional mod-folder output compatible with existing BC2 mod loaders.
+
+Original disc images should remain read-only. Any future write support should target a separate mod workspace.
+
+## References and credits
+
+Format behavior was studied and validated against:
+
+- [AnirohDev/FBOneTools](https://github.com/AnirohDev/FBOneTools)
+- [Powback/Bad-Company-2-Map-Editor](https://github.com/powback/Bad-Company-2-Map-Editor)
+- Local Frostbite research tools supplied for this project
+
+The extension is a Python 3 implementation designed for Blender and does not bundle code executables or copyrighted game assets from those projects.
+
+Battlefield, Frostbite, Electronic Arts, and DICE are trademarks of their respective owners. Use the importer only with game media and assets you are legally permitted to access.
+
+## Development and validation
+
+Run the dependency-free core tests from the repository root:
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+Run the Blender-facing smoke test with Blender 5.2:
+
+```powershell
+blender --background --factory-startup --python tests\blender_smoke.py
+```
+
+An optional reproducible performance benchmark is also available:
+
+```powershell
+blender --background --factory-startup --python tests\benchmark_blender_import.py
+```
+
+The tests cover PC/Xbox mesh byte order, accelerated and fallback Xbox texture
+paths, DDS generation, terrain sampling, DBX conversion, an end-to-end
+synthetic XDVDFS -> FbRB -> MeshData path, and Blender-native mesh/image
+creation.
+
+For optional validation with legally owned PC media:
+
+```powershell
+blender --background --factory-startup `
+  --python tests\blender_map_integration.py -- `
+  --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
+  --output <OUTPUT_BLEND> --level MP_001
+```
+
+This saves and reopens the map blend, then verifies placement, linked-mesh,
+terrain, and diagnostics counts. Images remain native file-backed DDS resources
+unless `--pack-images` is supplied.
