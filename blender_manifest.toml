@@ -18,6 +18,7 @@ files = "Read disc images and write an extracted asset cache"
 paths_exclude_pattern = [
     "__pycache__/",
     ".*",
+    "/dist/",
     "/*.zip",
     "/AGENTS.md",
     "/parse_debug.log",

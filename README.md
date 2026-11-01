@@ -166,6 +166,24 @@ Battlefield, Frostbite, Electronic Arts, and DICE are trademarks of their respec
 
 ## Development and validation
 
+Build installable extension packages into `dist\`:
+
+```powershell
+.\scripts\build_extension.ps1
+```
+
+If Blender is not on `PATH`, provide its executable explicitly:
+
+```powershell
+.\scripts\build_extension.ps1 `
+  -BlenderPath "D:\Blender Foundation\Blender 5.2\blender.exe"
+```
+
+The script reads the package name and version from
+`blender_manifest.toml`. Existing versions remain in `dist\`; the directory is
+excluded from extension package contents and generated ZIP files are not
+committed.
+
 Run the dependency-free core tests from the repository root:
 
 ```powershell
