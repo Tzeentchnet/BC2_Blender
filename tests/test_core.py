@@ -49,8 +49,14 @@ from bc2_frostbite_importer.core.mesh import (
 )
 from bc2_frostbite_importer.core.records import ArchiveDescriptor
 from bc2_frostbite_importer.core.repository import AssetRepository
+from bc2_frostbite_importer.core.dxbc import (
+    DxbcCoordinateRoute,
+    rdef_texture_bindings,
+    texture_coordinate_routes,
+)
 from bc2_frostbite_importer.core.shaderdb import (
     _rdef_texture_parameters,
+    _vertex_layout,
     parse_shader_database,
 )
 from bc2_frostbite_importer.core.terrain import (
@@ -532,6 +538,7 @@ def make_terrain_material_map(endian: str) -> bytes:
 def make_shader_database() -> bytes:
     parameter_reference = b"P" * 16
     material_reference = b"M" * 16
+    layout_reference = b"L" * 16
     texture_name = b"Textures/Test/Color"
     group_size = 4 + 20 + 6 + 2 + 4 + 136
 
@@ -549,7 +556,19 @@ def make_shader_database() -> bytes:
     data.extend(struct.pack("<i", 1))
     data.extend(parameter_reference)
     data.extend(struct.pack("<8i", 0, 0, 0, 0, 0, 0, 0, 0))
-    data.extend(struct.pack("<ii", 0, 0))
+    data.extend(struct.pack("<i", 1))
+    data.extend(parameter_reference * 2 + layout_reference)
+    data.extend(b"\0" * 10)
+    data.extend(struct.pack("<i", 0))
+    data.extend(b"\0" * 2)
+    data.extend(struct.pack("<i", 1))
+    layout = bytearray(89)
+    layout[:16] = layout_reference
+    struct.pack_into("<H", layout, 16, 259)
+    layout[80] = 1
+    struct.pack_into("<I", layout, 81, 0xFFFFFF00)
+    layout[85] = 12
+    data.extend(layout)
     data.extend(struct.pack("<i", 1))
     data.extend(b"Objects/Test/Mesh/Shaders/Surface\0")
     data.extend(material_reference)
@@ -559,6 +578,97 @@ def make_shader_database() -> bytes:
     data.extend(struct.pack("<i", 1))
     data.extend(struct.pack("<h", 0))
     return bytes(data)
+
+
+def _dxbc_operand(
+    operand_type: int,
+    register: int,
+    *,
+    mask: int | None = None,
+    swizzle: tuple[int, int, int, int] | None = None,
+    modifier: int = 0,
+) -> tuple[int, ...]:
+    token = 2 | (operand_type << 12) | (1 << 20)
+    if mask is not None:
+        token |= mask << 4
+    else:
+        token |= 1 << 2
+        for component, source in enumerate(swizzle or (0, 1, 2, 3)):
+            token |= source << (4 + component * 2)
+    if modifier:
+        return token | 0x80000000, modifier << 6, register
+    return token, register
+
+
+def _dxbc_immediate(*values: float) -> tuple[int, ...]:
+    padded = (*values, *(0.0 for _ in range(4 - len(values))))
+    return (
+        2 | (4 << 12),
+        *(
+            struct.unpack("<I", struct.pack("<f", value))[0]
+            for value in padded
+        ),
+    )
+
+
+def _dxbc_instruction(opcode: int, *operands: tuple[int, ...]):
+    length = 1 + sum(len(operand) for operand in operands)
+    return (opcode | (length << 24), *(value for operand in operands for value in operand))
+
+
+def _dxbc_signature(
+    semantic: str,
+    semantic_index: int,
+    register: int,
+) -> bytes:
+    name = semantic.encode("ascii") + b"\0"
+    chunk = bytearray(8 + 24 + len(name))
+    struct.pack_into("<II", chunk, 0, 1, 8)
+    struct.pack_into(
+        "<5I",
+        chunk,
+        8,
+        32,
+        semantic_index,
+        0,
+        3,
+        register,
+    )
+    chunk[28] = 0xF
+    chunk[29] = 0xF
+    chunk[32:] = name
+    return bytes(chunk)
+
+
+def _dxbc_container(chunks: tuple[tuple[bytes, bytes], ...]) -> bytes:
+    table_size = 32 + len(chunks) * 4
+    offsets = []
+    body = bytearray()
+    for name, chunk in chunks:
+        offsets.append(table_size + len(body))
+        body.extend(name)
+        body.extend(struct.pack("<I", len(chunk)))
+        body.extend(chunk)
+    total_size = table_size + len(body)
+    return (
+        b"DXBC"
+        + b"\0" * 16
+        + struct.pack("<III", 1, total_size, len(chunks))
+        + struct.pack(f"<{len(offsets)}I", *offsets)
+        + body
+    )
+
+
+def _dxbc_program(
+    instructions: tuple[int, ...],
+    signature: bytes | None = None,
+) -> bytes:
+    tokens = (0x00010050, 2 + len(instructions), *instructions)
+    shader = struct.pack(f"<{len(tokens)}I", *tokens)
+    chunks = ((b"SHEX", shader),)
+    if signature is not None:
+        chunks = ((b"ISGN", signature), *chunks)
+    return _dxbc_container(chunks)
 
 
 def element(
@@ -770,10 +880,8 @@ class MeshTests(unittest.TestCase):
                 metadata.extend(
                     struct.pack("<III", len(vertices), len(indices), 0)
                 )
-                subset = parse_meshdata(
-                    bytes(metadata + vertices + indices),
-                    "pc",
-                ).subsets[0]
+                raw = bytes(metadata + vertices + indices)
+                subset = parse_meshdata(raw, "pc").subsets[0]
                 self.assertEqual(
                     subset.uv_offsets,
                     (28, 36, 32, 24) if stride == 48 else (24, 28),
@@ -1098,7 +1206,7 @@ class MeshTests(unittest.TestCase):
         self.assertEqual(split[2].uv_offsets, (36, 40))
 
     def test_stride_48_uses_declared_uv_channels(self):
-        metadata = bytearray(struct.pack("<IHB", 1, 0, 1))
+        metadata = bytearray(struct.pack("<IHB", 0, 0, 1))
         metadata.extend(b"surface\0")
         metadata.extend(
             struct.pack(
@@ -1134,6 +1242,7 @@ class MeshTests(unittest.TestCase):
             struct.pack_into("<ee", vertex, 28, *primary_uv)
             struct.pack_into("<ee", vertex, 32, 0.75, index / 20.0)
             struct.pack_into("<ee", vertex, 36, *secondary_uv)
+            struct.pack_into("<ee", vertex, 40, index / 4.0, 0.5)
             vertices.extend(vertex)
         indices = struct.pack("<3H", 0, 1, 2)
         metadata.extend(
@@ -1152,6 +1261,19 @@ class MeshTests(unittest.TestCase):
         )
         self.assertAlmostEqual(
             subset.additional_uvs[1][1][1], 0.1, places=3
+        )
+        vehicle_subset = parse_meshdata(
+            bytes(metadata + vertices + indices),
+            "pc",
+            retain_pc_vehicle_uv_candidates=True,
+        ).subsets[0]
+        self.assertEqual(
+            vehicle_subset.uv_offsets,
+            (28, 36, 32, 24, 40),
+        )
+        self.assertEqual(
+            vehicle_subset.uv_source,
+            "pc_vehicle_shader_route_candidates",
         )
 
     def test_pc_skinned_stride_64_uses_declared_uv_channels(self):
@@ -1217,10 +1339,8 @@ class MeshTests(unittest.TestCase):
         metadata.extend(
             struct.pack("<III", len(vertices), len(indices), 0)
         )
-        subset = parse_meshdata(
-            bytes(metadata + vertices + indices),
-            "pc",
-        ).subsets[0]
+        raw = bytes(metadata + vertices + indices)
+        subset = parse_meshdata(raw, "pc").subsets[0]
         self.assertEqual(subset.uv_offsets, (40, 16, 44, 48))
         self.assertAlmostEqual(subset.uvs[1][0], 0.9, places=3)
         self.assertAlmostEqual(
@@ -1298,10 +1418,8 @@ class MeshTests(unittest.TestCase):
             struct.pack("<III", len(vertices), len(indices), 0)
         )
 
-        subset = parse_meshdata(
-            bytes(metadata + vertices + indices),
-            "pc",
-        ).subsets[0]
+        raw = bytes(metadata + vertices + indices)
+        subset = parse_meshdata(raw, "pc").subsets[0]
 
         self.assertEqual(subset.uv_offsets, (40, 44))
         self.assertEqual(subset.uvs, primary_uvs)
@@ -1312,6 +1430,19 @@ class MeshTests(unittest.TestCase):
             self.assertAlmostEqual(actual[0], expected[0], places=3)
             self.assertAlmostEqual(actual[1], expected[1], places=3)
         self.assertEqual(subset.additional_uvs, ())
+        vehicle_subset = parse_meshdata(
+            raw,
+            "pc",
+            retain_pc_vehicle_uv_candidates=True,
+        ).subsets[0]
+        self.assertEqual(
+            vehicle_subset.uv_offsets,
+            (40, 44, 32, 36),
+        )
+        self.assertEqual(
+            vehicle_subset.uv_source,
+            "pc_vehicle_shader_route_candidates",
+        )
 
     def test_selects_one_position_format_for_related_subsets(self):
         half_data = bytearray()
@@ -2050,6 +2181,16 @@ class ShaderDatabaseTests(unittest.TestCase):
                 3: ("texture_Texture",),
             },
         )
+        self.assertEqual(
+            tuple(
+                (binding.index, binding.name, binding.dimension)
+                for binding in rdef_texture_bindings(bytes(data))
+            ),
+            (
+                (2, "texture_NormalMap", 0),
+                (3, "texture_Texture", 0),
+            ),
+        )
 
     def test_parses_material_texture_bindings(self):
         database = parse_shader_database(make_shader_database())
@@ -2067,6 +2208,245 @@ class ShaderDatabaseTests(unittest.TestCase):
             (
                 (3, "Textures/Test/Color"),
             ),
+        )
+        self.assertEqual(len(material.variants), 1)
+        self.assertEqual(material.variants[0].layout.stride, 12)
+        self.assertEqual(
+            tuple(
+                (field.code, field.offset)
+                for field in material.variants[0].layout.fields
+            ),
+            ((259, 0),),
+        )
+
+    def test_traces_texture_coordinates_to_physical_uv_offset(self):
+        vertex_shader = _dxbc_program(
+            _dxbc_instruction(
+                54,
+                _dxbc_operand(2, 6, mask=0x3),
+                _dxbc_operand(1, 2, swizzle=(2, 3, 2, 3)),
+            ),
+            _dxbc_signature("TEXCOORD", 3, 2),
+        )
+        pixel_shader = _dxbc_program(
+            (
+                *_dxbc_instruction(
+                    56,
+                    _dxbc_operand(0, 0, mask=0x3),
+                    _dxbc_operand(1, 6, swizzle=(0, 1, 0, 1)),
+                    _dxbc_immediate(8.0, 8.0),
+                ),
+                *_dxbc_instruction(
+                    69,
+                    _dxbc_operand(0, 1, mask=0xF),
+                    _dxbc_operand(0, 0, swizzle=(0, 1, 0, 1)),
+                    _dxbc_operand(7, 3, mask=0),
+                    _dxbc_operand(6, 0, mask=0),
+                ),
+            )
+        )
+        layout = _vertex_layout(
+            b"L" * 16,
+            48,
+            0xFFFFFF00,
+            (263, 1797, 1032, 1288, 6, 6, 6, 524, 6, 6),
+        )
+        self.assertEqual(
+            texture_coordinate_routes(
+                vertex_shader,
+                pixel_shader,
+                layout.uv_offset,
+            ),
+            (
+                DxbcCoordinateRoute(
+                    texture_index=3,
+                    uv_offset=28,
+                    source_semantic_index=3,
+                    source_components=(2, 3),
+                    scale=(8.0, 8.0),
+                    offset=(0.0, 0.0),
+                ),
+            ),
+        )
+
+    def test_preserves_uv_source_across_zeroed_shader_branch(self):
+        vertex_shader = _dxbc_program(
+            (
+                *_dxbc_instruction(
+                    31,
+                    _dxbc_operand(1, 0, swizzle=(0, 0, 0, 0)),
+                ),
+                *_dxbc_instruction(
+                    54,
+                    _dxbc_operand(2, 6, mask=0x3),
+                    _dxbc_operand(1, 2, swizzle=(2, 3, 2, 3)),
+                ),
+                *_dxbc_instruction(18),
+                *_dxbc_instruction(
+                    54,
+                    _dxbc_operand(2, 6, mask=0x3),
+                    _dxbc_immediate(0.0, 0.0),
+                ),
+                *_dxbc_instruction(21),
+            ),
+            _dxbc_signature("TEXCOORD", 3, 2),
+        )
+        pixel_shader = _dxbc_program(
+            _dxbc_instruction(
+                69,
+                _dxbc_operand(0, 1, mask=0xF),
+                _dxbc_operand(1, 6, swizzle=(0, 1, 0, 1)),
+                _dxbc_operand(7, 3, mask=0),
+                _dxbc_operand(6, 0, mask=0),
+            )
+        )
+        layout = _vertex_layout(
+            b"layout-reference",
+            52,
+            0xFFFFFF00,
+            (263, 1797, 1032, 1288, 6, 6, 6, 524, 6, 6),
+        )
+
+        routes = texture_coordinate_routes(
+            vertex_shader,
+            pixel_shader,
+            layout.uv_offset,
+        )
+
+        self.assertEqual(len(routes), 1)
+        self.assertEqual(routes[0].texture_index, 3)
+        self.assertEqual(routes[0].uv_offset, 28)
+        self.assertEqual(routes[0].scale, (None, None))
+        self.assertEqual(routes[0].offset, (None, None))
+
+    def test_applies_shader_operand_modifier_to_uv_transform(self):
+        vertex_shader = _dxbc_program(
+            _dxbc_instruction(
+                54,
+                _dxbc_operand(2, 6, mask=0x3),
+                _dxbc_operand(
+                    1,
+                    2,
+                    swizzle=(2, 3, 2, 3),
+                    modifier=1,
+                ),
+            ),
+            _dxbc_signature("TEXCOORD", 3, 2),
+        )
+        pixel_shader = _dxbc_program(
+            _dxbc_instruction(
+                69,
+                _dxbc_operand(0, 1, mask=0xF),
+                _dxbc_operand(1, 6, swizzle=(0, 1, 0, 1)),
+                _dxbc_operand(7, 3, mask=0),
+                _dxbc_operand(6, 0, mask=0),
+            )
+        )
+        layout = _vertex_layout(
+            b"layout-reference",
+            52,
+            0xFFFFFF00,
+            (263, 1797, 1032, 1288, 6, 6, 6, 524, 6, 6),
+        )
+
+        routes = texture_coordinate_routes(
+            vertex_shader,
+            pixel_shader,
+            layout.uv_offset,
+        )
+
+        self.assertEqual(len(routes), 1)
+        self.assertEqual(routes[0].scale, (-1.0, -1.0))
+        self.assertEqual(routes[0].offset, (-0.0, -0.0))
+
+    def test_preserves_uv_source_through_non_affine_operation(self):
+        vertex_shader = _dxbc_program(
+            _dxbc_instruction(
+                54,
+                _dxbc_operand(2, 6, mask=0x3),
+                _dxbc_operand(1, 2, swizzle=(2, 3, 2, 3)),
+            ),
+            _dxbc_signature("TEXCOORD", 3, 2),
+        )
+        pixel_shader = _dxbc_program(
+            (
+                *_dxbc_instruction(
+                    26,
+                    _dxbc_operand(0, 0, mask=0x3),
+                    _dxbc_operand(1, 6, swizzle=(0, 1, 0, 1)),
+                ),
+                *_dxbc_instruction(
+                    69,
+                    _dxbc_operand(0, 1, mask=0xF),
+                    _dxbc_operand(0, 0, swizzle=(0, 1, 0, 1)),
+                    _dxbc_operand(7, 3, mask=0),
+                    _dxbc_operand(6, 0, mask=0),
+                ),
+            )
+        )
+        layout = _vertex_layout(
+            b"layout-reference",
+            52,
+            0xFFFFFF00,
+            (263, 1797, 1032, 1288, 6, 6, 6, 524, 6, 6),
+        )
+
+        routes = texture_coordinate_routes(
+            vertex_shader,
+            pixel_shader,
+            layout.uv_offset,
+        )
+
+        self.assertEqual(len(routes), 1)
+        self.assertEqual(routes[0].uv_offset, 28)
+        self.assertEqual(routes[0].scale, (None, None))
+        self.assertEqual(routes[0].offset, (None, None))
+
+    def test_discards_stale_temp_provenance_after_unknown_opcode(self):
+        vertex_shader = _dxbc_program(
+            _dxbc_instruction(
+                54,
+                _dxbc_operand(2, 6, mask=0x3),
+                _dxbc_operand(1, 2, swizzle=(2, 3, 2, 3)),
+            ),
+            _dxbc_signature("TEXCOORD", 3, 2),
+        )
+        pixel_shader = _dxbc_program(
+            (
+                *_dxbc_instruction(
+                    54,
+                    _dxbc_operand(0, 0, mask=0x3),
+                    _dxbc_operand(1, 6, swizzle=(0, 1, 0, 1)),
+                ),
+                *_dxbc_instruction(
+                    15,
+                    _dxbc_operand(0, 1, mask=0x1),
+                    _dxbc_operand(0, 2, swizzle=(0, 1, 0, 1)),
+                    _dxbc_operand(0, 3, swizzle=(0, 1, 0, 1)),
+                ),
+                *_dxbc_instruction(
+                    69,
+                    _dxbc_operand(0, 1, mask=0xF),
+                    _dxbc_operand(0, 0, swizzle=(0, 1, 0, 1)),
+                    _dxbc_operand(7, 3, mask=0),
+                    _dxbc_operand(6, 0, mask=0),
+                ),
+            )
+        )
+        layout = _vertex_layout(
+            b"layout-reference",
+            52,
+            0xFFFFFF00,
+            (263, 1797, 1032, 1288, 6, 6, 6, 524, 6, 6),
+        )
+
+        self.assertEqual(
+            texture_coordinate_routes(
+                vertex_shader,
+                pixel_shader,
+                layout.uv_offset,
+            ),
+            (),
         )
 
 
@@ -2329,6 +2709,92 @@ class LevelDiscoveryTests(unittest.TestCase):
 
 
 class CatalogTests(unittest.TestCase):
+    def test_indexes_shader_material_sources_and_invalidates_on_reindex(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            catalog = AssetCatalog(Path(temporary) / "catalog.sqlite3")
+            try:
+                archive_ids = []
+                for index, name in enumerate(("First", "Second")):
+                    archive_id = catalog.upsert_archive(
+                        ArchiveDescriptor(
+                            f"Dist/{name}.fbrb",
+                            4096,
+                            "pc",
+                            {"path": f"Dist/{name}.fbrb"},
+                        )
+                    )
+                    archive_ids.append(archive_id)
+                    catalog.replace_archive_assets(
+                        archive_id,
+                        (
+                            FbrbEntry(
+                                (
+                                    f"Levels/{name}/shaders/"
+                                    "Dx11_Single.res"
+                                ),
+                                "ShaderDatabase",
+                                index * 16,
+                                16,
+                                16,
+                                1,
+                            ),
+                        ),
+                        payload_offset=0,
+                        payload_compressed=False,
+                        payload_size=4096,
+                    )
+                databases = catalog.shader_database_assets()
+                self.assertEqual(len(databases), 2)
+                catalog.record_shader_database(
+                    int(databases[0]["id"]),
+                    ("Objects/Test/Shaders/Main",),
+                )
+                catalog.record_shader_database(
+                    int(databases[1]["id"]),
+                    (
+                        "Objects/Test/Shaders/Main",
+                        "Objects/Test/Shaders/Glass",
+                    ),
+                )
+                sources = catalog.shader_database_sources(
+                    (
+                        "objects/test/shaders/main",
+                        "objects/test/shaders/glass",
+                    )
+                )
+                self.assertEqual(
+                    [
+                        (
+                            row["archive_path"],
+                            row["matching_materials"],
+                        )
+                        for row in sources
+                    ],
+                    [
+                        ("Dist/Second.fbrb", 2),
+                        ("Dist/First.fbrb", 1),
+                    ],
+                )
+
+                catalog.replace_archive_assets(
+                    archive_ids[1],
+                    (),
+                    payload_offset=0,
+                    payload_compressed=False,
+                    payload_size=0,
+                )
+                self.assertEqual(
+                    [
+                        row["archive_path"]
+                        for row in catalog.shader_database_sources(
+                            ("objects/test/shaders/main",)
+                        )
+                    ],
+                    ["Dist/First.fbrb"],
+                )
+            finally:
+                catalog.close()
+
     def test_content_groups_combine_with_type_and_word_filters(self):
         with tempfile.TemporaryDirectory() as temporary:
             catalog = AssetCatalog(Path(temporary) / "catalog.sqlite3")

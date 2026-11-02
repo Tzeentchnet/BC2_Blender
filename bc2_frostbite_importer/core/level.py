@@ -133,6 +133,7 @@ class SurfaceShader:
     name: str
     reference: str
     database_key: str
+    shader_partition: str = ""
 
 
 @dataclass(frozen=True)
@@ -451,6 +452,7 @@ class LevelResolver:
                     name=name,
                     reference=reference,
                     database_key=f"{mesh_name}/{shader_partition}",
+                    shader_partition=shader_partition,
                 )
         surfaces = tuple(
             surfaces_by_name[name]

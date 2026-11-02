@@ -25,6 +25,7 @@ class MeshSubset:
     palette: tuple[int, ...] = ()
     part_indices: tuple[int, ...] = ()
     part_index_offset: int | None = None
+    uv_source: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -326,10 +327,15 @@ def _pc_skinned_uv_offsets(
     mesh_type: int,
     stride: int,
     palette: tuple[int, ...],
+    retain_vehicle_candidates: bool = False,
 ) -> tuple[int, ...]:
     if mesh_type == 1 and palette:
         if stride == 48:
-            return 40, 44
+            return (
+                (40, 44, 32, 36)
+                if retain_vehicle_candidates
+                else (40, 44)
+            )
         if stride == 64:
             # Retail PC character declarations expose v6.xy, v3.xy,
             # v6.zw, and v7.xy from these four byte offsets.
@@ -341,6 +347,7 @@ def _pc_stride_48_uv_offsets(
     mesh_type: int,
     stride: int,
     part_index_offset: int | None,
+    retain_vehicle_candidates: bool = False,
 ) -> tuple[int, ...]:
     if stride != 48:
         return ()
@@ -352,9 +359,14 @@ def _pc_stride_48_uv_offsets(
         if part_index_offset is None:
             return 28, 36, 32, 24
         return ()
-    # The static declaration exposes object and repeating UVs through the
-    # .zw halves at byte 28 and 36. The .xy halves are atlas selectors.
-    return 28, 36, 32, 24
+    # The common static declaration exposes object and repeating UVs through
+    # the .zw halves at byte 28 and 36. Some vehicle shader layouts declare a
+    # fifth coordinate at byte 40.
+    return (
+        (28, 36, 32, 24, 40)
+        if retain_vehicle_candidates and mesh_type == 0
+        else (28, 36, 32, 24)
+    )
 
 
 def _uv_triangle_coverage(
@@ -597,6 +609,7 @@ def parse_meshdata(
     platform: str | None = None,
     include_z_only: bool = False,
     position_format: str = "AUTO",
+    retain_pc_vehicle_uv_candidates: bool = False,
 ) -> MeshAsset:
     endian = _detect_endian(data, platform)
     mesh_type, headers, metadata_end = _parse_headers(data, endian)
@@ -678,6 +691,7 @@ def parse_meshdata(
             mesh_type,
             stride,
             declaration_part_offset,
+            retain_pc_vehicle_uv_candidates,
         ):
             continue
         composite_uv_offsets[key] = _pc_composite_uv_offsets(
@@ -741,21 +755,37 @@ def parse_meshdata(
             ((), None),
         )
         declaration_part_offset = declaration_part_offsets.get(header)
-        explicit_uv_offsets = (
-            _pc_skinned_uv_offsets(
+        explicit_uv_offsets = ()
+        uv_source = "none"
+        if endian == "<":
+            explicit_uv_offsets = _pc_skinned_uv_offsets(
                 mesh_type,
                 header.stride,
                 header.palette,
+                retain_pc_vehicle_uv_candidates,
             )
-            if endian == "<"
-            else ()
-        )
+            if explicit_uv_offsets:
+                uv_source = (
+                    "pc_vehicle_shader_route_candidates"
+                    if retain_pc_vehicle_uv_candidates
+                    and mesh_type == 1
+                    and header.stride == 48
+                    else "verified_pc_skinned_declaration"
+                )
         if not explicit_uv_offsets and endian == "<":
             explicit_uv_offsets = _pc_stride_48_uv_offsets(
                 mesh_type,
                 header.stride,
                 declaration_part_offset,
+                retain_pc_vehicle_uv_candidates,
             )
+            if explicit_uv_offsets:
+                uv_source = (
+                    "pc_vehicle_shader_route_candidates"
+                    if retain_pc_vehicle_uv_candidates
+                    and mesh_type == 0
+                    else "verified_pc_stride_48_declaration"
+                )
         if (
             not explicit_uv_offsets
             and endian == "<"
@@ -765,6 +795,8 @@ def parse_meshdata(
                 (header.stride, declaration_part_offset),
                 (),
             )
+            if explicit_uv_offsets:
+                uv_source = "topology_fallback"
         decoded_channels = ()
         if explicit_uv_offsets:
             decoded_channels = tuple(
@@ -780,9 +812,25 @@ def parse_meshdata(
                 for offset in explicit_uv_offsets
             )
             if any(channel is None for channel in decoded_channels):
-                if explicit_uv_offsets == (28, 36, 32, 24):
+                if uv_source == "pc_vehicle_shader_route_candidates":
+                    valid = tuple(
+                        (offset, channel)
+                        for offset, channel in zip(
+                            explicit_uv_offsets,
+                            decoded_channels,
+                        )
+                        if channel is not None
+                    )
+                    explicit_uv_offsets = tuple(
+                        offset for offset, _ in valid
+                    )
+                    decoded_channels = tuple(
+                        channel for _, channel in valid
+                    )
+                elif explicit_uv_offsets == (28, 36, 32, 24):
                     explicit_uv_offsets = ()
                     decoded_channels = ()
+                    uv_source = "none"
                 else:
                     raise CorruptDataError(
                         "PC declared UV channels are invalid for "
@@ -810,6 +858,7 @@ def parse_meshdata(
             secondary_uvs = ()
             additional_uvs = ()
             uv_offsets = ()
+            uv_source = "none"
         elif not explicit_uv_offsets:
             decoded_uvs = _decode_uv_channel(
                 data,
@@ -841,6 +890,7 @@ def parse_meshdata(
                 if secondary_uvs
                 else (uv_offset,)
             )
+            uv_source = "stride_heuristic"
         faces = []
         for face in range(header.primitive_count):
             offset = header.index_offset + face * 3
@@ -877,6 +927,7 @@ def parse_meshdata(
                 palette=header.palette,
                 part_indices=part_indices,
                 part_index_offset=part_index_offset,
+                uv_source=uv_source,
             )
         )
     if not subsets:
@@ -946,6 +997,7 @@ def split_mesh_subset_by_parts(
                     palette=subset.palette,
                     part_indices=(part_index,) * len(source_indices),
                     part_index_offset=subset.part_index_offset,
+                    uv_source=subset.uv_source,
                 ),
             )
         )

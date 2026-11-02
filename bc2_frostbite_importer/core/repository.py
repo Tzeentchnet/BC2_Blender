@@ -19,6 +19,7 @@ from .fbrb import (
     read_fbrb,
 )
 from .io import copy_exact, read_exact, safe_cache_name, source_fingerprint
+from .shaderdb import ShaderDatabase, parse_shader_database
 from .source import DiscSource, detect_source
 
 
@@ -37,6 +38,7 @@ class AssetRepository:
         self.catalog = AssetCatalog(self.source_cache / "catalog.sqlite3")
         self._archive_info_cache = {}
         self._payload_path_cache = {}
+        self._shader_database_cache: dict[int, ShaderDatabase] = {}
 
     @property
     def kind(self) -> str:
@@ -59,6 +61,7 @@ class AssetRepository:
         archives = self.source.list_archives()
         self._archive_info_cache.clear()
         self._payload_path_cache.clear()
+        self._shader_database_cache.clear()
         self.catalog.reset(self.image_path, self.kind, self.fingerprint)
         archive_ids: list[int] = []
         for archive in archives:
@@ -90,6 +93,7 @@ class AssetRepository:
         with self.source.open_archive(locator) as stream:
             info = read_fbrb(stream)
         self._archive_info_cache[archive_id] = info
+        self._shader_database_cache.clear()
         self.catalog.replace_archive_assets(
             archive_id,
             info.entries,
@@ -98,6 +102,68 @@ class AssetRepository:
             info.payload_size,
         )
         return sum(not entry.deleted for entry in info.entries)
+
+    def shader_database_candidates(
+        self,
+        material_keys: tuple[str, ...],
+        preferred_archives: tuple[str, ...] = (),
+        mesh_path: str | None = None,
+    ):
+        databases = self.catalog.shader_database_assets()
+        by_archive: dict[str, list[object]] = {}
+        by_id = {}
+        for asset in databases:
+            by_id[int(asset["id"])] = asset
+            by_archive.setdefault(
+                str(asset["archive_path"]).casefold(),
+                [],
+            ).append(asset)
+
+        ordered = []
+        seen = set()
+
+        def add(asset):
+            asset_id = int(asset["id"])
+            if asset_id not in seen:
+                seen.add(asset_id)
+                ordered.append(asset)
+
+        for archive_path in preferred_archives:
+            for asset in by_archive.get(archive_path.casefold(), ()):
+                add(asset)
+        if mesh_path:
+            for mesh_asset in self.catalog.assets_by_path(mesh_path):
+                for asset in by_archive.get(
+                    str(mesh_asset["archive_path"]).casefold(),
+                    (),
+                ):
+                    add(asset)
+        for source in self.catalog.shader_database_sources(material_keys):
+            asset = by_id.get(int(source["id"]))
+            if asset is not None:
+                add(asset)
+        for asset in databases:
+            add(asset)
+        return tuple(ordered)
+
+    def read_shader_database(
+        self,
+        asset_id: int,
+    ) -> tuple[object, ShaderDatabase]:
+        cached = self._shader_database_cache.get(asset_id)
+        if cached is not None:
+            asset = self.catalog.asset(asset_id)
+            if asset is None:
+                raise ExtractionError(f"Unknown shader database id: {asset_id}")
+            return asset, cached
+        asset, raw = self.read_asset(asset_id, max_size=1 << 30)
+        database = parse_shader_database(raw)
+        self.catalog.record_shader_database(
+            asset_id,
+            (material.key for material in database.materials),
+        )
+        self._shader_database_cache[asset_id] = database
+        return asset, database
 
     def index_all_archives(
         self,

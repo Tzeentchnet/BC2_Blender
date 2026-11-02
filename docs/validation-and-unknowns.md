@@ -231,14 +231,33 @@ texture-conversion, or unresolved-subset diagnostics.
   normal, color, symbol, dirt, detail, and 10x mask routes. The 36-vertex,
   20-triangle `lod0_Windshields_Glass` surface uses transmissive view-angle
   opacity and retains its graph after save/reopen.
-- PC vehicle declaration survey: all 62 unique cataloged vehicle LOD0
-  MeshData resources parse with no failures: 21 type-0, nine type-1, and 32
-  type-2 resources. The representative family regression confirms AH60
+- PC vehicle declaration and shader survey: all 62 unique cataloged vehicle
+  LOD0 MeshData resources parse: 21 type-0, nine type-1, and 32 type-2
+  resources, covering 240 subsets/surfaces. Every standard shader layout
+  encountered has an implemented field width, including the 8-byte
+  two-component code `258`, and no derived shader route points to an absent
+  retained physical coordinate. All 35 indexed retail `Dx11_Single.res`
+  databases were checked. Fifteen referenced material keys/complete shader
+  partitions do not occur in those databases; M3A3Tracks has no local surface
+  shader set, and Truck `Wheels_LOD` has no source shader reference. These are
+  recorded as source limitations, not replaced with unrelated same-name
+  materials. The absent partitions are AH64 `asd_main`/`tailrotorblurred`,
+  Russian helicopter HUD glass/frame, AA-BMD3 tracks, Cav
+  tyres/kits/mirrors, Cobra metal, Humvee tyres, M3A3 tracks, T90 kits,
+  Vodnik camonet, LCRS wood, and Ka-52 sensors. The representative family
+  regression confirms AH60
   24/28/32/40 with selector byte 36, MI28 24/28/36/40 with selector byte 32,
   AH64 primary byte 28 with selector byte 44, M1A2 primary byte 28 with
   selector byte 40, and Zero Fighter/T90 primary byte 36 with selector byte
   48. These last four families exercise the topology-driven composite
   declaration resolver rather than path-specific exceptions.
+  The final audit reports zero implementation failures, 18 source-limit
+  records, eight opaque constant/control-style surfaces without a
+  texture-driven color graph, and 76 binding records without one provable
+  physical route. The latter include alternate-pass duplicates whose same
+  texture has another routed binding, semantic glass masks, animated
+  rotor/track variants, and HUD/control shaders. They remain explicitly
+  labeled fallbacks; they are not exporter-safe declarations.
 - PC Zero Fighter direct mesh-set import: four LOD0 subsets split into 24
   objects and 8,459 triangles with no material diagnostics. Every subset,
   including the one-part blurred rotor, retains the 36/40/44 coordinate
@@ -248,6 +267,17 @@ texture-conversion, or unresolved-subset diagnostics.
   transmission with Fresnel/mask opacity, and inner glass retains the
   shader-observed `0.1` opacity scale. Geometry, UV metadata, roles, and both
   glass graphs survive save/reopen.
+- PC Corsair direct mesh-set import: 24 objects and 7,198 triangles survive
+  save/reopen. Its source-specific SP_01 material maps `_CM` to Base Color,
+  retains the reflected cube binding as `ENVIRONMENT`, routes color and
+  normals through byte 24, decals through byte 28, and applies the
+  shader-derived `(128, 64)` repeat to the general normal.
+- PC UAV direct mesh-set import: eight objects and 3,107 triangles survive
+  save/reopen. Its compatible shader variant routes both `UAV_D` and
+  `Dt_Dirt_002` through physical byte 28 (`UV1` for this declaration) and
+  preserves the detail texture's `(8, 8)` repeat. Validation accepts any
+  provenance-ranked exact database copy rather than requiring one hard-coded
+  level.
 - PC `ske01`: local transforms composed against every transposed stored
   inverse-world matrix with a maximum identity residual below `7.5e-7`.
 - PC rifle third-person `StandIdle` and `RunForward`: 39 named transform
@@ -290,6 +320,9 @@ Current tests cover:
 - the declared four-channel little-endian stride-48 MI28 composite layout when
   the verified part-ID field is at byte 32, including propagation to
   one-part subsets;
+- category-gated type-1 vehicle byte-32/36 candidates and the type-0
+  stride-48 byte-40 candidate without changing ordinary skinned/static
+  declarations;
 - topology-ranked little-endian stride-64 composite coordinates when bytes
   24/28 are degenerate, including exclusion of a byte-48 part selector and
   declaration propagation to a one-part subset;
@@ -298,7 +331,15 @@ Current tests cover:
 - verified MI28 Main/MainMetal coordinate routes and color constants plus its
   textureless transmissive glass graph;
 - semantic vehicle outer/interior glass graphs, including environment-role
-  preservation, transmission, linked opacity, and the interior scale;
+  preservation, transmission, linked opacity, window/windshield recognition,
+  and the interior scale;
+- synthetic block-5 shader layouts, RDEF dimensions, upper-bit binding slots,
+  and bounded DXBC physical-coordinate provenance through packed components,
+  swizzles, affine arithmetic, source modifiers, conditional zero branches,
+  and conservative nonlinear operations;
+- source-fingerprinted shader material-key indexing, foreign-key invalidation,
+  exact/cheap/unique-full-partition matching, and declaration-aware material
+  cache separation;
 - the declared four-channel little-endian stride-64 skinned coordinate layout
   including constant declared channels, plus nondegenerate routing for
   LegStandard, MOLLE, and pouches;
@@ -407,17 +448,32 @@ blender --background --factory-startup `
   --output <OUTPUT_BLEND>
 ```
 
-The PC vehicle-family runner imports Zero Fighter, verifies its 24 objects,
-8,459 triangles, byte-48 selector, 36/40/44 coordinate declaration, outer and
-inner glass graphs, and save/reopen persistence. It also parses representative
-AH60, AH64, MI28, M1A2, and T90 LOD0 resources to lock the recurring
-declaration families:
+The PC vehicle-family runner imports and reopens Zero Fighter, Corsair, and
+UAV. It verifies Zero Fighter's 24 objects, 8,459 triangles, byte-48 selector,
+36/40/44 coordinate declaration, and outer/inner glass; Corsair's 24 objects,
+7,198 triangles, color/cube/decal routes, and repeated normal; and UAV's eight
+objects, 3,107 triangles, byte-28 color/detail route, and repeated detail. It
+also parses representative AH60, AH64, MI28, M1A2, and T90 LOD0 resources to
+lock the recurring declaration families:
 
 ```powershell
 blender --background --factory-startup `
   --python tests\blender_vehicle_family_integration.py -- `
   --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
   --output <OUTPUT_BLEND>
+```
+
+The all-vehicle structural/material audit enumerates the 62 unique indexed
+retail resources. Its JSON report preserves per-subset declarations and
+evidence, surface matches, database provenance, layouts/variants, binding
+paths/roles/dimensions, physical routes and transforms, explicit fallbacks,
+and source limitations:
+
+```powershell
+blender --background --factory-startup `
+  --python tests\blender_vehicle_catalog_audit.py -- `
+  --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
+  --output <OUTPUT_JSON>
 ```
 
 ## External-reference validation

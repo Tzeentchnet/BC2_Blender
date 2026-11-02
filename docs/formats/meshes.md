@@ -152,6 +152,25 @@ usable Blender preview:
   It is still preview-import evidence, not a safe writer specification:
   topology can identify useful coordinates but cannot establish every shader
   semantic or whether a constant declared field must be written back.
+- Every imported subset records the implemented evidence source for its UV
+  ordering: verified PC declaration, vehicle shader-route candidates,
+  topology fallback, stride heuristic, or no decoded coordinate. Blender
+  stores this as `bc2_uv_source`; topology-selected channels are therefore not
+  indistinguishable from shader/declaration evidence.
+- PC type-1 vehicle LOD0 resources use more than the bird/character
+  `40/44` pair. Retail track, stationary-gun, and parachute variants route
+  samples through byte 32 or 36. Vehicle imports retain
+  `40/44/32/36` as physical candidates, preserving the established
+  `40/44` order while allowing shader variants to map byte 32 to `UV2` and
+  byte 36 to `UV3`. This category-gated retention is **implemented shader
+  support**, not proof that all four pairs are authored texture coordinates
+  on every type-1 resource; nonvehicle skinned imports keep their verified
+  declaration behavior.
+- PC type-0 stride-48 vehicle shaders can declare a fifth coordinate at byte
+  40 in addition to the common `28/36/32/24` ordering. Vehicle imports retain
+  byte 40 when it decodes as a bounded half-float pair. This is required by
+  the verified Ka-52 wreck variant, whose normal/detail/mask samples route to
+  byte 40. Ordinary nonvehicle static imports keep the four-field declaration.
 - Two stride-64, byte-48-selector samples show why the resolver preserves
   multiple physical channels:
 
@@ -165,7 +184,9 @@ usable Blender preview:
   topologically degenerate while byte 36 is not.
 - A retail PC survey parsed all 62 unique vehicle LOD0 MeshData resources in
   the indexed catalog with no failures: 21 type-0, nine type-1, and 32 type-2
-  meshes. Representative recurring type-2 families include AH64 at selector
+  meshes. A separate shader/layout audit resolves every standard layout field
+  through explicit widths, including field code `258` as an 8-byte
+  two-component input. Representative recurring type-2 families include AH64 at selector
   byte 44 with primary byte 28, M1A2 at selector byte 40 with primary byte 28,
   Zero Fighter and T90 at selector byte 48 with primary byte 36, plus the
   exact AH60 and MI28 declarations above. This is broad parser evidence, not

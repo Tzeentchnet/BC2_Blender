@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import os
 import sys
 import traceback
 from pathlib import Path
@@ -35,6 +36,14 @@ else:
 ZERO_ARCHIVE_PATH = "Dist/win32/levels/sp_01/level-00.fbrb"
 ZERO_MESH_SET_PATH = (
     "Objects/Vehicles/Beach/Jap_Zero_Fighter/Zero_Fighter_Mesh.res"
+)
+CORSAIR_ARCHIVE_PATH = "Dist/win32/levels/sp_01/level-00.fbrb"
+CORSAIR_MESH_SET_PATH = (
+    "Objects/Vehicles/Beach/US_Corsair/US_corsair_Mesh.res"
+)
+UAV_ARCHIVE_PATH = "Dist/win32/levels/mp_common/level-00.fbrb"
+UAV_MESH_SET_PATH = (
+    "Objects/Vehicles/Air/UAV/UAV_Helicopter_Mesh.res"
 )
 EXPECTED_ZERO_OBJECTS = 24
 EXPECTED_ZERO_TRIANGLES = 8_459
@@ -173,7 +182,11 @@ def _assert_declaration_cases(repository):
             int(asset["id"]),
             max_size=1 << 30,
         )
-        mesh = parse_meshdata(raw, asset["platform"])
+        mesh = parse_meshdata(
+            raw,
+            asset["platform"],
+            retain_pc_vehicle_uv_candidates=True,
+        )
         if mesh.mesh_type != 2 or len(mesh.subsets) != expected_subsets:
             raise AssertionError(
                 f"{name} composite LOD0 structure changed"
@@ -305,6 +318,137 @@ def _assert_zero_import(objects, root):
         )
 
 
+def _texture_nodes(material):
+    return {
+        Path(str(node.get("bc2_asset_path", ""))).name.casefold(): node
+        for node in material.node_tree.nodes
+        if node.type == "TEX_IMAGE"
+    }
+
+
+def _surface_material(objects, surface_name):
+    return next(
+        (
+            material
+            for obj in objects
+            for material in obj.data.materials
+            if str(
+                material.get("bc2_surface_name", "")
+            ).casefold()
+            == surface_name.casefold()
+        ),
+        None,
+    )
+
+
+def _assert_corsair_import(objects, root):
+    if int(root.get("bc2_diagnostic_count", 0)) != 0:
+        raise AssertionError("Corsair import produced material diagnostics")
+    material = _surface_material(objects, "main")
+    if (
+        material is None
+        or material.get("bc2_material_status") != "resolved material graph"
+        or "sp_01" not in str(
+            material.get("bc2_shader_database_source", "")
+        ).casefold()
+    ):
+        raise AssertionError(
+            "Corsair main material did not resolve from SP_01"
+        )
+    shader = next(
+        node
+        for node in material.node_tree.nodes
+        if node.type == "BSDF_PRINCIPLED"
+    )
+    if not shader.inputs["Base Color"].is_linked:
+        raise AssertionError("Corsair _CM texture is not connected to color")
+    nodes = _texture_nodes(material)
+    expected = {
+        "corsair_nm": ("UVMap", (1.0, 1.0)),
+        "nm_general_002": ("UVMap", (128.0, 64.0)),
+        "vehicledecals": ("UV1", (1.0, 1.0)),
+        "corsair_cm": ("UVMap", (1.0, 1.0)),
+    }
+    for name, (uv_map, scale) in expected.items():
+        node = nodes.get(name)
+        if (
+            node is None
+            or node.get("bc2_uv_route_source") != "shader"
+            or node.get("bc2_uv_map") != uv_map
+            or tuple(node.get("bc2_uv_scale", ())) != scale
+        ):
+            raise AssertionError(
+                f"Corsair shader route is incorrect for {name}"
+            )
+    bindings = json.loads(
+        material.get("bc2_texture_bindings", "[]")
+    )
+    roles = {binding["index"]: binding["role"] for binding in bindings}
+    if roles.get(4) != "COLOR" or roles.get(261) != "ENVIRONMENT":
+        raise AssertionError("Corsair color or cube role is incorrect")
+
+
+def _assert_uav_import(objects, root):
+    if int(root.get("bc2_diagnostic_count", 0)) != 0:
+        raise AssertionError("UAV import produced material diagnostics")
+    material = _surface_material(objects, "UAV_Main")
+    shader_source = str(
+        material.get("bc2_shader_database_source", "")
+        if material is not None
+        else ""
+    ).casefold()
+    if (
+        material is None
+        or material.get("bc2_material_status") != "resolved material graph"
+        or "dx11_single.res" not in shader_source
+    ):
+        raise AssertionError(
+            "UAV main material has no shader database provenance"
+        )
+    nodes = _texture_nodes(material)
+    expected = {
+        "uav_d": ("UV1", (1.0, 1.0)),
+        "dt_dirt_002": ("UV1", (8.0, 8.0)),
+    }
+    for name, (uv_map, scale) in expected.items():
+        node = nodes.get(name)
+        if (
+            node is None
+            or node.get("bc2_uv_route_source") != "shader"
+            or node.get("bc2_uv_map") != uv_map
+            or tuple(node.get("bc2_uv_scale", ())) != scale
+        ):
+            raise AssertionError(f"UAV shader route is incorrect for {name}")
+
+
+def _import_mesh_set(repository, mesh_set_path, archive_path):
+    mesh_set_asset = repository.catalog.find_asset(
+        mesh_set_path,
+        (archive_path,),
+    )
+    if mesh_set_asset is None:
+        raise AssertionError(f"Vehicle mesh set is missing: {mesh_set_path}")
+    mesh_asset, mesh_raw = repository.read_asset(
+        int(mesh_set_asset["id"]),
+        max_size=1 << 30,
+        resolve_mesh=True,
+    )
+    parsed = parse_meshdata(
+        mesh_raw,
+        mesh_asset["platform"],
+        retain_pc_vehicle_uv_candidates=True,
+    )
+    root, objects = blender_addon._create_mesh_set_import(
+        bpy.context,
+        repository,
+        mesh_set_asset,
+        parsed,
+        mesh_asset,
+        _settings(),
+    )
+    return root, objects, str(mesh_asset["path"])
+
+
 def main():
     arguments = _arguments()
     output = Path(arguments.output)
@@ -315,59 +459,81 @@ def main():
     repository = AssetRepository(arguments.iso, arguments.cache)
     try:
         declaration_results = _assert_declaration_cases(repository)
-        mesh_set_asset = repository.catalog.find_asset(
-            ZERO_MESH_SET_PATH,
-            (ZERO_ARCHIVE_PATH,),
-        )
-        if mesh_set_asset is None:
-            raise AssertionError(
-                f"Zero Fighter mesh set is missing: {ZERO_MESH_SET_PATH}"
-            )
-        mesh_asset, mesh_raw = repository.read_asset(
-            int(mesh_set_asset["id"]),
-            max_size=1 << 30,
-            resolve_mesh=True,
-        )
-        parsed = parse_meshdata(
-            mesh_raw,
-            mesh_asset["platform"],
-        )
-        root, objects = blender_addon._create_mesh_set_import(
-            bpy.context,
+        zero_root, zero_objects, zero_mesh_data = _import_mesh_set(
             repository,
-            mesh_set_asset,
-            parsed,
-            mesh_asset,
-            _settings(),
+            ZERO_MESH_SET_PATH,
+            ZERO_ARCHIVE_PATH,
         )
-        _assert_zero_import(objects, root)
-        root_name = root.name
+        corsair_root, corsair_objects, corsair_mesh_data = _import_mesh_set(
+            repository,
+            CORSAIR_MESH_SET_PATH,
+            CORSAIR_ARCHIVE_PATH,
+        )
+        uav_root, uav_objects, uav_mesh_data = _import_mesh_set(
+            repository,
+            UAV_MESH_SET_PATH,
+            UAV_ARCHIVE_PATH,
+        )
+        _assert_zero_import(zero_objects, zero_root)
+        _assert_corsair_import(corsair_objects, corsair_root)
+        _assert_uav_import(uav_objects, uav_root)
+        root_names = {
+            "zero": zero_root.name,
+            "corsair": corsair_root.name,
+            "uav": uav_root.name,
+        }
 
         bpy.ops.wm.save_as_mainfile(filepath=str(output))
         bpy.ops.wm.open_mainfile(filepath=str(output))
 
-        reopened_root = bpy.data.collections.get(root_name)
-        reopened_objects = [
-            obj
-            for obj in bpy.data.objects
-            if obj.get("bc2_source_subset")
-        ]
-        if reopened_root is None:
+        roots = {
+            name: bpy.data.collections.get(root_name)
+            for name, root_name in root_names.items()
+        }
+        if any(root is None for root in roots.values()):
             raise AssertionError(
-                "Zero Fighter root collection did not survive save/reopen"
+                "Vehicle root collection did not survive save/reopen"
             )
-        _assert_zero_import(reopened_objects, reopened_root)
+        reopened = {
+            "zero": [
+                obj
+                for obj in bpy.data.objects
+                if str(obj.get("bc2_asset_path", "")).casefold()
+                == zero_mesh_data.casefold()
+            ],
+            "corsair": [
+                obj
+                for obj in bpy.data.objects
+                if str(obj.get("bc2_asset_path", "")).casefold()
+                == corsair_mesh_data.casefold()
+            ],
+            "uav": [
+                obj
+                for obj in bpy.data.objects
+                if str(obj.get("bc2_asset_path", "")).casefold()
+                == uav_mesh_data.casefold()
+            ],
+        }
+        _assert_zero_import(reopened["zero"], roots["zero"])
+        _assert_corsair_import(reopened["corsair"], roots["corsair"])
+        _assert_uav_import(reopened["uav"], roots["uav"])
         print(
             "VEHICLE_FAMILY_INTEGRATION "
             + json.dumps(
                 {
                     "declarations": declaration_results,
-                    "objects": len(reopened_objects),
+                    "objects": {
+                        name: len(objects)
+                        for name, objects in reopened.items()
+                    },
                     "output": str(output),
-                    "triangles": sum(
-                        len(obj.data.polygons)
-                        for obj in reopened_objects
-                    ),
+                    "triangles": {
+                        name: sum(
+                            len(obj.data.polygons)
+                            for obj in objects
+                        )
+                        for name, objects in reopened.items()
+                    },
                 },
                 sort_keys=True,
             )
@@ -381,4 +547,4 @@ if __name__ == "__main__":
         main()
     except Exception:
         traceback.print_exc()
-        raise
+        os._exit(1)

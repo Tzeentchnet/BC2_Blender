@@ -41,6 +41,10 @@ from bc2_frostbite_importer.core.shaderdb import (
     ShaderDatabase,
     ShaderMaterial,
     ShaderTextureBinding,
+    ShaderTextureRoute,
+    ShaderVariant,
+    ShaderVertexField,
+    ShaderVertexLayout,
 )
 from bc2_frostbite_importer.core.terrain import TerrainMesh
 
@@ -1204,6 +1208,181 @@ def _test_shader_key_alias():
     )
     if missing is not None or missing_match != "missing":
         raise AssertionError("Unknown shader key did not remain unresolved")
+    shader_partition = "Objects/Test/Shaders/Tracks"
+    component_key = "Objects/Test/TrackMesh/" + shader_partition
+    component_database = ShaderDatabase(
+        materials=(ShaderMaterial(component_key, ()),),
+        trailing_bytes=0,
+    )
+    material, resolved, match = blender_addon._find_shader_material(
+        component_database,
+        "Objects/Test/MainMesh/" + shader_partition,
+        shader_partition,
+    )
+    if (
+        material is None
+        or resolved != component_key
+        or match != "shader_reference_suffix"
+    ):
+        raise AssertionError(
+            "Unique component shader partition was not resolved"
+        )
+    ambiguous_database = ShaderDatabase(
+        materials=(
+            ShaderMaterial(component_key, ()),
+            ShaderMaterial("Objects/Test/OtherMesh/" + shader_partition, ()),
+        ),
+        trailing_bytes=0,
+    )
+    material, _, match = blender_addon._find_shader_material(
+        ambiguous_database,
+        "Objects/Test/MainMesh/" + shader_partition,
+        shader_partition,
+    )
+    if material is not None or match != "missing":
+        raise AssertionError(
+            "Ambiguous component shader partitions did not remain unresolved"
+        )
+
+
+def _test_shader_driven_vehicle_routes():
+    bindings = (
+        ShaderTextureBinding(
+            2,
+            "Objects/Vehicles/Test/Textures/Test_CM",
+            ("texture_Texture",),
+            4,
+        ),
+        ShaderTextureBinding(
+            3,
+            "Textures/_GENERAL/Dt_Dirt_002",
+            ("texture_Layer1_Detail2",),
+            4,
+        ),
+        ShaderTextureBinding(
+            261,
+            "Textures/Sky/Test_RGBA16f",
+            ("texture_Environment",),
+            9,
+        ),
+    )
+    if blender_addon._binding_roles(bindings) != (
+        "COLOR",
+        "DETAIL",
+        "ENVIRONMENT",
+    ):
+        raise AssertionError("_CM or reflected cube texture roles are incorrect")
+    generic_vehicle_bindings = (
+        ShaderTextureBinding(0, "Textures/_GENERAL/RGB_Screen_8"),
+        ShaderTextureBinding(1, "Objects/Vehicles/Test/Textures/Test_Dt"),
+        ShaderTextureBinding(2, "Objects/Vehicles/Test/Textures/Test_Oc"),
+        ShaderTextureBinding(3, "Textures/Vehicles/UsSymbols/Symbols_Us"),
+        ShaderTextureBinding(4, "Textures/_ATLAS/EnvMap_BW01"),
+    )
+    if blender_addon._binding_roles(generic_vehicle_bindings) != (
+        "COLOR",
+        "DETAIL",
+        "OCCLUSION",
+        "DECAL",
+        "ENVIRONMENT",
+    ):
+        raise AssertionError("Generic vehicle texture roles are incorrect")
+    layout = ShaderVertexLayout(
+        b"L" * 16,
+        48,
+        0xFFFFFF00,
+        (
+            ShaderVertexField(6, 24, 4, 3, (0, 1)),
+            ShaderVertexField(6, 28, 4, 3, (2, 3)),
+        ),
+    )
+    variant = ShaderVariant(
+        4,
+        426,
+        1712,
+        0,
+        layout,
+        (
+            ShaderTextureRoute(
+                2,
+                28,
+                3,
+                (2, 3),
+                (1.0, 1.0),
+                (0.0, 0.0),
+            ),
+            ShaderTextureRoute(
+                3,
+                28,
+                3,
+                (2, 3),
+                (8.0, 8.0),
+                (0.0, 0.0),
+            ),
+        ),
+    )
+    shader_material = ShaderMaterial(
+        "Objects/Vehicles/Test/Shaders/Main",
+        bindings,
+        (variant,),
+    )
+    selected = blender_addon._shader_variant_for_subset(
+        shader_material,
+        48,
+        (24, 28, 32, 40),
+    )
+    color_route = blender_addon._shader_binding_route(
+        selected,
+        bindings[0],
+    )
+    detail_route = blender_addon._shader_binding_route(
+        selected,
+        bindings[1],
+    )
+    if (
+        color_route is None
+        or detail_route is None
+        or blender_addon._uv_map_for_offset(
+            (24, 28, 32, 40),
+            color_route.uv_offset,
+        )
+        != "UV1"
+        or detail_route.scale != (8.0, 8.0)
+    ):
+        raise AssertionError("Shader-derived physical UV routing is incorrect")
+
+    surface = SurfaceShader(
+        "Main",
+        "objects/vehicles/test/shaders/main/reference",
+        shader_material.key,
+    )
+    cache = {}
+    first = blender_addon._surface_material(
+        None,
+        surface,
+        ShaderDatabase((shader_material,), 0, (layout,)),
+        (),
+        cache,
+        {},
+        [],
+        False,
+        vertex_stride=48,
+        uv_offsets=(24, 28),
+    )
+    second = blender_addon._surface_material(
+        None,
+        surface,
+        ShaderDatabase((shader_material,), 0, (layout,)),
+        (),
+        cache,
+        {},
+        [],
+        False,
+        vertex_stride=48,
+        uv_offsets=(28, 24),
+    )
+    if first is second:
+        raise AssertionError("Material cache is not declaration-aware")
 
 
 def _test_reflected_material_roles():
@@ -1847,6 +2026,16 @@ def _test_verified_vehicle_material_graphs():
         or nodes["BC2 glass opacity"].operation != "ADD"
     ):
         raise AssertionError("Semantic vehicle glass graph is incomplete")
+    window_surface = SurfaceShader(
+        "Interior_Windows",
+        "objects/vehicles/land/test/shaders/windows/guid",
+        (
+            "Objects/Vehicles/Land/Test/Test_Mesh/"
+            "Objects/Vehicles/Land/Test/Shaders/Windows"
+        ),
+    )
+    if not blender_addon._is_vehicle_glass_surface(window_surface):
+        raise AssertionError("Vehicle window surface was not classified as glass")
 
     inside_surface = SurfaceShader(
         "GlassInside",
@@ -2449,6 +2638,7 @@ def main():
     _test_linked_map_geometry(bpy.context)
     _test_verified_normal_graph()
     _test_shader_key_alias()
+    _test_shader_driven_vehicle_routes()
     _test_reflected_material_roles()
     _test_verified_vehicle_material_graphs()
     _test_character_material_graph()

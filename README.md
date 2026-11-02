@@ -182,7 +182,7 @@ The provided Xbox example indexes 630 Frostbite archives and 251,251 active asse
 | `CompositeMeshSet` | Resolves LOD0 geometry and source materials, corrects shared/global index streams, separates verified source part IDs into named collections, applies decoded mesh-set bind transforms, and hides decoded damaged/destroyed/blurred parts plus geometry or collections with two `Wreck` occurrences in one name by default. A single `Wreck` occurrence alone remains visible. |
 | PC `SkinnedMeshSet` | Resolves LOD0 geometry, the DBX skeleton reference, the default surface set, and source DX11 texture bindings; preserves declaration-specific UV layers (two for verified stride-48 assets and four for stride-64 characters), creates named vertex groups and source materials, adds Armature modifiers, and imports bounded exact-folder plus character-tree Actions when enabled. Console mesh sets remain geometry-only. |
 | PC soldier entity `.dbx` | Resolves every `Meshes3p` body/head/headgear component at LOD0, applies per-component shader-set overrides, binds all modules to one verified skeleton, creates modular component collections, follows character-specific static/facial/kit/revive animation links, and optionally selects eight verified rifle locomotion clips through the explicit shared base-set link. |
-| PC vehicle entity `.dbx` | Resolves the linked composite LOD0 mesh, source-backed materials, ordered named part collections, mesh-set bind transforms, and DBX-backed default/damaged/alternate states without inventing runtime pivots, parenting, or an armature. Verified AH60 and MI28 families receive dedicated graphs; other vehicle glass uses a semantic transmissive fallback. Unknown composite UV declarations are selected from cross-subset topology rather than vehicle-name exceptions. |
+| PC vehicle entity `.dbx` | Resolves the linked composite LOD0 mesh, source-backed materials, ordered named part collections, mesh-set bind transforms, and DBX-backed default/damaged/alternate states without inventing runtime pivots, parenting, or an armature. Matching shader databases are selected by source/duplicate-path/material-key provenance and cached; compatible shader variants route texture bindings to physical UV offsets. Verified AH60 and MI28 families retain dedicated arithmetic while other vehicle glass uses a semantic transmissive fallback. Unknown composite UV declarations remain an explicitly marked cross-subset topology fallback rather than a vehicle-name exception. |
 | PC `GrannyModel` | Creates a native Blender armature while preserving the complete source hierarchy, local transforms, source flags, and physics-joint metadata. |
 | PC `GrannyAnimation` | Creates a Blender 5.2 layered/slotted Action on the matching armature, sampled at the source time step with root motion, quaternion continuity, and representable bone scale. Degrees 0-3 and the documented human/Raven codecs are implemented. |
 | `WaterMesh` | Creates native water geometry from every body using platform-endian 32-bit triangle indices. |
@@ -582,7 +582,7 @@ the byte-32 part selector and 24/28/36/40 coordinate layout across all ten
 LOD0 subsets, shader-verified Main/MainMetal texture routing, the 36-vertex
 transmissive windshield, and save/reopen persistence.
 
-The broader vehicle declaration and Zero Fighter glass check is:
+The broader vehicle declaration/material check is:
 
 ```powershell
 blender --background --factory-startup `
@@ -591,7 +591,28 @@ blender --background --factory-startup `
   --output <OUTPUT_BLEND>
 ```
 
-It imports and reopens Zero Fighter, verifies 24 objects, 8,459 triangles,
-the byte-48 selector, byte-36 primary UV, and semantic outer/interior glass
-graphs. It also checks the recurring AH60, AH64, MI28, M1A2, and T90
-declaration families directly from retail resources.
+It imports and reopens Zero Fighter, Corsair, and UAV. The runner verifies
+Zero Fighter's 24 objects, 8,459 triangles, byte-48 selector, byte-36 primary
+UV, and semantic glass; Corsair `_CM` color, cube environment, byte-24
+color/normal, byte-28 decal, and `(128, 64)` normal repeat; and UAV byte-28
+color/detail with `(8, 8)` detail repeat. It also checks the recurring AH60,
+AH64, MI28, M1A2, and T90 declaration families directly from retail
+resources.
+
+The structural all-vehicle audit is:
+
+```powershell
+blender --background --factory-startup `
+  --python tests\blender_vehicle_catalog_audit.py -- `
+  --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
+  --output <OUTPUT_JSON>
+```
+
+It enumerates all 62 unique indexed PC vehicle LOD0 resources, parses their
+geometry, resolves subset surfaces and source material keys, records database
+provenance, layout/variant evidence, texture roles, physical UV routes,
+fallbacks, and explicit unsupported cases. It fails on parse errors,
+unexpected resolver failures, unresolved subset assignment without a source
+explanation, or shader routes to absent layers. Material partitions absent
+from every indexed retail database and source descriptors that omit shader
+sets/references are reported separately as source limitations.

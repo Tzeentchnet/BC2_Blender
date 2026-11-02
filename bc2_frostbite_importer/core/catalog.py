@@ -11,7 +11,7 @@ from .fbrb import FbrbEntry
 from .records import ArchiveDescriptor
 
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 _CONTENT_GROUP_PREFIXES = {
     "CHARACTER": (
         "characters/%",
@@ -182,6 +182,19 @@ class AssetCatalog:
             CREATE INDEX IF NOT EXISTS assets_category_idx ON assets(category);
             CREATE INDEX IF NOT EXISTS assets_type_idx ON assets(asset_type);
             CREATE INDEX IF NOT EXISTS assets_path_idx ON assets(path);
+            CREATE TABLE IF NOT EXISTS shader_databases (
+                asset_id INTEGER PRIMARY KEY
+                    REFERENCES assets(id) ON DELETE CASCADE,
+                material_count INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS shader_material_keys (
+                asset_id INTEGER NOT NULL
+                    REFERENCES shader_databases(asset_id) ON DELETE CASCADE,
+                material_key TEXT NOT NULL COLLATE NOCASE,
+                PRIMARY KEY(asset_id, material_key)
+            );
+            CREATE INDEX IF NOT EXISTS shader_material_keys_key_idx
+                ON shader_material_keys(material_key);
             """
         )
         self.connection.execute(
@@ -335,6 +348,82 @@ class AssetCatalog:
             self.connection.execute(
                 "UPDATE archives SET error=? WHERE id=?", (message, archive_id)
             )
+
+    def record_shader_database(
+        self,
+        asset_id: int,
+        material_keys: Iterable[str],
+    ):
+        keys = tuple(dict.fromkeys(key.casefold() for key in material_keys))
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO shader_databases(asset_id, material_count)
+                VALUES(?, ?)
+                ON CONFLICT(asset_id) DO UPDATE SET
+                    material_count=excluded.material_count
+                """,
+                (asset_id, len(keys)),
+            )
+            self.connection.execute(
+                "DELETE FROM shader_material_keys WHERE asset_id = ?",
+                (asset_id,),
+            )
+            self.connection.executemany(
+                """
+                INSERT INTO shader_material_keys(asset_id, material_key)
+                VALUES(?, ?)
+                """,
+                ((asset_id, key) for key in keys),
+            )
+
+    def shader_database_assets(self):
+        return self.connection.execute(
+            """
+            SELECT assets.*, archives.path AS archive_path,
+                   archives.platform, archives.locator,
+                   archives.size AS archive_size,
+                   CASE WHEN shader_databases.asset_id IS NULL
+                        THEN 0 ELSE 1 END AS shader_scanned
+            FROM assets
+            JOIN archives ON archives.id = assets.archive_id
+            LEFT JOIN shader_databases
+                ON shader_databases.asset_id = assets.id
+            WHERE lower(assets.path) LIKE '%/shaders/dx11_single.res'
+            ORDER BY archives.path COLLATE NOCASE,
+                     assets.path COLLATE NOCASE,
+                     assets.id
+            """
+        ).fetchall()
+
+    def shader_database_sources(
+        self,
+        material_keys: Iterable[str],
+    ):
+        keys = tuple(dict.fromkeys(key.casefold() for key in material_keys))
+        if not keys:
+            return []
+        placeholders = ",".join("?" for _ in keys)
+        return self.connection.execute(
+            f"""
+            SELECT assets.*, archives.path AS archive_path,
+                   archives.platform, archives.locator,
+                   archives.size AS archive_size,
+                   COUNT(DISTINCT shader_material_keys.material_key)
+                       AS matching_materials,
+                   1 AS shader_scanned
+            FROM shader_material_keys
+            JOIN assets ON assets.id = shader_material_keys.asset_id
+            JOIN archives ON archives.id = assets.archive_id
+            WHERE shader_material_keys.material_key IN ({placeholders})
+            GROUP BY assets.id
+            ORDER BY matching_materials DESC,
+                     archives.path COLLATE NOCASE,
+                     assets.path COLLATE NOCASE,
+                     assets.id
+            """,
+            keys,
+        ).fetchall()
 
     def asset(self, asset_id: int):
         return self.connection.execute(

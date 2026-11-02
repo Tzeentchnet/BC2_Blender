@@ -54,10 +54,8 @@ from .core.io import safe_cache_name
 from .core.level import (
     LevelResolver,
     MeshDefinition,
-    PC_CHARACTER_SHADER_PATH,
     SurfaceShader,
     discover_pc_levels,
-    index_pc_character_shader_archive,
     index_pc_level_archives,
     pc_level_archive_paths,
 )
@@ -110,14 +108,6 @@ _CORE_GAMEPLAY_ANIMATION_PATHS = (
     "characters/animations/bset_rif/3p/runbackward.res",
     "characters/animations/bset_rif/3p/sneakforward.res",
 )
-_PC_MODULAR_SHADER_FALLBACKS = (
-    (
-        "Dist/win32/levels/mp_004/level-00.fbrb",
-        "Levels/mp_004/shaders/Dx11_Single.res",
-    ),
-)
-
-
 @dataclass
 class _SourceMaterialContext:
     import_textures: bool
@@ -127,7 +117,8 @@ class _SourceMaterialContext:
     material_cache: dict[str, object]
     image_cache: dict[str, tuple[object, object]]
     diagnostics: list[dict[str, str]]
-    loaded_shader_paths: set[str]
+    loaded_shader_assets: set[int]
+    material_sources: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -1227,6 +1218,7 @@ def _create_mesh_objects(
             subset.uv_offsets,
             separators=(",", ":"),
         )
+        mesh["bc2_uv_source"] = subset.uv_source
         mesh["bc2_palette"] = json.dumps(
             subset.palette,
             separators=(",", ":"),
@@ -1777,6 +1769,11 @@ def _mesh_component_assets(
         mesh_raw,
         mesh_asset["platform"],
         include_z_only=settings.include_z_only,
+        retain_pc_vehicle_uv_candidates=(
+            component.mesh_set_path.casefold().startswith(
+                "objects/vehicles/"
+            )
+        ),
     )
     return mesh_set_asset, mesh_set_raw, mesh_asset, parsed
 
@@ -3254,6 +3251,10 @@ def _combined_level_mesh(
         [subset.uv_offsets for subset in parsed.subsets],
         separators=(",", ":"),
     )
+    mesh["bc2_uv_sources"] = json.dumps(
+        [subset.uv_source for subset in parsed.subsets],
+        separators=(",", ":"),
+    )
     return mesh
 
 
@@ -3350,10 +3351,15 @@ def _diagnostic_material(
 def _texture_role(
     path: str,
     parameters: tuple[str, ...] = (),
+    dimension: int | None = None,
 ) -> str:
     stem = PurePosixPath(path).name.casefold()
     if stem.endswith(".res"):
         stem = stem[:-4]
+    if dimension in {9, 10}:
+        return "ENVIRONMENT"
+    if stem.startswith("envmap_") or "environmentmap" in stem:
+        return "ENVIRONMENT"
     if (
         stem.startswith("nm_")
         or stem.endswith("_nm")
@@ -3367,7 +3373,7 @@ def _texture_role(
         or "mask" in stem
     ):
         return "MASK"
-    if "decal" in stem and "atlas" in stem:
+    if "decal" in stem or stem.startswith("symbols_"):
         return "DECAL"
     if any(
         value in stem
@@ -3379,9 +3385,9 @@ def _texture_role(
             "_oc_rbg",
             "skyoc",
         )
-    ):
+    ) or stem.endswith("_oc"):
         return "OCCLUSION"
-    if stem.startswith("dt_") or "detail" in stem:
+    if stem.startswith("dt_") or stem.endswith("_dt") or "detail" in stem:
         return "DETAIL"
     if "noise" in stem:
         return "NOISE"
@@ -3389,7 +3395,7 @@ def _texture_role(
         return "ROUGHNESS"
     if stem.endswith(("_s", "_sp", "_spec", "_specular")):
         return "SPECULAR"
-    if stem.endswith(
+    if stem.startswith("rgb_") or stem.endswith(
         (
             "_d",
             "_diff",
@@ -3397,6 +3403,7 @@ def _texture_role(
             "_albedo",
             "_color",
             "_c",
+            "_cm",
         )
     ):
         return "COLOR"
@@ -3454,7 +3461,11 @@ def _verified_detail_repeat(
 
 def _binding_roles(bindings):
     roles = [
-        _texture_role(binding.path, binding.parameters)
+        _texture_role(
+            binding.path,
+            binding.parameters,
+            binding.dimension,
+        )
         for binding in bindings
     ]
     normal_identities = {
@@ -3514,7 +3525,13 @@ def _is_vehicle_glass_surface(surface: SurfaceShader) -> bool:
         .replace("\\", "/")
         .casefold()
     )
-    return "/vehicles/" in identity and "glass" in identity
+    surface_name = _normalized_surface_name(surface.name)
+    return "/vehicles/" in identity and (
+        "glass" in identity
+        or "window" in surface_name
+        or "windshield" in surface_name
+        or "windscreen" in surface_name
+    )
 
 
 def _surface_binding_roles(surface: SurfaceShader, bindings):
@@ -3616,6 +3633,65 @@ def _surface_binding_uv_map(
                 return "UV3"
             return "UV1"
     return _binding_uv_map(binding.path, role)
+
+
+def _shader_variant_for_subset(
+    shader_material,
+    vertex_stride: int | None,
+    uv_offsets: tuple[int, ...],
+):
+    if vertex_stride is None or not uv_offsets:
+        return None
+    candidates = shader_material.compatible_variants(vertex_stride)
+    if not candidates:
+        return None
+    available = set(uv_offsets)
+    return max(
+        candidates,
+        key=lambda variant: (
+            sum(
+                route.uv_offset in available
+                for route in variant.texture_routes
+            ),
+            sum(
+                offset in available
+                for offset in (
+                    variant.layout.uv_offsets
+                    if variant.layout is not None
+                    else ()
+                )
+            ),
+            len(variant.texture_routes),
+        ),
+    )
+
+
+def _shader_binding_route(variant, binding: ShaderTextureBinding):
+    if variant is None:
+        return None
+    routes = tuple(
+        route
+        for route in variant.texture_routes
+        if route.texture_index == binding.slot
+    )
+    if not routes:
+        return None
+    identities = {
+        (route.uv_offset, route.scale, route.offset)
+        for route in routes
+    }
+    return routes[0] if len(identities) == 1 else None
+
+
+def _uv_map_for_offset(
+    uv_offsets: tuple[int, ...],
+    offset: int,
+) -> str | None:
+    try:
+        index = uv_offsets.index(offset)
+    except ValueError:
+        return None
+    return "UVMap" if index == 0 else f"UV{index}"
 
 
 def _surface_binding_uv_scale(
@@ -4713,6 +4789,7 @@ def _surface_uses_alpha(surface: SurfaceShader) -> bool:
 def _find_shader_material(
     shader_database: ShaderDatabase,
     key: str,
+    shader_partition: str = "",
 ):
     material = shader_database.material(key)
     if material is not None:
@@ -4723,6 +4800,23 @@ def _find_shader_material(
         material = shader_database.material(alias)
         if material is not None:
             return material, material.key, "cheap_alias"
+    partitions = [shader_partition]
+    partition_prefix, partition_separator, partition_name = (
+        shader_partition.rpartition("/")
+    )
+    if (
+        partition_separator
+        and partition_name.casefold().startswith("cheap_")
+    ):
+        partitions.append(
+            partition_prefix
+            + "/"
+            + partition_name[len("cheap_") :]
+        )
+    for partition in partitions:
+        matches = shader_database.materials_for_shader_partition(partition)
+        if len(matches) == 1:
+            return matches[0], matches[0].key, "shader_reference_suffix"
     return None, key, "missing"
 
 
@@ -4735,8 +4829,16 @@ def _surface_material(
     image_cache: dict[str, tuple[object, object]],
     diagnostics: list[dict[str, str]],
     import_textures: bool,
+    *,
+    vertex_stride: int | None = None,
+    uv_offsets: tuple[int, ...] = (),
 ):
-    cache_key = "surface|" + surface.database_key.casefold()
+    declaration_key = (
+        f"|{vertex_stride}|{','.join(str(value) for value in uv_offsets)}"
+    )
+    cache_key = (
+        "surface|" + surface.database_key.casefold() + declaration_key
+    )
     cached = material_cache.get(cache_key)
     if cached is not None:
         return cached
@@ -4771,6 +4873,7 @@ def _surface_material(
     shader_material, resolved_shader_key, key_match = _find_shader_material(
         shader_database,
         surface.database_key,
+        surface.shader_partition,
     )
     if shader_material is None:
         material.diffuse_color = (0.8, 0.05, 0.8, 1.0)
@@ -4794,6 +4897,51 @@ def _surface_material(
         if character_surface
         else _surface_binding_roles(surface, shader_material.textures)
     )
+    shader_variant = (
+        None
+        if character_surface
+        else _shader_variant_for_subset(
+            shader_material,
+            vertex_stride,
+            uv_offsets,
+        )
+    )
+    binding_routes = tuple(
+        (
+            None
+            if character_surface
+            else _shader_binding_route(shader_variant, binding)
+        )
+        for binding in shader_material.textures
+    )
+    if shader_variant is not None:
+        material["bc2_shader_variant"] = json.dumps(
+            {
+                "table_index": shader_variant.table_index,
+                "vertex_shader_index": shader_variant.vertex_shader_index,
+                "pixel_shader_index": shader_variant.pixel_shader_index,
+                "layout_stride": (
+                    shader_variant.layout.stride
+                    if shader_variant.layout is not None
+                    else None
+                ),
+                "layout_uv_offsets": (
+                    list(shader_variant.layout.uv_offsets)
+                    if shader_variant.layout is not None
+                    else []
+                ),
+                "route_error": shader_variant.route_error,
+            },
+            separators=(",", ":"),
+        )
+        if shader_variant.route_error:
+            diagnostics.append(
+                {
+                    "code": "shader_uv_route_unsupported",
+                    "reference": surface.database_key,
+                    "message": shader_variant.route_error,
+                }
+            )
     layered_static = not character_surface and any(
         role == "OCCLUSION"
         and any(
@@ -4809,8 +4957,22 @@ def _surface_material(
                 "path": binding.path,
                 "parameters": list(binding.parameters),
                 "role": role,
+                "dimension": binding.dimension,
+                "route": (
+                    {
+                        "uv_offset": route.uv_offset,
+                        "scale": list(route.scale),
+                        "offset": list(route.offset),
+                    }
+                    if route is not None
+                    else None
+                ),
             }
-            for binding, role in zip(shader_material.textures, roles)
+            for binding, role, route in zip(
+                shader_material.textures,
+                roles,
+                binding_routes,
+            )
         ],
         separators=(",", ":"),
     )
@@ -4819,8 +4981,8 @@ def _surface_material(
     normal_format = None
     normal_path = None
     uv_nodes = {}
-    for position, (binding, role) in enumerate(
-        zip(shader_material.textures, roles)
+    for position, (binding, role, route) in enumerate(
+        zip(shader_material.textures, roles, binding_routes)
     ):
         asset = _texture_asset(
             repository,
@@ -4902,7 +5064,24 @@ def _surface_material(
             binding.parameters,
             separators=(",", ":"),
         )
-        uv_map = (
+        routed_uv_map = (
+            _uv_map_for_offset(uv_offsets, route.uv_offset)
+            if route is not None
+            else None
+        )
+        if route is not None and routed_uv_map is None:
+            diagnostics.append(
+                {
+                    "code": "shader_uv_route_unavailable",
+                    "reference": binding.path,
+                    "message": (
+                        f"Shader routes t{binding.slot} to vertex byte "
+                        f"{route.uv_offset}, which is not decoded on this "
+                        "mesh subset"
+                    ),
+                }
+            )
+        uv_map = routed_uv_map or (
             _character_binding_uv_map(surface, role)
             if character_surface
             else _surface_binding_uv_map(
@@ -4920,14 +5099,42 @@ def _surface_material(
             uv_node.label = uv_map
             uv_node.location = (-1050, 400 - len(uv_nodes) * 180)
             uv_nodes[uv_map] = uv_node
-        uv_scale = (
-            _character_binding_uv_scale(surface, role)
-            if character_surface
-            else _surface_binding_uv_scale(surface, binding)
-        )
-        if uv_scale == (1.0, 1.0):
-            links.new(uv_node.outputs["UV"], node.inputs["Vector"])
+        route_scale = route.scale if route is not None else (None, None)
+        if route is not None and any(
+            value is None
+            for value in (*route.scale, *route.offset)
+        ):
+            diagnostics.append(
+                {
+                    "code": "shader_uv_transform_unsupported",
+                    "reference": binding.path,
+                    "message": (
+                        f"Shader route for t{binding.slot} uses a dynamic "
+                        "UV transform; the physical source channel is "
+                        "preserved and the existing transform fallback is "
+                        "used"
+                    ),
+                }
+            )
+        if route is not None and all(
+            value is not None for value in route_scale
+        ):
+            uv_scale = tuple(float(value) for value in route_scale)
         else:
+            uv_scale = (
+                _character_binding_uv_scale(surface, role)
+                if character_surface
+                else _surface_binding_uv_scale(surface, binding)
+            )
+        route_offset = route.offset if route is not None else (None, None)
+        uv_offset = (
+            tuple(float(value) for value in route_offset)
+            if route is not None
+            and all(value is not None for value in route_offset)
+            else (0.0, 0.0)
+        )
+        vector_output = uv_node.outputs["UV"]
+        if uv_scale != (1.0, 1.0):
             scale_node = nodes.new("ShaderNodeVectorMath")
             scale_node.name = (
                 f"BC2 {role} UV x{uv_scale[0]:g},x{uv_scale[1]:g}"
@@ -4942,9 +5149,30 @@ def _surface_material(
                 1.0,
             )
             links.new(uv_node.outputs["UV"], scale_node.inputs[0])
-            links.new(scale_node.outputs["Vector"], node.inputs["Vector"])
+            vector_output = scale_node.outputs["Vector"]
+        if uv_offset != (0.0, 0.0):
+            offset_node = nodes.new("ShaderNodeVectorMath")
+            offset_node.name = (
+                f"BC2 {role} UV +{uv_offset[0]:g},+{uv_offset[1]:g}"
+            )
+            offset_node.label = (
+                f"{role} UV +{uv_offset[0]:g}, +{uv_offset[1]:g}"
+            )
+            offset_node.operation = "ADD"
+            offset_node.inputs[1].default_value = (
+                uv_offset[0],
+                uv_offset[1],
+                0.0,
+            )
+            links.new(vector_output, offset_node.inputs[0])
+            vector_output = offset_node.outputs["Vector"]
+        links.new(vector_output, node.inputs["Vector"])
         node["bc2_uv_map"] = uv_map
         node["bc2_uv_scale"] = uv_scale
+        node["bc2_uv_offset"] = uv_offset
+        node["bc2_uv_route_source"] = (
+            "shader" if routed_uv_map is not None else "fallback"
+        )
         texture_nodes.append((binding, role, node))
         if role == "NORMAL" and normal_node is None:
             normal_node = node
@@ -5056,46 +5284,16 @@ def _source_material_context(
     settings: BC2Settings,
 ) -> _SourceMaterialContext:
     import_textures = _loads_source_textures(settings)
-    material_archives = tuple(preferred_archives)
-    shader_database = None
-    shader_database_path = None
-    diagnostics = []
-    if import_textures and repository.kind == "PC_ISO":
-        shader_archive = index_pc_character_shader_archive(repository)
-        material_archives = tuple(
-            dict.fromkeys((*preferred_archives, shader_archive))
-        )
-        _, shader_raw = repository.read_asset_path(
-            PC_CHARACTER_SHADER_PATH,
-            max_size=1 << 30,
-            preferred_archives=material_archives,
-        )
-        shader_database = parse_shader_database(shader_raw)
-        shader_database_path = PC_CHARACTER_SHADER_PATH
-        if shader_database.trailing_bytes:
-            diagnostics.append(
-                {
-                    "code": "shader_database_trailing_bytes",
-                    "reference": PC_CHARACTER_SHADER_PATH,
-                    "message": (
-                        f"{shader_database.trailing_bytes} unparsed byte(s) "
-                        "remain after the shader database"
-                    ),
-                }
-            )
     return _SourceMaterialContext(
         import_textures=import_textures,
-        material_archives=material_archives,
-        shader_database=shader_database,
-        shader_database_path=shader_database_path,
+        material_archives=tuple(preferred_archives),
+        shader_database=None,
+        shader_database_path=None,
         material_cache={},
         image_cache={},
-        diagnostics=diagnostics,
-        loaded_shader_paths=(
-            {PC_CHARACTER_SHADER_PATH.casefold()}
-            if shader_database_path
-            else set()
-        ),
+        diagnostics=[],
+        loaded_shader_assets=set(),
+        material_sources={},
     )
 
 
@@ -5115,37 +5313,69 @@ def _merge_shader_databases(
     return ShaderDatabase(
         tuple(materials),
         first.trailing_bytes + second.trailing_bytes,
+        tuple(dict.fromkeys((*first.layouts, *second.layouts))),
     )
 
 
 def _extend_source_shader_database(
     repository,
     material_context: _SourceMaterialContext,
-    archive_path: str,
-    shader_path: str,
+    shader_asset,
+    surfaces: tuple[SurfaceShader, ...],
 ) -> bool:
-    key = shader_path.casefold()
-    if key in material_context.loaded_shader_paths:
+    asset_id = int(shader_asset["id"])
+    if asset_id in material_context.loaded_shader_assets:
         return False
-    material_context.loaded_shader_paths.add(key)
-    if repository.catalog.archive_by_path(archive_path) is None:
-        return False
-    repository.index_archive_path(archive_path)
-    shader_asset = repository.catalog.find_asset(
-        shader_path,
-        (archive_path,),
-    )
-    if shader_asset is None:
-        return False
-    _, shader_raw = repository.read_asset(
-        int(shader_asset["id"]),
-        max_size=1 << 30,
-    )
-    database = parse_shader_database(shader_raw)
-    material_context.shader_database = _merge_shader_databases(
-        material_context.shader_database,
-        database,
-    )
+    material_context.loaded_shader_assets.add(asset_id)
+    asset, database = repository.read_shader_database(asset_id)
+    archive_path = str(asset["archive_path"])
+    shader_path = str(asset["path"])
+    source = f"{archive_path}|{shader_path}"
+    selected = []
+    selected_keys = set()
+    for surface in surfaces:
+        material, resolved_key, _ = _find_shader_material(
+            database,
+            surface.database_key,
+            surface.shader_partition,
+        )
+        if material is None:
+            continue
+        normalized_key = material.key.casefold()
+        existing = (
+            material_context.shader_database.material(material.key)
+            if material_context.shader_database is not None
+            else None
+        )
+        if existing is None and normalized_key not in selected_keys:
+            selected.append(material)
+            selected_keys.add(normalized_key)
+            material_context.material_sources[normalized_key] = source
+        elif existing is not None and existing != material:
+            existing_source = material_context.material_sources.get(
+                normalized_key,
+                "another shader database",
+            )
+            material_context.diagnostics.append(
+                {
+                    "code": "conflicting_shader_material",
+                    "reference": resolved_key,
+                    "message": (
+                        "Material key is defined differently by "
+                        f"{existing_source} and {source}; the higher-ranked "
+                        "source was retained"
+                    ),
+                }
+            )
+    if selected:
+        material_context.shader_database = _merge_shader_databases(
+            material_context.shader_database,
+            ShaderDatabase(
+                tuple(selected),
+                database.trailing_bytes,
+                database.layouts,
+            ),
+        )
     material_context.material_archives = tuple(
         dict.fromkeys(
             (*material_context.material_archives, archive_path)
@@ -5160,7 +5390,7 @@ def _extend_source_shader_database(
                 ).split(";")
                 if path
             ),
-            shader_path,
+            source,
         )
     )
     if database.trailing_bytes:
@@ -5174,14 +5404,22 @@ def _extend_source_shader_database(
                 ),
             }
         )
-    return True
+    return bool(selected)
 
 
 def _ensure_source_shader_materials(
     repository,
     material_context: _SourceMaterialContext,
-    shader_keys: tuple[str, ...],
+    surfaces: tuple[SurfaceShader, ...],
+    mesh_path: str | None = None,
+    preferred_archives: tuple[str, ...] = (),
 ):
+    shader_keys = tuple(
+        dict.fromkeys(surface.database_key for surface in surfaces)
+    )
+    surface_by_key = {
+        surface.database_key.casefold(): surface for surface in surfaces
+    }
     if (
         repository.kind != "PC_ISO"
         or not material_context.import_textures
@@ -5194,33 +5432,35 @@ def _ensure_source_shader_materials(
         return (
             database is None
             or any(
-                _find_shader_material(database, key)[0] is None
+                _find_shader_material(
+                    database,
+                    key,
+                    surface_by_key[key.casefold()].shader_partition,
+                )[0]
+                is None
                 for key in shader_keys
             )
         )
 
     if not unresolved():
         return
-    indexed = repository.catalog.search_assets(
-        query="Dx11_Single.res",
-        limit=500,
+    lookup_keys = []
+    for key in shader_keys:
+        lookup_keys.append(key)
+        prefix, separator, name = key.rpartition("/")
+        if separator and name.casefold().startswith("cheap_"):
+            lookup_keys.append(prefix + "/" + name[len("cheap_") :])
+    candidates = repository.shader_database_candidates(
+        tuple(dict.fromkeys(lookup_keys)),
+        preferred_archives or material_context.material_archives,
+        mesh_path,
     )
-    candidates = [
-        (str(asset["archive_path"]), str(asset["path"]))
-        for asset in indexed
-    ]
-    candidates.extend(_PC_MODULAR_SHADER_FALLBACKS)
-    seen = set()
-    for archive_path, shader_path in candidates:
-        key = shader_path.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
+    for shader_asset in candidates:
         _extend_source_shader_database(
             repository,
             material_context,
-            archive_path,
-            shader_path,
+            shader_asset,
+            surfaces,
         )
         if not unresolved():
             return
@@ -5308,7 +5548,16 @@ def _resolve_mesh_subset_materials(
     _ensure_source_shader_materials(
         repository,
         material_context,
-        tuple(surface.database_key for surface in definition.surfaces),
+        definition.surfaces,
+        str(mesh_set_asset["path"]),
+        tuple(
+            dict.fromkeys(
+                (
+                    str(mesh_set_asset["archive_path"]),
+                    *preferred_archives,
+                )
+            )
+        ),
     )
     material_context.diagnostics.extend(
         {
@@ -5350,8 +5599,19 @@ def _resolve_mesh_subset_materials(
                 material_context.image_cache,
                 material_context.diagnostics,
                 material_context.import_textures,
+                vertex_stride=subset.vertex_stride,
+                uv_offsets=subset.uv_offsets,
             )
             material["bc2_subset_match"] = match
+            source_key = str(
+                material.get(
+                    "bc2_resolved_shader_key",
+                    surface.database_key,
+                )
+            ).casefold()
+            source = material_context.material_sources.get(source_key)
+            if source:
+                material["bc2_shader_database_source"] = source
         materials.append(material)
 
     resolved_materials = sum(
@@ -5416,7 +5676,11 @@ def _terrain_shader_texture_paths(
         if not material.key.casefold().startswith(prefix):
             continue
         for binding in material.textures:
-            role = _texture_role(binding.path, binding.parameters)
+            role = _texture_role(
+                binding.path,
+                binding.parameters,
+                binding.dimension,
+            )
             if role in {
                 "NORMAL",
                 "MASK",
@@ -5836,6 +6100,11 @@ def _create_level_scene(
                 raw,
                 asset["platform"],
                 include_z_only=settings.include_z_only,
+                retain_pc_vehicle_uv_candidates=(
+                    definition.mesh_data_path.casefold().startswith(
+                        "objects/vehicles/"
+                    )
+                ),
             )
             mesh = _combined_level_mesh(
                 parsed,
@@ -5903,6 +6172,8 @@ def _create_level_scene(
                     image_cache,
                     diagnostics,
                     load_source_textures,
+                    vertex_stride=subset.vertex_stride,
+                    uv_offsets=subset.uv_offsets,
                 )
                 shader_key = surface.database_key
             mesh.materials.append(material)
@@ -6781,6 +7052,11 @@ class BC2_OT_import_selected(Operator):
                     raw,
                     asset["platform"],
                     include_z_only=settings.include_z_only,
+                    retain_pc_vehicle_uv_candidates=(
+                        str(source_asset["path"]).casefold().startswith(
+                            "objects/vehicles/"
+                        )
+                    ),
                 )
                 if (
                     asset_type == "SkinnedMeshSet"

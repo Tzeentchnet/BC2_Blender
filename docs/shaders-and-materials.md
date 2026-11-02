@@ -44,9 +44,9 @@ texture behavior documented below.
 ## PC DX11 shader database
 
 The implemented reader parses parameter groups, material keys, texture binding
-indices, compiled vertex/pixel shader records, and `RDEF` resource bindings.
-Shader declarations and non-reflection bytecode chunks are structurally
-consumed but are not retained. On the tested `MP_001` database:
+indices, compiled vertex/pixel shader records, `RDEF` resource bindings, and
+the block-5 vertex-layout/variant relationships. On the tested `MP_001`
+database:
 
 | Measurement | Result |
 |---|---:|
@@ -57,9 +57,60 @@ consumed but are not retained. On the tested `MP_001` database:
 Material lookup is case-insensitive. Binding indices are preserved; list order
 is not substituted for the original `tN` slot. Each material binding also
 retains all reflected pixel-shader parameter names observed across its linked
-rendering permutations. This distinguishes names such as
+rendering permutations and the reflected resource dimension. Indices above
+255 preserve their source value while their low byte identifies the actual
+DX11 slot; this is how bindings such as `t261` are associated with reflected
+cube resource `t5` without losing source metadata. This distinguishes names
+such as
 `texture_Texture`, `texture_RepeatingNormalMap`,
 `texture_Layer1_Detail2`, and `texture_OcclusionTexture`.
+
+Standard block-5 layouts retain their reference, declared stride, ordered
+field codes, physical byte offsets, and packed input components. The reader
+implements the field widths observed in the indexed retail databases and
+fails explicitly on an unknown standard-layout field code rather than
+silently shifting every later field. Nonstandard layout types remain opaque.
+Material variants retain their block-table index, vertex shader, pixel shader,
+parameter group, and linked layout.
+
+The bounded pure-Python DXBC analyzer is **implemented**, but it is not a
+general decompiler. It follows texture sample coordinates through direct
+moves, component swizzles, source modifiers, and affine `mul`/`add`/`mad`
+chains from pixel inputs, through matching vertex outputs, to vertex input
+components. The input signature and block-5 layout then map those components
+to physical vertex byte offsets. Immediate scale/offset values are retained.
+Conditional branches are merged: if one path zeros an output while the other
+forwards a coordinate, the physical origin is retained but the transform is
+marked unknown. Saturation, absolute-value modifiers, dynamic indexing, and
+unsupported provenance follow the same conservative rule where possible; they
+are never presented as exact affine transforms. An unimplemented instruction
+invalidates live temporary-register provenance, preventing a later sample from
+being assigned a stale physical source.
+
+### Material-database provenance and cache
+
+Standalone material lookup no longer starts from `MP_001`, scans databases in
+path order, or uses a hard-coded `MP_004` fallback. Candidate databases are
+ranked by:
+
+1. the selected mesh/archive level;
+2. archives containing another indexed copy of the same virtual mesh path;
+3. the persistent exact material-key index;
+4. deterministic remaining `Dx11_Single.res` discovery.
+
+An exact key remains preferred. If a mesh-set key is absent because the retail
+database compiled the same referenced shader beneath a component mesh prefix,
+the importer may use a **unique match of the complete shader-partition
+suffix**. A last-name-only match is not allowed, and multiple complete-suffix
+matches remain unresolved.
+
+The source-fingerprint catalog records each scanned shader-database asset and
+its case-insensitive material keys. Reindexing an archive deletes dependent
+rows through foreign keys. Parsed databases are cached by asset ID for the
+repository session. The selected archive/resource pair is preserved on each
+Blender material as `bc2_shader_database_source`; differing definitions found
+while multiple candidate databases are loaded produce a diagnostic rather
+than silently replacing the higher-ranked source.
 
 Three tested Barrack DBX surfaces use `cheap_Wood`, `cheap_WoodPlanks`, and
 `cheap_MetalStairs` partition names while the same mesh's shader database keys
@@ -200,16 +251,18 @@ The implemented graph for the verified `Nm_General_001` binding:
 9. add Geometry Normal and normalize;
 10. connect the normalized result to Principled BSDF Normal.
 
-The importer caches one material per shader key and one native DDS image per
-asset path. Each material stores its shader key, surface reference, binding
-indices, reflected parameter names, source paths, inferred roles, color model,
-and normal model as custom properties. All bindings receive image nodes even
-when their meaning remains unclassified.
+The importer caches one material per shader key plus decoded physical
+declaration and one native DDS image per asset path. Each material stores its
+shader key, selected variant/database source, surface reference, binding
+indices, reflected parameter names, source paths, inferred roles, physical
+routes/transforms, color model, and normal model as custom properties. All
+bindings receive image nodes even when their meaning remains unclassified.
 
 Role resolution combines two independent evidence sources:
 
-- source texture families such as `Nm_`, `Dt_`, `Msk_`, `OcRGB`,
-  `Occlusion`, roughness, specular, and common color suffixes;
+- source texture families such as `Nm_`, prefix/suffix `Dt`, `Msk_`,
+  suffix `Oc`, `OcRGB`, `Occlusion`, `RGB_`, `_CM`, roughness, specular,
+  symbol/decal, environment-map, and other common color suffixes;
 - reflected pixel-shader parameter names from the exact material
   permutations.
 
@@ -367,13 +420,12 @@ component metadata, `StandIdle`, and `RunForward` persist after save/reopen.
 ## Standalone composite-vehicle materials
 
 A standalone vehicle entity has no selected level from which to infer a DX11
-database, while shared archives contain its mesh, shader descriptors, and
-textures but not compiled level material records. The importer first reuses
-already indexed `Dx11_Single.res` databases. It uses `MP_001` as the
-deterministic shared-character source and, when required keys remain missing,
-loads the verified `MP_004` database as a standalone modular fallback.
-Databases are merged by case-insensitive material key, and their archives are
-added to texture lookup precedence.
+database, while shared archives can contain its mesh, shader descriptors, and
+textures but not the matching compiled level material record. The importer
+uses the provenance-ranked lookup above, adds the selected database archive to
+texture lookup precedence, and retains the exact database source. This is
+shared behavior for direct mesh sets and modular vehicle assemblies, not a
+vehicle-name or fixed-level table.
 
 The AH60's `MP_004` records exactly match its composite mesh/shader keys. The
 validated import resolves 11 visible surface families, including Main, Wreck,
@@ -382,6 +434,27 @@ metal, cockpit/interior, glass, lights, minigun, and blurred rotors, and loads
 pipeline as complete maps. This solves source bindings, not vehicle runtime
 behavior; rotor animation, damage switching, lighting constants, and exact
 blend arithmetic remain outside the current scope.
+
+### Verified Corsair and UAV generic routes
+
+These two reported failures are resolved by shared shader evidence rather
+than family overrides:
+
+- PC retail Corsair material keys resolve from the `SP_01` database. The
+  `_CM` suffix is recognized as color, reflected cube dimension `9` is
+  retained as `ENVIRONMENT`, and the standard stride-48 variant routes
+  `corsair_nm`, `Nm_General_002`, and `corsair_cm` through byte 24. It routes
+  `VehicleDecals` through byte 28. The repeated general normal uses immediate
+  scale `(128, 64)`.
+- PC retail UAV material keys occur in several level databases. Compatible
+  variants route both `UAV_D` and `Dt_Dirt_002` through byte 28; the latter
+  retains its immediate `(8, 8)` repeat. With the decoded
+  `24/28/32/40` subset declaration, byte 28 becomes Blender `UV1`.
+
+The route is stored as a physical source offset and mapped to
+`UVMap`/`UV1`/... only after the target subset declaration is known. Material
+cache keys include stride and physical offset order so the same shader key
+cannot reuse a graph built for an incompatible declaration.
 
 ### Verified AH60 Main, glass, interior, and minigun graphs
 
@@ -489,8 +562,10 @@ reconstructed.
 
 Vehicle glass outside the exact AH60 and MI28 families no longer falls
 through to an opaque generic material. The **implemented** fallback requires
-both vehicle identity and a glass surface/shader identity; it is not applied
-to unrelated materials that merely contain one of those terms.
+vehicle identity plus a glass shader/path or a surface name identifying
+glass, a window, a windshield, or a windscreen. This includes retail Cobra
+`Windows`/`Interior_Windows` and Vodnik `Windows_Inside`; it is not applied to
+nonvehicle materials.
 
 Sky or environment textures, and vehicle-glass binding indices at or above
 `256`, are retained with the `ENVIRONMENT` role instead of being promoted to
