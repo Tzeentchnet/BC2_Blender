@@ -70,28 +70,18 @@ class GrannyCurve:
                 for axis in range(self.dimension)
             )
         if self.degree == 2:
-            center = min(max(knot_index, 2), len(self.knots) - 2)
-            if center < 2 or center + 1 >= len(self.knots):
-                index = min(max(knot_index, 1), len(self.knots) - 1)
-                first_time = self.knots[index - 1]
-                second_time = self.knots[index]
-                width = second_time - first_time
-                blend = (
-                    0.0
-                    if abs(width) < 1e-12
-                    else (time - first_time) / width
-                )
-                blend = max(0.0, min(1.0, blend))
-                first = self.controls[index - 1]
-                second = self.controls[index]
-                return tuple(
-                    (1.0 - blend) * first[axis] + blend * second[axis]
-                    for axis in range(self.dimension)
+            center = knot_index
+
+            def index(relative_index: int) -> int:
+                return min(
+                    max(center + relative_index, 0),
+                    len(self.knots) - 1,
                 )
 
-            knot_2, knot_1, knot, knot1 = self.knots[
-                center - 2 : center + 2
-            ]
+            knot_2 = self.knots[index(-2)]
+            knot_1 = self.knots[index(-1)]
+            knot = self.knots[index(0)]
+            knot1 = self.knots[index(1)]
 
             def divide(numerator: float, denominator: float) -> float:
                 return (
@@ -107,9 +97,9 @@ class GrannyCurve:
             current_weight = lower * upper_2
             previous_weight = combined - current_weight
             earlier_weight = 1.0 - combined
-            earlier = self.controls[center - 2]
-            previous = self.controls[center - 1]
-            current = self.controls[center]
+            earlier = self.controls[index(-2)]
+            previous = self.controls[index(-1)]
+            current = self.controls[index(0)]
             return tuple(
                 earlier_weight * earlier[axis]
                 + previous_weight * previous[axis]

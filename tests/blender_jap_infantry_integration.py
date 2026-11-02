@@ -211,6 +211,19 @@ def _eyelid_vertex_indices(objects):
     return result
 
 
+def _quaternion_angle(left, right):
+    dot = abs(left.dot(right))
+    return 2.0 * math.acos(max(-1.0, min(1.0, dot)))
+
+
+def _matrix_error(left, right):
+    return max(
+        abs(left[row][column] - right[row][column])
+        for row in range(4)
+        for column in range(4)
+    )
+
+
 def main():
     arguments = _arguments()
     output = Path(arguments.output)
@@ -305,6 +318,70 @@ def main():
                     raise AssertionError(
                         f"{name} used the wrong additive base pose"
                     )
+
+        walk_backward = actions["WalkBackward"]
+        walk_frame_count = (
+            round(
+                float(walk_backward["bc2_duration_seconds"])
+                / float(walk_backward["bc2_time_step_seconds"])
+            )
+            + 1
+        )
+        if (
+            walk_frame_count != 29
+            or int(walk_backward["bc2_source_fps"]) != 30
+            or tuple(walk_backward.frame_range) != (1.0, 29.0)
+        ):
+            raise AssertionError(
+                "WalkBackward does not preserve its authored 30 Hz timing"
+            )
+        armature.animation_data.action = walk_backward
+        bpy.context.scene.frame_set(1)
+        bpy.context.view_layer.update()
+        first_toe_rotation = (
+            armature.pose.bones["RightToeBase"]
+            .rotation_quaternion
+            .copy()
+        )
+        first_hips_basis = armature.pose.bones["Hips"].matrix_basis.copy()
+        bpy.context.scene.frame_set(28)
+        bpy.context.view_layer.update()
+        previous_toe_rotation = (
+            armature.pose.bones["RightToeBase"]
+            .rotation_quaternion
+            .copy()
+        )
+        bpy.context.scene.frame_set(29)
+        bpy.context.view_layer.update()
+        final_toe_rotation = (
+            armature.pose.bones["RightToeBase"]
+            .rotation_quaternion
+            .copy()
+        )
+        final_hips_basis = armature.pose.bones["Hips"].matrix_basis.copy()
+        toe_final_step_angle = _quaternion_angle(
+            previous_toe_rotation,
+            final_toe_rotation,
+        )
+        toe_loop_angle = _quaternion_angle(
+            first_toe_rotation,
+            final_toe_rotation,
+        )
+        hips_loop_error = _matrix_error(
+            first_hips_basis,
+            final_hips_basis,
+        )
+        if (
+            toe_final_step_angle >= 0.3
+            or toe_loop_angle >= 1e-4
+            or hips_loop_error >= 2e-4
+        ):
+            raise AssertionError(
+                "WalkBackward has a distorted quadratic endpoint: "
+                f"toe step={toe_final_step_angle}, "
+                f"toe loop={toe_loop_angle}, "
+                f"hips loop={hips_loop_error}"
+            )
 
         armature.animation_data.action = actions["DeltaBlink"]
         blink = actions["DeltaBlink"]
@@ -469,6 +546,9 @@ def main():
             "dead_pose2_maximum_eyelid_displacement": (
                 maximum_eyelid_displacement
             ),
+            "walk_backward_final_toe_step_angle": toe_final_step_angle,
+            "walk_backward_toe_loop_angle": toe_loop_angle,
+            "walk_backward_hips_loop_error": hips_loop_error,
             "catalog_complete": related.catalog_complete,
             "issues": list(related.issues),
             "output": str(output),

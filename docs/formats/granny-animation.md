@@ -271,6 +271,13 @@ synthetic `D3I1K32fC32f` fixture and **verified** by finite source-step samples
 from all six Raven clips. Quaternion results are normalized. Unsupported
 codecs and degrees fail explicitly instead of producing identity motion.
 
+Degree 2 uses the same first-knot-strictly-greater convention with controls
+`i-2..i` and knots `i-2..i+1`. Relative knot and control indices, rather than
+the interval index itself, are clamped at both curve boundaries. This detail
+is **implemented** by a synthetic nonlinear endpoint fixture and **verified**
+against the retail `WalkBackward` loop: clamping the interval index skipped
+the final control near the boundary and produced the reported toe/body snap.
+
 Time-varying scale/shear codecs remain unsupported. Blender Actions key the
 decomposed scale for representable constant matrices and reject transforms
 with a reconstruction residual of `1e-5` or greater rather than silently
@@ -312,6 +319,14 @@ Blender pose-bone deltas. The Blender 5.2 Action uses a slot, a keyframe layer,
 and a channel bag. Translation, quaternion, and scale F-Curves use linear
 interpolation between native samples, and quaternion signs are made continuous.
 Root motion is retained.
+
+The imported core locomotion Actions retain raw resource timing. The verified
+walk clips have a duration of about 0.9333 seconds and 29 inclusive samples at
+30 Hz; the run clips have a duration of about 0.6 seconds and 19 inclusive
+samples. This is **verified resource behavior**, not a claim that the runtime
+soldier graph always plays each clip at that fixed rate. No fixed speed
+multiplier was observed in the rifle tree, and movement-driven phase/rate
+behavior remains outside the bounded preview import.
 
 For an animation with a nonempty wrapper bone-index table, the importer first
 requires the indexed skeleton-bone names to equal the transform-track names.
@@ -415,6 +430,8 @@ validation. See the [external MaxScript audit](../maxscript-reference-audit.md).
 | `StandIdle` duration / inclusive frames | about 3.0 s / 91 at 30 Hz |
 | `RunForward` duration / inclusive frames | about 0.6 s / 19 at 30 Hz |
 | transform tracks in each clip | 39 |
+| `WalkBackward` frame-29/frame-1 right-toe angle mismatch | below `1e-4` radians after quadratic boundary correction |
+| `WalkBackward` frame-29/frame-1 hips basis error | below `8.7e-5` |
 | saved-scene bind deformation error | below `2.5e-7` Blender units |
 | maximum sampled pose-matrix error | below `3.8e-6` |
 | Raven skeleton / tracks per clip | 17 / 17 |

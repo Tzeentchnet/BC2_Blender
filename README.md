@@ -126,6 +126,15 @@ reference the exact skeleton. This imports Raven's six verified clips and 14
 bounded Actions for each validated Beach Scout/Japanese infantry mesh without
 loading the hundreds of clips that can share `ske01`.
 
+The locomotion Actions preserve their resource timing rather than applying an
+invented preview slowdown: the verified walk cycles are 29 inclusive frames
+over about 0.9333 seconds at 30 Hz, while the run cycles are 19 inclusive
+frames over about 0.6 seconds. The game animation graph may phase or scale
+these clips from runtime movement parameters; that state-machine behavior is
+not reconstructed. Quadratic curve boundaries use clamped Granny control
+windows, so the inclusive loop endpoint does not skip the final control or
+distort feet and body orientation.
+
 The four facial motion resources are source-additive deltas, not complete
 rest-pose Actions. The character facial tree's replacement array identifies
 its authored `FacePose`; the importer bakes `FacePose @ delta` into each
@@ -503,7 +512,9 @@ same six character-specific Action classes plus eight core rifle locomotion
 Actions, and checks save/reopen persistence. It also compares
 `dead_pose2_Delta` against the Japanese `FacePose` baseline: maximum, p99, and
 mean mesh displacement must remain below 0.012, 0.005, and 0.0004 Blender
-units, with explicit eye/lid vertex coverage.
+units, with explicit eye/lid vertex coverage. `WalkBackward` additionally
+verifies 29 frames at 30 Hz, a final-to-first right-toe rotation mismatch below
+`1e-4` radians, and a hips loop-matrix error below `2e-4`.
 
 The equivalent AH60 vehicle integration check is:
 

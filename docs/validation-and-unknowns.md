@@ -183,7 +183,19 @@ texture-conversion, or unresolved-subset diagnostics.
   the rifle tree. Automatic import follows only the explicit shared
   `BaseSetAnimTrees` link and selects eight named rifle locomotion clips. This
   is an implemented bounded preview policy; it is not evidence that the other
-  runtime branches are understood or exporter-safe.
+  runtime branches are understood or exporter-safe. The selected walk cycles
+  are authored as 29 inclusive samples over about 0.9333 seconds at 30 Hz and
+  the run cycles as 19 samples over about 0.6 seconds. No fixed playback-speed
+  field was observed in the rifle tree; runtime movement-driven phase/rate
+  behavior remains unknown.
+- PC `WalkBackward` quadratic endpoint: retail source-step and Blender 5.2.2
+  validation showed that clamping the degree-2 interval index skipped the last
+  control at the curve boundary. Clamping relative knot/control indices
+  instead reduced the `RightToeBase` frame-29/frame-1 angle mismatch from
+  about 0.833 radians to zero, reduced its frame-28/frame-29 change from about
+  0.468 to 0.234 radians, and produced a hips loop-basis error of about
+  `8.68e-5`. These values validate the importer correction; they do not define
+  a general exporter-safe loop policy.
 - PC Japanese `combat_pose`: the 46-track, one-frame pose is referenced by the
   `SP_01` level/cutscene graphs, including Soldier Ambush and CS_02 trees, but
   not by the regular soldier entity's facial/kit graph. It is intentionally

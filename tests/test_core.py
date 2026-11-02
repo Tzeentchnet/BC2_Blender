@@ -27,6 +27,7 @@ from bc2_frostbite_importer.core.dbx import (
 )
 from bc2_frostbite_importer.core.errors import CorruptDataError
 from bc2_frostbite_importer.core.granny import (
+    GrannyCurve,
     parse_granny_animation,
     parse_granny_model,
 )
@@ -1174,6 +1175,19 @@ class GrannyTests(unittest.TestCase):
         self.assertEqual(curve.evaluate(0.0), (0.0, 0.0, 0.0))
         self.assertEqual(curve.evaluate(6.0), (60.0, 0.0, 0.0))
         self.assertAlmostEqual(curve.evaluate(3.5)[0], 25.0)
+
+    def test_quadratic_curve_clamps_boundary_control_windows(self):
+        curve = GrannyCurve(
+            "SyntheticQuadratic",
+            2,
+            (0.0, 1.0, 2.0, 3.0),
+            ((0.0,), (10.0,), (20.0,), (100.0,)),
+        )
+
+        self.assertAlmostEqual(curve.evaluate(0.5)[0], 1.25)
+        self.assertAlmostEqual(curve.evaluate(2.5)[0], 38.75)
+        self.assertGreater(curve.evaluate(2.999)[0], 99.8)
+        self.assertEqual(curve.evaluate(3.0), (100.0,))
 
     def test_rejects_truncated_granny_container(self):
         with self.assertRaises(CorruptDataError):
