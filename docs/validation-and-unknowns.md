@@ -29,8 +29,9 @@ The tested MSI exposed 625 unique extractable FbRB archives. Archive indexing
 was validated on demand, including the MedKit mesh and shader-related assets.
 The lightweight archive scan found 33 folders containing both
 `level-00.fbrb` and `terrain-00.fbrb`; these populate the map picker without
-extracting FbRB files. This is an implemented archive-name heuristic, not
-evidence that all 33 levels can be assembled. Complete-map behavior remains
+extracting FbRB files. This is an implemented archive-name heuristic. A
+separate resolver/material audit now completes all 33 on the tested media;
+strict Blender construction, save/reopen, and visual-foundation checks remain
 verified only for `MP_001`.
 
 ### PC `MP_001` complete-map foundation
@@ -78,9 +79,49 @@ The final Blender 5.2 integration scene was saved and reopened with:
 | Water topology | 569 of 569 vertices referenced by 1,013 triangles |
 
 The diagnostics Text has ten deduplicated nonvisual-reference descriptions
-covering the 24 raw nonvisual placements plus one explicit unsupported-terrain-
-visual-decal description. There were no missing-shader, missing-texture,
+covering the 24 raw nonvisual placements, one explicit unsupported-terrain-
+visual-decal description, 176 dynamic-transform descriptions, and three
+routes to a physical vertex offset that cannot be exposed because it is a
+verified part-selector field. There were no missing-shader, missing-texture,
 texture-conversion, or unresolved-subset diagnostics.
+
+### PC all-map structural/material audit
+
+The Blender-hosted audit was run against all 33 discovered PC map pairs using
+the same level, terrain, `sp_common` where applicable, and `mp_common`
+preparation policy as the importer:
+
+| Measurement | Result |
+|---|---:|
+| Completed maps / structural errors | 33 / 0 |
+| Serialized placements | 192,022 |
+| Mesh/material variants | 6,425 |
+| Unique MeshData paths | 1,194 |
+| Assigned subsets / source surfaces | 14,367 / 19,308 |
+| Exact shader-key matches | 14,367 |
+| Texture bindings / missing assets | 60,664 / 0 |
+| Shader route-analysis errors | 0 |
+| Heightfield paths / WaterMesh paths | 321 / 33 |
+| Terrain classes / source-textured classes | 223 / 184 |
+
+All 14,367 assigned subsets used suffix surface matching and exact shader
+keys. Binding roles were 4,947 color, 2,933 decal, 20,681 detail, 323
+environment, 5,458 mask, 1,346 noise, 12,341 normal, 11,842 occlusion, six
+specular, and 787 unknown.
+
+Route evidence was 27,717 physical, 25,597 physical with dynamic transforms,
+7,005 semantic fallbacks, and 345 routes to vertex offsets not exposed by
+the mesh decoder. These last two classes are retained limitations, not audit
+failures. The resolver also reported 791 expected nonvisual references, 33
+unsupported terrain-visual-decal diagnostics, and two missing shader
+references for the same unused MP_005 industry-skyline surface in the base
+and SR graphs.
+
+The terrain prefix is derived from each resolved material-map path, which
+correctly covers shared mode-variant partitions. Of the 39 classes without a
+source texture, 16 are SeaBed, seven Dirt, five Tarmac, four Sand, four Water,
+and three Concrete. Those classes use explicit color fallbacks; they are not
+silently assigned an unrelated default texture.
 
 ## Verified resource samples
 
@@ -113,6 +154,11 @@ texture-conversion, or unresolved-subset diagnostics.
 - `MP_001` map materials: pixel-shader `RDEF` names retained for each binding;
   representative background-tree, bark, foliage, and layered-prop
   permutations checked with FXC disassembly.
+- PC all-map material catalog: all 33 discovered level/terrain pairs completed
+  with 14,367 exact subset shader keys, 60,664 indexed texture bindings, 223
+  terrain classes, and no structural, missing-texture, or route-analysis
+  errors. The report preserves route limitations rather than treating them as
+  exact shader recovery.
 - PC direct rigid/tree material survey: 1,295 unique `RigidMeshSet` and 57
   unique `TreeMeshSet` paths with all 623 non-voice retail archives indexed;
   the two unindexed archives were `streaming_vo_ru-00.fbrb` and `vo-00.fbrb`.
@@ -362,10 +408,13 @@ Current tests cover:
   verified part-ID field is at byte 36;
 - the declared four-channel little-endian stride-48 MI28 composite layout when
   the verified part-ID field is at byte 32, including propagation to
-  one-part subsets;
+  one-part subsets and preservation of finite declared UV values above the
+  heuristic magnitude limit;
 - category-gated type-1 vehicle byte-32/36 candidates and the type-0
   stride-48 byte-40 candidate without changing ordinary skinned/static
   declarations;
+- stride-keyed shader-layout UV candidates appended to existing map mesh
+  declarations while excluding verified composite part-selector fields;
 - topology-ranked little-endian stride-64 composite coordinates when bytes
   24/28 are degenerate, including exclusion of a byte-48 part selector and
   declaration propagation to a one-part subset;
@@ -401,6 +450,8 @@ Current tests cover:
   parity; semantic DBX tests mostly construct the typed tree directly, so this
   is not exhaustive binary value-type coverage;
 - Frostbite placement translation and basis conversion;
+- case-insensitive virtual-path deduplication for heightfields indexed from
+  more than one archive copy;
 - compact-group spawn/Havok enumeration validation;
 - synthetic DX11 shader material, texture binding, and `RDEF` resource-name
   parsing;
@@ -419,7 +470,9 @@ blender --background --factory-startup --python tests\blender_smoke.py
 It checks bulk topology transfer, coordinate conversion, modern UV attribute
 assignment, smooth flags, named and numbered vertex weights, native armature
 construction, Armature modifiers, Blender 5.2 layered/slotted Actions, terrain
-creation, the pure-Python mesh fallback, native file-backed DDS loading,
+creation, shared terrain-partition shader lookup, evidence-backed terrain
+layer families, explicit unknown-layer fallback, the pure-Python mesh
+fallback, native file-backed DDS loading,
 combined subset material indices and secondary UV layers (including Blender's
 degenerate-face cleanup), linked map instances, placement matrices, map
 texture roles, layered OcRGB/detail construction, and the verified DXT5nm node
@@ -459,6 +512,22 @@ blender --background --factory-startup `
   --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
   --output <OUTPUT_BLEND> --level MP_001
 ```
+
+The retail-wide material audit produces a detailed local JSON report and
+fails on structural map errors, unresolved assigned materials, non-exact
+shader keys, missing indexed textures, shader-route analysis errors,
+unclassified bindings, or a map with no source-backed terrain class:
+
+```powershell
+blender --background --factory-startup `
+  --python tests\blender_map_material_catalog_audit.py -- `
+  --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
+  --output <OUTPUT_JSON>
+```
+
+Known source limitations and route classifications remain in the report.
+Generated reports can exceed 70 MB and are local derivatives; they are not
+committed.
 
 The PC character integration runner imports and binds the full US Assault
 body/head/headgear assembly, resolves all 23 visible materials, loads native
@@ -599,7 +668,10 @@ These behaviors are useful but need broader format research:
 - Non-MedKit DXT5nm decode and normal strength.
 - Cutout-family classification and Blender dithered-alpha approximation.
 - Index-based subset-to-surface fallback when normalized names do not match.
-- Terrain detail-repeat scale and source-family selection.
+- Terrain detail-repeat scale and semantic filename-family selection. The
+  terrain partition itself is source-derived from the material-map path, but
+  mapping a class such as Snow or SeaBed to one candidate color texture is a
+  preview heuristic and is not exporter-safe.
 
 Tests for a heuristic should include at least one sample that would make a
 naive alternative choose incorrectly.

@@ -40,10 +40,12 @@ For a source checkout, install the repository root as an extension or add `bc2_f
    **Index All (Slow)** remains an explicit action in the archive panel.
 4. To browse objects associated with a PC map, choose a discovered level and
    click **Index Map Objects**. Only that level's `level-00` archive and the
-   shared `mp_common` archive are indexed in the background. To assemble the
-   complete map instead, click **Import Map**; the importer also indexes the
-   terrain archive and resolves required materials and textures. Complete-map
-   behavior is currently validated with `MP_001`.
+   shared `mp_common` archive are indexed in the background; single-player
+   levels also include `sp_common`. To assemble the complete map instead,
+   click **Import Map**; the importer also indexes the terrain archive and
+   resolves required materials and textures. The resolver/material path passes
+   a 33-map PC retail audit; strict scene save/reopen validation remains
+   `MP_001`.
 5. For any other PC bundle, select it in **PC Frostbite Archives** and click
    **Index Selected Archive**. This operation also runs in the background.
 6. For individual assets, combine the **Content group** filter
@@ -71,10 +73,11 @@ For a source checkout, install the repository root as an extension or add `bc2_f
 7. Select an asset and click **Import Selected**, or use **Extract Raw**.
 
 The map picker is derived locally from archive names and remains editable. It
-does not prove that every discovered level is supported: the validated PC
-retail sample exposes 33 level/terrain pairs, while complete assembly is
-currently verified only for `MP_001`. The manual **Scan Disc** action reapplies
-the lightweight catalog scan while preserving a valid source catalog and its
+does not by itself prove that every discovered level is supported. On the
+validated PC retail sample, all 33 level/terrain pairs complete the structural
+and material audit; complete Blender construction and save/reopen checks
+remain verified with `MP_001`. The manual **Scan Disc** action reapplies the
+lightweight catalog scan while preserving a valid source catalog and its
 previously indexed assets instead of resetting them.
 
 ### Preferences and session settings
@@ -264,6 +267,13 @@ collections. Repeated placements share mesh datablocks. `MP_001` resolves to
 5,380 placed static objects backed by 178 unique MeshData resources and 211
 geometry/material variants.
 
+The retail-wide structural/material audit completes all 33 discovered map
+pairs: 192,022 serialized placements, 6,425 mesh/material variants, 1,194
+unique MeshData paths, 14,367 assigned subset materials, and 60,664 texture
+bindings. Every assigned subset resolves an exact shader key and every binding
+references an indexed texture. This broad parser result is separate from the
+strict saved/reopened `MP_001` scene validation.
+
 Mesh materials use exact database keys and retain every recovered binding as
 metadata. DXBC `RDEF` reflection preserves the pixel-shader parameter name for
 each texture slot. The importer uses those names together with source texture
@@ -277,6 +287,12 @@ The common retail PC stride-48 static declaration retains object, repeating,
 selector, and atlas coordinate pairs at byte offsets 28, 36, 32, and 24 as
 `UVMap`, `UV1`, `UV2`, and `UV3`. Layered static shaders sample object
 `OcRGB` through `UVMap` and repeating detail textures through `UV1`.
+Complete-map imports also retain finite extra UV fields declared by the
+selected source shaders, while never exposing a verified composite part
+selector. Material nodes route by physical byte offset, so resources such as
+Ship System can use byte 40/44 without asset-specific code. A sole non-atlas
+decal binding can provide Base Color when no color/detail binding exists;
+shared decal atlases remain unconnected.
 Placement matrices are reconstructed from the source column-major transform
 without the former X/Z reflection, so signs and other readable texture
 content are no longer mirrored. Sparse shader-set overrides are merged over
@@ -287,18 +303,22 @@ pairs at offsets 24, 28, 32, and 40. The MI28 uses another stride-48
 composite declaration: its repeated part selector is at byte 32 and its four
 shader-coordinate pairs are at 24, 28, 36, and 40.
 
-The `MP_001` physical-material map is decoded to a file-backed L8 image and
-drives source grass, dirt, tarmac, gravel, stone, seabed, and default-ground
-textures across all terrain tiles. This is a source-backed approximation;
-terrain decals and exact shader blend constants remain future work.
+Physical-material maps are decoded to file-backed L8 images. Terrain texture
+lookup follows the referenced material-map partition, so mode variants reuse
+their authored base terrain family. Evidence-backed semantic matching covers
+184 of 223 classes across the 33-map audit; the other 39 remain explicit color
+fallbacks rather than receiving arbitrary textures. The graphs are
+source-backed previews, not exact terrain shader or exporter specifications;
+terrain decals and exact blend constants remain future work.
 
 The validated `MP_001` scene reopens with 5,380 placements, 211 linked mesh
 datablocks, 13 terrain tiles, one water mesh, 418 exact shader-key matches, 417
 connected Base Color graphs, and 185 available file-backed images.
 Terrain and water remain in the heightfield's already-world-space frame; a
 ground-contact check measures a -0.018-unit median forest-origin offset. All 485
-visible subset slots resolve by source naming. The diagnostics Text preserves
-the ten distinct nonvisual-reference descriptions from 24 raw placements.
+visible subset slots resolve by source naming. The diagnostics Text preserves the ten distinct nonvisual-reference
+descriptions from 24 raw placements, one terrain-decal limitation, 176 dynamic
+UV transforms, and three routes blocked by verified part-selector fields.
 
 The validated PC US Assault assembly resolves 23 visible subsets across
 `US_01_Body`, `US_01_Head`, and `US_01_Headgear`, binds all three modules to
@@ -407,8 +427,10 @@ scoped derivatives and may likewise be deleted when Blender is closed.
   plus explicit wreck/damaged/blurred names. Runtime pivots, parent hierarchy,
   state switching, rigs, and animation remain unverified and are not
   synthesized.
-- Complete-map assembly is currently validated only for the PC retail
-  `MP_001` graph. Xbox whole-map assembly is not yet implemented.
+- The PC resolver, LOD0 MeshData, assigned materials, texture references, and
+  terrain material maps pass a structural audit across all 33 discovered
+  map pairs. Full Blender scene construction and save/reopen validation remain
+  limited to `MP_001`. Xbox whole-map assembly is not yet implemented.
 - Representative map color, alpha, normal, OcRGB, and detail bindings are
   reflected and connected, but general shader constants, exact UV sources,
   swizzles, blend arithmetic, and every permutation are not decoded.
@@ -416,6 +438,8 @@ scoped derivatives and may likewise be deleted when Blender is closed.
   than silently guessed.
 - Console texture formats outside the listed formats are rejected explicitly.
 - Terrain physical-material indices and source detail layers are imported.
+  Semantic source-texture selection covers 184 of 223 audited PC terrain
+  classes; unmatched classes remain explicit color fallbacks.
   Terrain full/group/spline decal records are detected and reported, but the
   compiled `VisualTerrain`/`MaskTileAtlas` mapping, exact repeat constants, and
   blend arithmetic are not decoded. Water geometry is complete; its Blender
@@ -515,6 +539,20 @@ blender --background --factory-startup `
 This saves and reopens the map blend, then verifies placement, linked-mesh,
 terrain, and diagnostics counts. Images remain native file-backed DDS resources
 unless `--pack-images` is supplied.
+
+To audit material resolution across every discovered PC map:
+
+```powershell
+blender --background --factory-startup `
+  --python tests\blender_map_material_catalog_audit.py -- `
+  --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
+  --output <OUTPUT_JSON>
+```
+
+The audit checks all assigned subset materials, level-local shader keys,
+bindings, texture availability, physical/semantic UV routes, and terrain
+layers. The detailed JSON can exceed 70 MB and should remain a local
+validation derivative.
 
 The direct PC prop-material integration check is:
 

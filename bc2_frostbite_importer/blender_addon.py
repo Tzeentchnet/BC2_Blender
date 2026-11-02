@@ -3865,6 +3865,42 @@ def _shader_variant_for_subset(
     )
 
 
+def _shader_uv_offsets_by_mesh(
+    definitions,
+    shader_database: ShaderDatabase | None,
+):
+    if shader_database is None:
+        return {}
+    offsets_by_mesh = {}
+    for definition in definitions:
+        by_stride = offsets_by_mesh.setdefault(
+            definition.mesh_data_path.casefold(),
+            {},
+        )
+        for surface in definition.surfaces:
+            shader_material, _, _ = _find_shader_material(
+                shader_database,
+                surface.database_key,
+                surface.shader_partition,
+            )
+            if shader_material is None:
+                continue
+            for variant in shader_material.variants:
+                if variant.layout is None:
+                    continue
+                by_stride.setdefault(
+                    variant.layout.stride,
+                    set(),
+                ).update(variant.layout.uv_offsets)
+    return {
+        mesh_path: {
+            stride: tuple(sorted(offsets))
+            for stride, offsets in by_stride.items()
+        }
+        for mesh_path, by_stride in offsets_by_mesh.items()
+    }
+
+
 def _shader_binding_route(variant, binding: ShaderTextureBinding):
     if variant is None:
         return None
@@ -4090,6 +4126,7 @@ def _unique_role_nodes(texture_nodes, role: str):
 def _layered_color_output(nodes, links, texture_nodes):
     colors = _unique_role_nodes(texture_nodes, "COLOR")
     details = _unique_role_nodes(texture_nodes, "DETAIL")
+    decals = _unique_role_nodes(texture_nodes, "DECAL")
     occlusion = _unique_role_nodes(texture_nodes, "OCCLUSION")
     if colors:
         color_output = colors[0][1].outputs["Color"]
@@ -4099,6 +4136,12 @@ def _layered_color_output(nodes, links, texture_nodes):
         color_output = details[0][1].outputs["Color"]
         color_node = details[0][1]
         model = "reflected detail color"
+    elif len(decals) == 1 and "atlas" not in PurePosixPath(
+        decals[0][0].path
+    ).name.casefold():
+        color_output = decals[0][1].outputs["Color"]
+        color_node = decals[0][1]
+        model = "sole reflected non-atlas decal color"
     else:
         return None, None, "no color-producing binding"
 
@@ -5926,13 +5969,55 @@ def _resolve_mesh_subset_materials(
 
 
 _TERRAIN_LAYER_PATTERNS = {
-    "defaultmaterial": ("jungleground", "grasscloseup", "burnedground"),
+    "defaultmaterial": (
+        "jungleground",
+        "grasscloseup",
+        "burnedground",
+        "treeground",
+        "drygrass",
+        "grassgreen",
+        "grass",
+        "snowgrass",
+        "snowrough",
+        "snow",
+        "dirt",
+        "mountain",
+        "cliff",
+    ),
     "grass": ("grasscloseup", "grass"),
     "dirt": ("soil", "ground_mudstones", "flatdirt", "dirt"),
-    "tarmac": ("asphalt", "tarmac", "pavement"),
-    "gravel": ("gravel",),
-    "stone": ("cliffface", "stone", "rock", "rubble"),
-    "seabed": ("rubblesand", "seabed", "mudstones"),
+    "tarmac": (
+        "asphalt",
+        "tarmac",
+        "pavement",
+        "concrete",
+        "cobble",
+        "mudroad",
+    ),
+    "gravel": ("gravel", "cobble", "rubble"),
+    "stone": ("cliffface", "cliff", "stone", "rock", "rubble"),
+    "seabed": (
+        "rubblesand",
+        "seabed",
+        "riverbed",
+        "waterbed",
+        "gravelsand",
+    ),
+    "forest": (
+        "forest",
+        "leaf",
+        "treeground",
+        "jungleground",
+        "grass",
+    ),
+    "sand": ("sand", "dune"),
+    "rock": ("cliffface", "cliff", "rock", "rubble", "mountain"),
+    "snow": ("snowrough", "snowdunes", "snowgrass", "snow"),
+    "water": ("water", "riverbed", "seabed"),
+    "concrete": ("concrete", "cobble", "pavement", "asphalt"),
+    "mud": ("mud", "soil", "dirt", "ground"),
+    "jungle": ("jungleground", "jungle", "forest", "grass"),
+    "field": ("field", "grass", "jungleground", "burnedground"),
 }
 
 _TERRAIN_LAYER_COLORS = {
@@ -5943,17 +6028,28 @@ _TERRAIN_LAYER_COLORS = {
     "gravel": (0.34, 0.31, 0.26, 1.0),
     "stone": (0.29, 0.30, 0.27, 1.0),
     "seabed": (0.25, 0.23, 0.16, 1.0),
+    "forest": (0.10, 0.22, 0.08, 1.0),
+    "sand": (0.42, 0.34, 0.21, 1.0),
+    "rock": (0.28, 0.27, 0.24, 1.0),
+    "snow": (0.72, 0.76, 0.78, 1.0),
+    "water": (0.08, 0.18, 0.24, 1.0),
+    "concrete": (0.31, 0.31, 0.29, 1.0),
+    "mud": (0.18, 0.12, 0.07, 1.0),
+    "jungle": (0.11, 0.27, 0.08, 1.0),
+    "field": (0.28, 0.30, 0.10, 1.0),
 }
 
 
 def _terrain_shader_texture_paths(
     shader_database: ShaderDatabase | None,
-    level_name: str,
+    material_map_path: str,
 ) -> dict[str, int]:
     if shader_database is None:
         return {}
-    level = level_name.casefold()
-    prefix = f"terrains/{level}/{level}/"
+    terrain_name = PurePosixPath(material_map_path).parent.name.casefold()
+    if not terrain_name:
+        return {}
+    prefix = f"terrains/{terrain_name}/{terrain_name}/"
     counts = {}
     for material in shader_database.materials:
         if not material.key.casefold().startswith(prefix):
@@ -5968,8 +6064,11 @@ def _terrain_shader_texture_paths(
                 "NORMAL",
                 "MASK",
                 "NOISE",
+                "OCCLUSION",
                 "ROUGHNESS",
                 "SPECULAR",
+                "DECAL",
+                "ENVIRONMENT",
             }:
                 continue
             path = binding.path
@@ -5983,7 +6082,7 @@ def _terrain_layer_texture(
 ) -> str | None:
     patterns = _TERRAIN_LAYER_PATTERNS.get(
         name.casefold(),
-        _TERRAIN_LAYER_PATTERNS["defaultmaterial"],
+        (),
     )
     for pattern in patterns:
         matches = [
@@ -6093,7 +6192,7 @@ def _terrain_material(
 
     candidates = _terrain_shader_texture_paths(
         shader_database,
-        level_scene.name,
+        str(material_map_asset["path"]),
     )
     layer_records = []
     color_output = None
@@ -6364,6 +6463,10 @@ def _create_level_scene(
     image_cache = {}
     geometry_cache = {}
     mesh_by_key = {}
+    shader_uv_offsets = _shader_uv_offsets_by_mesh(
+        level_scene.meshes,
+        shader_database,
+    )
     mesh_count = max(1, len(level_scene.meshes))
     for index, definition in enumerate(level_scene.meshes):
         if progress:
@@ -6387,6 +6490,9 @@ def _create_level_scene(
                     definition.mesh_data_path.casefold().startswith(
                         "objects/vehicles/"
                     )
+                ),
+                pc_declared_uv_offsets_by_stride=shader_uv_offsets.get(
+                    geometry_key,
                 ),
             )
             mesh = _combined_level_mesh(

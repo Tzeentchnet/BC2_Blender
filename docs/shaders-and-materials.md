@@ -707,6 +707,12 @@ binding exists. Sampling the complete atlas through a repeating detail UV
 produced the reported red/white striping on GasSilo and IND_Silo_Medium; their
 base graph now comes from the reflected detail layers controlled by OcRGB.
 
+A distinct generic fallback covers a material with no color/detail binding and
+exactly one unique non-atlas `DECAL` path. That image becomes Base Color while
+retaining its `DECAL` role and physical route. This restores the HighwaySign
+and IndSign `Decal1` graphs and source decal meshes without promoting shared
+atlases such as `Decal_Atlas_001`.
+
 In the saved `MP_001` validation scene, 418 material keys resolve exactly. Of
 those, 417 produce a connected Base Color graph. The remaining binding-only
 material is an invisible-wall shader with no texture binding.
@@ -715,6 +721,76 @@ Other DXT5 textures classified as normals use an explicitly labeled heuristic
 alpha/green DXT5nm decode at unit UV scale. Non-DXT5 normal candidates use a
 standard RGB tangent-normal node. Missing keys, textures, and undecidable
 subset/surface matches are written to the map Diagnostics text.
+
+### PC retail all-map material audit
+
+**Verified sample scope:** one PC retail disc, all 33 folders containing both
+`level-00.fbrb` and `terrain-00.fbrb`, plus the applicable `sp_common` and
+`mp_common` archives. This is a parser/material-resolution audit, not 33 saved
+and visually compared Blender scenes. The strict save/reopen integration
+remains `MP_001`.
+
+The audit resolves every level graph, parses each unique mesh/material
+variant, selects the level-local DX11 database, checks subset/surface identity,
+classifies each binding and shader route, verifies referenced texture assets,
+and parses the terrain material map:
+
+| Measurement | Result |
+|---|---:|
+| Maps completed | 33 of 33 |
+| Serialized placements | 192,022 |
+| Mesh/material variants | 6,425 |
+| Unique MeshData paths | 1,194 |
+| Assigned visible subsets | 14,367 |
+| Descriptor surfaces inspected | 19,308 |
+| Texture bindings | 60,664 |
+| Missing indexed textures | 0 |
+| Terrain heightfields | 321 |
+| Water meshes | 33 |
+
+All 14,367 assigned subsets matched a descriptor surface by longest suffix and
+resolved an **exact** material key. No `cheap_` alias or complete-partition
+fallback was required. Two unused `ness` surfaces in the shared MP_005
+industry-skyline descriptor have no shader reference and are reported for both
+`MP_005` and `MP_005SR`; they do not correspond to an assigned visible subset.
+
+Binding roles across the sample are:
+
+| Role | Bindings |
+|---|---:|
+| `COLOR` | 4,947 |
+| `DECAL` | 2,933 |
+| `DETAIL` | 20,681 |
+| `ENVIRONMENT` | 323 |
+| `MASK` | 5,458 |
+| `NOISE` | 1,346 |
+| `NORMAL` | 12,341 |
+| `OCCLUSION` | 11,842 |
+| `SPECULAR` | 6 |
+| `UNKNOWN` | 787 |
+
+For complete maps, standard block-5 layouts now contribute additional
+stride-keyed physical UV candidates before material construction. Existing
+mesh declaration/topology channels remain first; finite candidates are
+appended, and a verified composite part-selector offset is never exposed as a
+UV. Shader routing then selects a Blender layer by its physical byte offset.
+This reduced routes to unavailable offsets from 4,905 in the preliminary
+geometry-only pass to 345 without an asset-name dispatch table.
+
+Every binding received one explicit route status:
+
+| Route status | Bindings | Meaning |
+|---|---:|---|
+| `physical` | 27,717 | A traced physical coordinate is decoded and its affine transform is known. |
+| `dynamic_transform` | 25,597 | The physical coordinate is decoded, but runtime/non-affine transform terms prevent an exact Blender transform. |
+| `semantic_fallback` | 7,005 | No unique traced route is available; the graph uses the documented semantic fallback. |
+| `unavailable_offset` | 345 | The shader route names a physical byte offset that the mesh decoder does not expose. |
+
+There were no shader-route analyzer errors. These counts measure evidence and
+known limitations; they do not mean all 60,664 bindings reproduce arbitrary
+DXBC arithmetic. In particular, `semantic_fallback` and
+`unavailable_offset` remain preview-import boundaries and are not safe vertex
+declaration evidence for an exporter.
 
 ## Sparse shader-set overrides
 
@@ -734,24 +810,37 @@ Wood, Concrete, Ground, grate, diamond plate, and corrugated-metal surfaces.
 The decoded 4096 x 4096 `MP_001` physical-material index map names
 `defaultmaterial`, Grass, Dirt, Tarmac, Gravel, Stone, and SeaBed. Blender
 stores the indices in a native file-backed L8 DDS with nearest sampling and
-selects source textures recovered from the level shader database:
+selects source textures recovered from the level shader database.
 
-- jungle ground for the default class;
-- grass close-up for Grass;
-- soil/ground-mud families for Dirt;
-- asphalt/tarmac families for Tarmac;
-- dry gravel for Gravel;
-- cliff/stone/rubble families for Stone;
-- rubble-sand/seabed families for SeaBed.
+The 33-map PC retail audit expands the observed vocabulary to 16 class names:
+default, grass, dirt, tarmac, gravel, stone, seabed, forest, sand, rock, snow,
+water, concrete, mud, jungle, and field. Selection uses ordered semantic
+filename families within the terrain shader partition. It rejects bindings
+classified as normal, mask, noise, occlusion, roughness, specular, decal, or
+environment data. Unknown class names no longer inherit the default-ground
+patterns.
+
+Mode variants frequently reuse a base terrain partition. The importer derives
+the shader prefix from the resolved material-map parent folder, so
+`MP_001SR` uses `terrains/mp_001/mp_001/`, `MP_004SDM` uses
+`terrains/mp_004/mp_004/`, and equivalent CQ/GR/SDM/SR variants share their
+authored family without a map-name table.
+
+Across 223 named layers, 184 select an indexed source texture and every map
+selects at least one. The 39 explicit fallbacks are 16 SeaBed, seven Dirt,
+five Tarmac, four Sand, four Water, and three Concrete layers for which no
+evidence-backed filename family is available in that map's candidates.
 
 The result is marked `resolved terrain material map`, not an exact shader
-reproduction. The 16 m detail repeat is estimated. The terrain DBX separately
-defines full, group, and spline decals with material references, tiled source
-mask bounds, pixels-per-meter values, and Road spline links. Runtime
-`VisualTerrain` records and a 2048 x 1024 format-code-3 `MaskTileAtlas` compile
-those authoring records, but their tile mapping, hard-coded constants, and
-Frostbite blend arithmetic remain unresolved. These terrain decals are also
-separate from the mesh-material `Decal_Atlas_001` binding discussed above.
+reproduction. Class-to-texture matching and the 16 m detail repeat are
+**heuristic**. The terrain DBX separately defines full, group, and spline
+decals with material references, tiled source mask bounds, pixels-per-meter
+values, and Road spline links. Runtime `VisualTerrain` records and a
+2048 x 1024 format-code-3 `MaskTileAtlas` compile those authoring records, but
+their tile mapping, hard-coded constants, and Frostbite blend arithmetic
+remain unresolved. These terrain decals are also separate from the
+mesh-material `Decal_Atlas_001` binding discussed above. None of this preview
+selection is an exporter-safe terrain-material specification.
 
 ## MaxScript material boundary
 

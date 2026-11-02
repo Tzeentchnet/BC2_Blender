@@ -29,6 +29,13 @@ PC_CHARACTER_SHADER_ARCHIVE = "Dist/win32/levels/mp_001/level-00.fbrb"
 PC_CHARACTER_SHADER_PATH = "Levels/mp_001/shaders/Dx11_Single.res"
 
 
+def _unique_virtual_paths(paths: Iterable[str]) -> tuple[str, ...]:
+    unique = {}
+    for path in paths:
+        unique.setdefault(path.casefold(), path)
+    return tuple(unique.values())
+
+
 def discover_pc_levels(archive_paths: Iterable[str]) -> tuple[str, ...]:
     level_files: dict[str, tuple[str, set[str]]] = {}
     for archive_path in archive_paths:
@@ -66,6 +73,8 @@ def pc_level_archive_paths(
     paths = [f"Dist/win32/levels/{level}/level-00.fbrb"]
     if include_terrain:
         paths.append(f"Dist/win32/levels/{level}/terrain-00.fbrb")
+    if level.startswith("sp_"):
+        paths.append("Dist/win32/levels/sp_common/level-00.fbrb")
     paths.append("Dist/win32/levels/mp_common/level-00.fbrb")
     return tuple(paths)
 
@@ -765,7 +774,7 @@ class LevelResolver:
                         reference=material_map_reference,
                     )
                 )
-        heightfields = tuple(
+        heightfields = _unique_virtual_paths(
             str(row["path"])
             for row in self.repository.catalog.assets_with_prefix(
                 terrain_partition + ".Heightfield-",

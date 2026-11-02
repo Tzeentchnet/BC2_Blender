@@ -37,6 +37,7 @@ from bc2_frostbite_importer.core.granny import (
 from bc2_frostbite_importer.core.level import (
     FrostbiteTransform,
     LevelResolver,
+    _unique_virtual_paths,
     discover_pc_levels,
     pc_level_archive_paths,
 )
@@ -1029,7 +1030,11 @@ class MeshTests(unittest.TestCase):
                     "<ee",
                     vertex,
                     24,
-                    index / 2.0,
+                    (
+                        index * 75.0
+                        if subset_index == 0
+                        else index / 2.0
+                    ),
                     subset_index / 2.0,
                 )
                 struct.pack_into(
@@ -1074,6 +1079,7 @@ class MeshTests(unittest.TestCase):
         self.assertEqual(multi_part.part_index_offset, 32)
         self.assertEqual(multi_part.part_indices, (31, 32, 31))
         self.assertEqual(multi_part.uv_offsets, (24, 28, 36, 40))
+        self.assertEqual(multi_part.uvs[2][0], 150.0)
         self.assertEqual(single_part.part_index_offset, None)
         self.assertEqual(single_part.part_indices, (12, 12, 12))
         self.assertEqual(single_part.uv_offsets, (24, 28, 36, 40))
@@ -1244,6 +1250,7 @@ class MeshTests(unittest.TestCase):
             struct.pack_into("<ee", vertex, 32, 0.75, index / 20.0)
             struct.pack_into("<ee", vertex, 36, *secondary_uv)
             struct.pack_into("<ee", vertex, 40, index / 4.0, 0.5)
+            struct.pack_into("<ee", vertex, 44, index / 5.0, 0.75)
             vertices.extend(vertex)
         indices = struct.pack("<3H", 0, 1, 2)
         metadata.extend(
@@ -1275,6 +1282,25 @@ class MeshTests(unittest.TestCase):
         self.assertEqual(
             vehicle_subset.uv_source,
             "pc_vehicle_shader_route_candidates",
+        )
+        shader_subset = parse_meshdata(
+            bytes(metadata + vertices + indices),
+            "pc",
+            pc_declared_uv_offsets_by_stride={48: (32, 36, 40, 44)},
+        ).subsets[0]
+        self.assertEqual(
+            shader_subset.uv_offsets,
+            (28, 36, 32, 24, 40, 44),
+        )
+        self.assertEqual(
+            shader_subset.uv_source,
+            "verified_pc_stride_48_declaration"
+            "+shader_layout_candidates",
+        )
+        self.assertAlmostEqual(
+            shader_subset.additional_uvs[-1][2][0],
+            0.4,
+            places=3,
         )
 
     def test_pc_skinned_stride_64_uses_declared_uv_channels(self):
@@ -2843,6 +2869,21 @@ class LevelTests(unittest.TestCase):
 
 
 class LevelDiscoveryTests(unittest.TestCase):
+    def test_collapses_duplicate_virtual_paths_case_insensitively(self):
+        self.assertEqual(
+            _unique_virtual_paths(
+                (
+                    "Terrains/MP_001/MP_001.Heightfield-000.res",
+                    "terrains/mp_001/mp_001.heightfield-000.RES",
+                    "Terrains/MP_001/MP_001.Heightfield-001.res",
+                )
+            ),
+            (
+                "Terrains/MP_001/MP_001.Heightfield-000.res",
+                "Terrains/MP_001/MP_001.Heightfield-001.res",
+            ),
+        )
+
     def test_discovers_only_complete_pc_level_archive_pairs(self):
         levels = discover_pc_levels(
             (
@@ -2862,6 +2903,15 @@ class LevelDiscoveryTests(unittest.TestCase):
             pc_level_archive_paths("MP_001", include_terrain=False),
             (
                 "Dist/win32/levels/mp_001/level-00.fbrb",
+                "Dist/win32/levels/mp_common/level-00.fbrb",
+            ),
+        )
+        self.assertEqual(
+            pc_level_archive_paths("SP_003_B"),
+            (
+                "Dist/win32/levels/sp_003_b/level-00.fbrb",
+                "Dist/win32/levels/sp_003_b/terrain-00.fbrb",
+                "Dist/win32/levels/sp_common/level-00.fbrb",
                 "Dist/win32/levels/mp_common/level-00.fbrb",
             ),
         )

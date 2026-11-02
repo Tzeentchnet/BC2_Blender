@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import struct
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .errors import CorruptDataError
@@ -299,6 +300,7 @@ def _decode_uv_channel(
     endian: str,
     *,
     require_variation: bool = True,
+    max_magnitude: float | None = 64.0,
 ) -> tuple[tuple[float, float], ...] | None:
     values = []
     for vertex in range(count):
@@ -307,7 +309,13 @@ def _decode_uv_channel(
             start + vertex * stride + offset,
             endian,
         )
-        if value is None or abs(value[0]) > 64 or abs(value[1]) > 64:
+        if value is None or (
+            max_magnitude is not None
+            and (
+                abs(value[0]) > max_magnitude
+                or abs(value[1]) > max_magnitude
+            )
+        ):
             return None
         values.append(value)
     if not values:
@@ -610,6 +618,11 @@ def parse_meshdata(
     include_z_only: bool = False,
     position_format: str = "AUTO",
     retain_pc_vehicle_uv_candidates: bool = False,
+    pc_declared_uv_offsets_by_stride: Mapping[
+        int,
+        tuple[int, ...],
+    ]
+    | None = None,
 ) -> MeshAsset:
     endian = _detect_endian(data, platform)
     mesh_type, headers, metadata_end = _parse_headers(data, endian)
@@ -808,6 +821,14 @@ def parse_meshdata(
                     offset,
                     endian,
                     require_variation=False,
+                    max_magnitude=(
+                        None
+                        if (
+                            mesh_type == 2
+                            and declaration_part_offset in {32, 36}
+                        )
+                        else 64.0
+                    ),
                 )
                 for offset in explicit_uv_offsets
             )
@@ -891,6 +912,51 @@ def parse_meshdata(
                 else (uv_offset,)
             )
             uv_source = "stride_heuristic"
+        declared_offsets = (
+            pc_declared_uv_offsets_by_stride.get(header.stride, ())
+            if endian == "<"
+            and pc_declared_uv_offsets_by_stride is not None
+            else ()
+        )
+        declared_channels = []
+        for offset in declared_offsets:
+            if (
+                offset in uv_offsets
+                or offset == part_index_offset
+                or offset < 0
+                or offset + 4 > header.stride
+            ):
+                continue
+            channel = _decode_uv_channel(
+                data,
+                subset_vertex_start,
+                header.vertex_count,
+                header.stride,
+                offset,
+                endian,
+                require_variation=False,
+            )
+            if channel is not None:
+                declared_channels.append((offset, channel))
+        if declared_channels:
+            channels = [uvs] if uv_offsets else []
+            if len(uv_offsets) > 1:
+                channels.append(secondary_uvs)
+            channels.extend(additional_uvs)
+            channels.extend(
+                channel for _, channel in declared_channels
+            )
+            uv_offsets = uv_offsets + tuple(
+                offset for offset, _ in declared_channels
+            )
+            uvs = channels[0]
+            secondary_uvs = channels[1] if len(channels) > 1 else ()
+            additional_uvs = tuple(channels[2:])
+            uv_source = (
+                "shader_layout_candidates"
+                if uv_source == "none"
+                else uv_source + "+shader_layout_candidates"
+            )
         faces = []
         for face in range(header.primitive_count):
             offset = header.index_offset + face * 3

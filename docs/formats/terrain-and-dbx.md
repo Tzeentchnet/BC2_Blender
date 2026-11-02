@@ -136,12 +136,22 @@ SeaBed
 The importer writes the decoded indices to a file-backed L8 DDS, samples it
 with nearest filtering over global `-1024..1024` terrain UVs, and selects
 source detail textures recovered from the level shader database. Current
-source-backed layer choices cover jungle ground, grass, soil, asphalt, gravel,
-cliff/stone, and rubble-sand families.
+source-backed layer choices cover default ground, grass, dirt, tarmac,
+gravel, stone, seabed, forest, sand, rock, snow, water, concrete, mud, jungle,
+and field families. Mode variants can share a terrain partition: the importer
+derives the shader-key prefix from the parent folder of the resolved
+`TerrainMaterialMap` path, not from the level-scene name. For example,
+`MP_001SR` resolves the `terrains/mp_001/mp_001/` shader family.
 
 This graph is an implemented physical-material approximation. Its 16 m detail
-repeat is estimated. Material indices and names are preserved as custom
-metadata so later work can replace the graph without re-decoding the resource.
+repeat is estimated. Filename-family selection is heuristic, unknown class
+names remain textureless, and normal, mask, noise, occlusion, decal, and
+environment bindings are not used as layer color candidates. A 33-map PC
+retail audit resolved source textures for 184 of 223 named layers; the other
+39 remain explicit colored fallbacks. Material indices and names are preserved
+as custom metadata so later work can replace the graph without re-decoding the
+resource. This evidence does not establish an exporter-safe relationship
+between a class name and a shader texture.
 
 ## Terrain visual decals and blending
 

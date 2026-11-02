@@ -1123,6 +1123,44 @@ def _test_terrain(context):
         context, parsed, asset, settings
     )
     _assert_vector(obj.data.vertices[2].co, (0.0, -2.0, 4.0))
+    snow_path = "Terrains/MP_001/Textures/MP001_SnowRough3_C"
+    occlusion_path = "Terrains/MP_001/Textures/MP001_AmbientOcclusion"
+    database = ShaderDatabase(
+        materials=(
+            ShaderMaterial(
+                key="Terrains/MP_001/MP_001/Ground",
+                textures=(
+                    ShaderTextureBinding(
+                        index=0,
+                        path=snow_path,
+                        parameters=("texture_Texture",),
+                    ),
+                    ShaderTextureBinding(
+                        index=1,
+                        path=occlusion_path,
+                        parameters=("texture_Texture",),
+                    ),
+                ),
+            ),
+        ),
+        trailing_bytes=0,
+    )
+    candidates = blender_addon._terrain_shader_texture_paths(
+        database,
+        "Terrains/MP_001/MP_001-MaterialMap.res",
+    )
+    if snow_path not in candidates or occlusion_path in candidates:
+        raise AssertionError("Terrain color candidates were classified incorrectly")
+    if (
+        blender_addon._terrain_layer_texture("Snow", candidates)
+        != snow_path
+        or blender_addon._terrain_layer_texture(
+            "UnverifiedLayer",
+            candidates,
+        )
+        is not None
+    ):
+        raise AssertionError("Terrain layer texture selection is incorrect")
 
 
 def _test_native_image(context):
@@ -1621,6 +1659,22 @@ def _test_shader_driven_vehicle_routes():
     )
     if first is second:
         raise AssertionError("Material cache is not declaration-aware")
+    definition = MeshDefinition(
+        key="test",
+        reference="objects/vehicles/test/reference",
+        name="Objects/Vehicles/Test/MainMesh",
+        mesh_data_path="Objects/Vehicles/Test/MainMesh_lod0_data.res",
+        shader_set_reference=None,
+        surfaces=(surface,),
+    )
+    declared_offsets = blender_addon._shader_uv_offsets_by_mesh(
+        (definition,),
+        ShaderDatabase((shader_material,), 0, (layout,)),
+    )
+    if declared_offsets != {
+        definition.mesh_data_path.casefold(): {48: (24, 28)}
+    }:
+        raise AssertionError("Shader layout UV candidates were not collected")
 
 
 def _test_reflected_material_roles():
@@ -1788,6 +1842,37 @@ def _test_reflected_material_roles():
         for node in nodes
     ):
         raise AssertionError("Layered material omitted source occlusion")
+
+    decal_material = bpy.data.materials.new("BC2 Decal Color Graph")
+    decal_nodes, decal_links, _ = blender_addon._material_nodes(
+        decal_material
+    )
+    decal_binding = ShaderTextureBinding(
+        1,
+        "Objects/Test/Textures/Decal1",
+        ("texture_Texture",),
+    )
+    decal_node = decal_nodes.new("ShaderNodeTexImage")
+    decal_output, _, decal_model = blender_addon._layered_color_output(
+        decal_nodes,
+        decal_links,
+        ((decal_binding, "DECAL", decal_node),),
+    )
+    if decal_output is None or "non-atlas decal" not in decal_model:
+        raise AssertionError("Sole source decal was not used as color")
+    atlas_binding = ShaderTextureBinding(
+        1,
+        "Textures/_ATLAS/Decal_Atlas_001",
+        ("texture_Texture",),
+    )
+    atlas_node = decal_nodes.new("ShaderNodeTexImage")
+    atlas_output, _, _ = blender_addon._layered_color_output(
+        decal_nodes,
+        decal_links,
+        ((atlas_binding, "DECAL", atlas_node),),
+    )
+    if atlas_output is not None:
+        raise AssertionError("Decal atlas was promoted to primary color")
 
 
 def _test_verified_vehicle_material_graphs():

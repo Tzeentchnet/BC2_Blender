@@ -96,8 +96,12 @@ usable Blender preview:
   | `v4.xy -> o9.xy` | 32 | `UV2` |
   | `v3.xy -> o9.zw` | 24 | `UV3` |
 
-  This declaration is verified on Ship System, Harbour, PileBricks, GasSilo,
-  and IND_Silo_Medium. The importer uses it only when the declared object and
+  This declaration ordering is verified on Ship System, Harbour, and GasSilo.
+  PileBricks and IND_Silo_Medium expose the same four physical fields in
+  type-2 declarations with a separate part selector, but topology ranks them
+  as `28/24/32/36`; their Blender layer names therefore differ. Material
+  routing uses physical byte offsets rather than assuming a layer name. The
+  importer uses the fixed ordering only when the declared object and
   repeating pairs decode structurally; other legitimate 48-byte declarations
   fall back to per-mesh detection.
 - The retail PC stride-48 composite declaration whose repeated part-ID field
@@ -131,6 +135,17 @@ usable Blender preview:
   repeated field cannot independently identify byte 32. The stored part
   metadata remains unset for those one-part subsets; only declaration
   selection is inherited.
+
+  Both verified little-endian type-2 declarations above accept every finite
+  half-float coordinate. They do not apply the generic `abs(value) <= 64`
+  plausibility bound because the repeated part field already identifies the
+  declaration structurally. The PC retail
+  `Objects/Objects/_MP09/Dam/Dam_Mesh_lod0_data.res` `export_dam_Bars`
+  subset uses the byte-32 declaration and contains authored byte-24
+  coordinates reaching approximately `-138..138`. A synthetic regression
+  retains a value of `150`. The magnitude bound remains in place for
+  heuristic coordinate discovery, where it protects against interpreting
+  unrelated packed fields as UVs.
 - Unknown little-endian PC type-2 composite declarations use an
   **implemented heuristic**, not a vehicle-name table. Aligned half-float
   pairs are considered from byte 24 through the end of each vertex. The
@@ -153,10 +168,21 @@ usable Blender preview:
   topology can identify useful coordinates but cannot establish every shader
   semantic or whether a constant declared field must be written back.
 - Every imported subset records the implemented evidence source for its UV
-  ordering: verified PC declaration, vehicle shader-route candidates,
-  topology fallback, stride heuristic, or no decoded coordinate. Blender
-  stores this as `bc2_uv_source`; topology-selected channels are therefore not
-  indistinguishable from shader/declaration evidence.
+  ordering: verified PC declaration, shader-layout candidates, vehicle
+  shader-route candidates, topology fallback, stride heuristic, or no decoded
+  coordinate. Blender stores this as `bc2_uv_source`; topology-selected
+  channels are therefore not indistinguishable from shader/declaration
+  evidence.
+- Complete-map material resolution unions the standard block-5 UV field
+  offsets for all source surfaces sharing a MeshData path, grouped by declared
+  stride. The mesh parser appends a candidate only when the little-endian
+  half-float pair is finite and within the heuristic magnitude bound. A
+  verified composite part-selector offset is always excluded. Existing
+  declaration/topology channels keep their order, so a shader route is mapped
+  by physical byte offset to the resulting Blender layer. This recovers, for
+  example, Ship System byte-40 and byte-44 coordinates without an asset-name
+  rule. It is implemented read evidence, not proof that the union is a
+  lossless writer declaration.
 - PC type-1 vehicle LOD0 resources use more than the bird/character
   `40/44` pair. Retail track, stationary-gun, and parachute variants route
   samples through byte 32 or 36. Vehicle imports retain
@@ -170,7 +196,9 @@ usable Blender preview:
   40 in addition to the common `28/36/32/24` ordering. Vehicle imports retain
   byte 40 when it decodes as a bounded half-float pair. This is required by
   the verified Ka-52 wreck variant, whose normal/detail/mask samples route to
-  byte 40. Ordinary nonvehicle static imports keep the four-field declaration.
+  byte 40. Direct nonvehicle imports without shader-layout context keep the
+  four-field declaration; complete-map imports can append additional fields
+  supplied by their compiled layouts.
 - Two stride-64, byte-48-selector samples show why the resolver preserves
   multiple physical channels:
 

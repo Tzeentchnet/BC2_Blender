@@ -2,8 +2,11 @@
 
 ## Scope
 
-The implemented whole-map path targets the **PC retail** build and has been
-validated against `MP_001`. It imports the verified static visual foundation:
+The implemented whole-map path targets the **PC retail** build. Resolver,
+MeshData, material, and terrain-material-map coverage has been audited across
+all 33 discovered level/terrain archive pairs. The strict Blender scene
+save/reopen integration remains `MP_001`. The path imports the verified static
+visual foundation:
 
 - direct blueprint placements;
 - Forest, Middlegrowth, Rigid, and Static compact model groups;
@@ -198,9 +201,9 @@ graph. These previews are not an exporter-safe destruction specification.
 A PC level is offered in the add-on's map picker when the MSI archive catalog
 contains both `Dist/win32/levels/<name>/level-00.fbrb` and
 `terrain-00.fbrb`. This implemented discovery rule found 33 candidates on the
-validated retail disc without extracting their FbRB contents. It is only a
-selection heuristic; it does not establish that every candidate's DBX graph is
-supported.
+validated retail disc without extracting their FbRB contents. Discovery alone
+is only a selection heuristic; the separate all-map audit described below is
+the evidence that the current resolver/material path completes on this sample.
 
 A multiplayer level is not self-contained. `MP_001` requires these indexed
 archives:
@@ -215,6 +218,21 @@ The shared `mp_common` archive is required for common blueprints, meshes, and
 textures. For the tested disc it is about 300 MB and contains 15,861 active
 assets. Level-specific archives alone resolve only 831 direct placement
 occurrences; including `mp_common` resolves all verified static visuals.
+
+Single-player levels additionally stage
+`Dist/win32/levels/sp_common/level-00.fbrb` before `mp_common`. This is an
+implemented archive-family rule and prevents a fresh single-player map import
+from depending on a previous **Index All** operation. Both common archives
+remain available because single-player graphs can use shared multiplayer
+resources.
+
+Game-mode names do not necessarily name a distinct terrain family. The
+resolved `TerrainMaterialMap` path is authoritative for terrain shader lookup:
+for example, `MP_001SR` references
+`Terrains/mp_001/MP_001-MaterialMap.res`, so its material-key prefix is
+`terrains/mp_001/mp_001/`, not `terrains/mp_001sr/mp_001sr/`. CQ, GR, SDM,
+and SR variants are handled by this source path rather than a hard-coded
+variant-name table.
 
 All three tested map archives have gzip-compressed FbRB payloads. Seeking an
 entry inside such a stream otherwise requires inflating from byte zero for
@@ -368,6 +386,41 @@ heightfield within one meter:
 | 4,419 | GasSilo | approximately `-0.44` |
 | 4,808 | IND_Silo_Medium | approximately `+0.07` |
 | 5,777 | IND_SmallFactory | approximately `+0.15` |
+
+## Retail-wide structural and material audit
+
+**Verified sample scope:** one PC retail disc. The audit indexes the archives
+selected by the runtime map-preparation policy, resolves every discovered
+level graph, parses each unique LOD0 MeshData/material variant, checks all
+assigned surface keys and texture references, and parses every terrain
+material map.
+
+| Measurement | Result |
+|---|---:|
+| Completed level/terrain pairs | 33 of 33 |
+| Serialized placements | 192,022 |
+| Mesh/material variants | 6,425 |
+| Unique MeshData paths parsed | 1,194 |
+| Assigned visible subsets | 14,367 |
+| Exact shader-key resolutions | 14,367 |
+| Texture bindings / missing indexed textures | 60,664 / 0 |
+| Resolved heightfield paths | 321 |
+| Resolved WaterMesh paths | 33 |
+| Terrain material classes / source-textured classes | 223 / 184 |
+
+All subset/surface assignments used the longest normalized suffix; no
+index-order fallback was required. The audit also retains 791 expected
+nonvisual references, one explicit unsupported-terrain-decal diagnostic per
+map, and two missing shader-reference reports for the same unused MP_005
+industry-skyline surface in its base and SR graphs.
+
+This establishes broad parser and source-resolution coverage. It does not
+claim visual parity for 33 generated Blender scenes: arbitrary shader
+arithmetic, 345 routes to currently unexposed vertex offsets, 7,005 semantic
+UV fallbacks, terrain decals, and 39 terrain classes without an
+evidence-backed source texture remain explicit limitations. `MP_001` remains
+the saved/reopened scene with strict placement, collection, terrain-contact,
+material-graph, and image checks.
 
 ## Mesh and instance strategy
 

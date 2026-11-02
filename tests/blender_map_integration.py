@@ -163,15 +163,27 @@ def _validate_saved_scene(root_name, expected):
         issue["code"] for issue in diagnostics["issues"]
     )
     unexpected_codes = set(diagnostic_counts) - {
-        "missing_shader_key",
         "non_visual_reference",
+        "shader_uv_route_unavailable",
+        "shader_uv_transform_unsupported",
         "unsupported_terrain_visual_decals",
-        "unresolved_subset_surface",
     }
     if unexpected_codes:
         raise AssertionError(
             f"Unexpected saved diagnostics: {sorted(unexpected_codes)}"
         )
+    if expected["level"] == "MP_001":
+        expected_diagnostics = {
+            "non_visual_reference": 10,
+            "shader_uv_route_unavailable": 3,
+            "shader_uv_transform_unsupported": 176,
+            "unsupported_terrain_visual_decals": 1,
+        }
+        if dict(diagnostic_counts) != expected_diagnostics:
+            raise AssertionError(
+                "MP_001 diagnostics changed: "
+                f"{dict(diagnostic_counts)} != {expected_diagnostics}"
+            )
 
     surface_matches = collections.Counter()
     for mesh in unique_meshes.values():
@@ -412,7 +424,11 @@ def _validate_saved_scene(root_name, expected):
             "determinant": round(determinant, 6),
         }
 
-    for enumeration in (4419, 4808):
+    expected_silo_offsets = {
+        4419: (28, 36, 32, 24),
+        4808: (28, 24, 32, 36),
+    }
+    for enumeration, expected_offsets in expected_silo_offsets.items():
         target = next(
             obj
             for obj in placements
@@ -422,7 +438,7 @@ def _validate_saved_scene(root_name, expected):
             target.data.get("bc2_uv_offsets", "[]")
         )
         if not uv_offsets or any(
-            tuple(offsets) != (28, 36, 32, 24)
+            tuple(offsets) != expected_offsets
             for offsets in uv_offsets
         ):
             raise AssertionError(
@@ -465,11 +481,11 @@ def _validate_saved_scene(root_name, expected):
 
     reported = {
         4497: {
-            "offsets": (28, 36, 32, 24),
+            "offsets": (28, 36, 32, 24, 40, 44),
             "routes": {
-                "shipsystem_aftfront_oc_rgb": "UVMap",
-                "dt_rust_001": "UV1",
-                "dt_dirt_002": "UV1",
+                "shipsystem_aftfront_oc_rgb": "UV1",
+                "dt_rust_001": "UV5",
+                "dt_dirt_002": "UV5",
             },
         },
         4275: {
@@ -495,12 +511,13 @@ def _validate_saved_scene(root_name, expected):
             "sizes": {"truck_c": (1024, 1024)},
         },
         6139: {
-            "offsets": (28, 36, 32, 24),
+            "offsets": (28, 24, 32, 36),
             "minimum_detail_span": 5.0,
+            "detail_layer": "UV3",
             "routes": {
                 "pilebricks_t02v01_ocrgb": "UVMap",
-                "dt_largebrick_001": "UV1",
-                "nm_largebrick_001": "UV1",
+                "dt_largebrick_001": "UV3",
+                "nm_largebrick_001": "UV3",
             },
             "sizes": {
                 "pilebricks_t02v01_ocrgb": (128, 128),
@@ -508,11 +525,12 @@ def _validate_saved_scene(root_name, expected):
             },
         },
         2220: {
-            "offsets": (28, 36, 32, 24),
+            "offsets": (28, 24, 32, 36),
             "minimum_detail_span": 2.0,
+            "detail_layer": "UV3",
             "routes": {
-                "dt_wirefence_001": "UV1",
-                "dt_razorwire": "UV1",
+                "dt_wirefence_001": "UV3",
+                "dt_razorwire": "UV3",
             },
             "scales": {
                 "dt_wirefence_001": (15.0, 15.0),
@@ -551,10 +569,15 @@ def _validate_saved_scene(root_name, expected):
             )
         minimum_span = requirement.get("minimum_detail_span")
         if minimum_span is not None:
-            detail_layer = target.data.uv_layers.get("UV1")
+            detail_layer_name = requirement.get(
+                "detail_layer",
+                "UV1",
+            )
+            detail_layer = target.data.uv_layers.get(detail_layer_name)
             if detail_layer is None:
                 raise AssertionError(
-                    f"Placement {enumeration} is missing detail UV1"
+                    f"Placement {enumeration} is missing detail "
+                    f"{detail_layer_name}"
                 )
             coordinates = [
                 coordinate
@@ -567,9 +590,9 @@ def _validate_saved_scene(root_name, expected):
                     f"Placement {enumeration} detail UV span is too small: "
                     f"{span:.3f}"
                 )
-        observed_routes = {}
-        observed_scales = {}
-        observed_sizes = {}
+        observed_routes = collections.defaultdict(set)
+        observed_scales = collections.defaultdict(set)
+        observed_sizes = collections.defaultdict(set)
         for slot in target.material_slots:
             material = slot.material
             shader = next(
@@ -590,25 +613,25 @@ def _validate_saved_scene(root_name, expected):
                 stem = PurePosixPath(
                     node["bc2_asset_path"]
                 ).name.casefold().removesuffix(".res")
-                observed_routes[stem] = node.get("bc2_uv_map")
-                observed_scales[stem] = tuple(
-                    node.get("bc2_uv_scale", ())
+                observed_routes[stem].add(node.get("bc2_uv_map"))
+                observed_scales[stem].add(
+                    tuple(node.get("bc2_uv_scale", ()))
                 )
-                observed_sizes[stem] = tuple(node.image.size)
+                observed_sizes[stem].add(tuple(node.image.size))
         for stem, uv_map in requirement["routes"].items():
-            if observed_routes.get(stem) != uv_map:
+            if uv_map not in observed_routes.get(stem, set()):
                 raise AssertionError(
                     f"Placement {enumeration} routes {stem} through "
                     f"{observed_routes.get(stem)!r}, expected {uv_map}"
                 )
         for stem, scale in requirement.get("scales", {}).items():
-            if observed_scales.get(stem) != scale:
+            if scale not in observed_scales.get(stem, set()):
                 raise AssertionError(
                     f"Placement {enumeration} scales {stem} by "
                     f"{observed_scales.get(stem)}, expected {scale}"
                 )
         for stem, size in requirement.get("sizes", {}).items():
-            if observed_sizes.get(stem) != size:
+            if size not in observed_sizes.get(stem, set()):
                 raise AssertionError(
                     f"Placement {enumeration} loaded {stem} at "
                     f"{observed_sizes.get(stem)}, expected full size {size}"
