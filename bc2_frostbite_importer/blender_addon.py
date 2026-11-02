@@ -186,6 +186,20 @@ CATEGORIES = (
     ("DATA", "Data", "Other non-resource files", "TEXT", 8),
     ("OTHER", "Other", "Other Frostbite resources", "FILE", 9),
 )
+CONTENT_GROUPS = (
+    ("ALL", "All content", "Do not filter by semantic content"),
+    ("CHARACTER", "Characters", "Characters, soldiers, faces, and animals"),
+    ("VEHICLE", "Vehicles", "Vehicle assets and descriptors"),
+    ("WEAPON", "Weapons", "Weapon assets and descriptors"),
+    ("BUILDING", "Buildings", "Buildings and architectural assets"),
+    ("PROP", "Props", "Other object, scenery, and gameplay props"),
+    ("VEGETATION", "Vegetation", "Vegetation and undergrowth assets"),
+    ("LEVEL", "Levels & Terrain", "Levels, terrain, weather, and game modes"),
+    ("EFFECT", "Effects", "Effects, FX, and decals"),
+    ("UI", "UI & Movies", "Menus, movies, awards, fonts, and localization"),
+    ("AUDIO", "Audio", "Sound assets"),
+    ("OTHER", "Other content", "Content outside the known path groups"),
+)
 
 _ASSET_TYPE_ICONS = {
     "AimAnimation": "ANIM_DATA",
@@ -413,7 +427,16 @@ class BC2Settings(PropertyGroup):
     defaults_initialized: BoolProperty(default=False, options={"HIDDEN"})
     diagnostic_count: IntProperty(default=0, min=0, options={"HIDDEN"})
     scan_in_progress: BoolProperty(default=False, options={"HIDDEN"})
-    category: EnumProperty(name="Asset type", items=CATEGORIES, default="MESH")
+    content_group: EnumProperty(
+        name="Content group",
+        items=CONTENT_GROUPS,
+        default="ALL",
+    )
+    category: EnumProperty(
+        name="Resource type",
+        items=CATEGORIES,
+        default="MESH",
+    )
     search: StringProperty(name="Search", description="Filter paths and resource types")
     archive_search: StringProperty(
         name="Archive search", description="Filter Frostbite archives"
@@ -635,7 +658,9 @@ def _load_assets(context, reset_page: bool = False):
     if reset_page:
         settings.page = 0
     settings.total_results = repository.catalog.asset_count(
-        settings.category, settings.search
+        settings.category,
+        settings.search,
+        settings.content_group,
     )
     max_page = max(0, (settings.total_results - 1) // RESULTS_PER_PAGE)
     settings.page = min(settings.page, max_page)
@@ -644,6 +669,7 @@ def _load_assets(context, reset_page: bool = False):
         settings.search,
         RESULTS_PER_PAGE,
         settings.page * RESULTS_PER_PAGE,
+        settings.content_group,
     )
     settings.assets.clear()
     for row in rows:
@@ -6390,6 +6416,7 @@ class BC2_OT_change_page(Operator):
 
 
 def _draw_asset_browser(layout, settings: BC2Settings, *, rows: int, list_id: str):
+    layout.prop(settings, "content_group")
     layout.prop(settings, "category")
     row = layout.row(align=True)
     row.prop(settings, "search", text="")

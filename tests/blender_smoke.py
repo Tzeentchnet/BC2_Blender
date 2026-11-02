@@ -101,6 +101,13 @@ def _test_settings_registration(context):
         ]
         if size_property.default is not False:
             raise AssertionError("Asset file sizes must default to hidden")
+        content_group_property = (
+            blender_addon.BC2Settings.bl_rna.properties["content_group"]
+        )
+        if content_group_property.default != "ALL":
+            raise AssertionError(
+                "Indexed assets must default to all content groups"
+            )
         if (
             blender_addon._asset_type_icon("SkinnedMeshSet", "Mesh.res")
             != "MOD_ARMATURE"
@@ -185,10 +192,22 @@ def _test_settings_registration(context):
                     {"path": "Dist/win32/levels/mp_001/terrain-00.fbrb"},
                 )
 
-            def asset_count(self, category="ALL", query=""):
+            def asset_count(
+                self,
+                category="ALL",
+                query="",
+                content_group="ALL",
+            ):
                 return 1
 
-            def search_assets(self, category, query, limit, offset):
+            def search_assets(
+                self,
+                category,
+                query,
+                limit,
+                offset,
+                content_group="ALL",
+            ):
                 return (
                     {
                         "id": 1,

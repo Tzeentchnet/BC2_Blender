@@ -46,7 +46,10 @@ For a source checkout, install the repository root as an extension or add `bc2_f
    behavior is currently validated with `MP_001`.
 5. For any other PC bundle, select it in **PC Frostbite Archives** and click
    **Index Selected Archive**. This operation also runs in the background.
-6. For individual assets, filter the indexed asset list by type:
+6. For individual assets, combine the **Content group** filter
+   (Characters, Vehicles, Weapons, Buildings, Props, Vegetation, Levels &
+   Terrain, Effects, UI & Movies, Audio, or Other) with the resource-type
+   filter:
    - Meshes
    - Textures
    - Terrain
@@ -55,6 +58,9 @@ For a source checkout, install the repository root as an extension or add `bc2_f
    - Audio
    - UI / Video
    - Other data
+   The word-search field remains active alongside both filters, so a search
+   such as `Raven` within **Characters** and **Meshes** narrows the complete
+   result set before pagination.
    Rows use a compact type icon so more of the asset name remains visible.
    Enable **Sizes** beside the search field only when file sizes are needed.
 7. Select an asset and click **Import Selected**, or use **Extract Raw**.

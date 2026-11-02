@@ -12,6 +12,99 @@ from .records import ArchiveDescriptor
 
 
 SCHEMA_VERSION = "1"
+_CONTENT_GROUP_PREFIXES = {
+    "CHARACTER": (
+        "characters/%",
+        "animations/faces/%",
+        "animations/animals/%",
+        "objects/soldiers/%",
+        "objects/animals/%",
+    ),
+    "VEHICLE": ("objects/vehicles/%",),
+    "WEAPON": ("objects/weapons/%",),
+    "BUILDING": (
+        "objects/buildings/%",
+        "objects/architecture/%",
+    ),
+    "VEGETATION": (
+        "vegetation/%",
+        "objects/vegetation/%",
+        "objects/undergrowth/%",
+    ),
+    "LEVEL": (
+        "levels/%",
+        "terrains/%",
+        "weather/%",
+        "gamemodes/%",
+        "scenes/%",
+    ),
+    "EFFECT": (
+        "fx/%",
+        "effects/%",
+        "decals/%",
+    ),
+    "UI": (
+        "menu/%",
+        "movies/%",
+        "awards/%",
+        "fonts/%",
+        "localization/%",
+        "objects/ui/%",
+    ),
+    "AUDIO": ("sound/%",),
+}
+_NON_PROP_OBJECT_PREFIXES = tuple(
+    prefix
+    for prefixes in _CONTENT_GROUP_PREFIXES.values()
+    for prefix in prefixes
+    if prefix.startswith("objects/")
+)
+
+
+def _prefix_filter(
+    column: str,
+    prefixes: tuple[str, ...],
+) -> tuple[str, list[object]]:
+    return (
+        "(" + " OR ".join(f"{column} LIKE ?" for _ in prefixes) + ")",
+        list(prefixes),
+    )
+
+
+def _content_group_filter(
+    content_group: str,
+    column: str,
+) -> tuple[str | None, list[object]]:
+    if content_group == "ALL":
+        return None, []
+    if content_group == "PROP":
+        excluded, parameters = _prefix_filter(
+            column,
+            _NON_PROP_OBJECT_PREFIXES,
+        )
+        return (
+            f"({column} LIKE ? AND NOT {excluded})",
+            ["objects/%", *parameters],
+        )
+    prefixes = _CONTENT_GROUP_PREFIXES.get(content_group)
+    if prefixes is not None:
+        return _prefix_filter(column, prefixes)
+    if content_group == "OTHER":
+        recognized = tuple(
+            dict.fromkeys(
+                (
+                    "objects/%",
+                    *(
+                        prefix
+                        for values in _CONTENT_GROUP_PREFIXES.values()
+                        for prefix in values
+                    ),
+                )
+            )
+        )
+        expression, parameters = _prefix_filter(column, recognized)
+        return f"NOT {expression}", parameters
+    raise ValueError(f"Unknown asset content group: {content_group}")
 
 
 class AssetCatalog:
@@ -330,12 +423,20 @@ class AssetCatalog:
         query: str = "",
         limit: int = 200,
         offset: int = 0,
+        content_group: str = "ALL",
     ):
         where = ["(assets.path LIKE ? OR assets.asset_type LIKE ?)"]
         parameters: list[object] = [f"%{query}%", f"%{query}%"]
         if category != "ALL":
             where.append("assets.category = ?")
             parameters.append(category)
+        content_filter, content_parameters = _content_group_filter(
+            content_group,
+            "assets.path",
+        )
+        if content_filter is not None:
+            where.append(content_filter)
+            parameters.extend(content_parameters)
         parameters.extend((limit, offset))
         return self.connection.execute(
             f"""
@@ -348,12 +449,24 @@ class AssetCatalog:
             parameters,
         ).fetchall()
 
-    def asset_count(self, category: str = "ALL", query: str = "") -> int:
+    def asset_count(
+        self,
+        category: str = "ALL",
+        query: str = "",
+        content_group: str = "ALL",
+    ) -> int:
         where = ["(path LIKE ? OR asset_type LIKE ?)"]
         parameters: list[object] = [f"%{query}%", f"%{query}%"]
         if category != "ALL":
             where.append("category = ?")
             parameters.append(category)
+        content_filter, content_parameters = _content_group_filter(
+            content_group,
+            "path",
+        )
+        if content_filter is not None:
+            where.append(content_filter)
+            parameters.extend(content_parameters)
         row = self.connection.execute(
             f"SELECT COUNT(*) AS count FROM assets WHERE {' AND '.join(where)}",
             parameters,

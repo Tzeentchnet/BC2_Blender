@@ -83,6 +83,14 @@ Deleted records are intentionally omitted from the asset browser. Resource
 categories are derived from the type string, with non-resource `.dbx`,
 `.dbmanifest`, and `.xml` files categorized as level data.
 
+The Indexed Assets browser also provides mutually exclusive semantic content
+groups. These are **implemented path heuristics evaluated at query time**, not
+stored Frostbite fields: known `Characters`/soldier, vehicle, weapon,
+building, vegetation, level, effect, UI, and audio prefixes map to their named
+groups; remaining `Objects` paths map to Props; paths outside all known groups
+map to Other. Content group, resource category, and case-insensitive word
+search predicates are combined in SQLite before ordering and pagination.
+
 Mesh-set resources are resolved to a matching `MeshData` path using the pattern
 `<base>_lod%_data.res`, preferring `_lod0_data.res` and then the same archive.
 This is a naming convention and lookup heuristic, not a decoded mesh-set

@@ -19,6 +19,7 @@ from bc2_frostbite_importer.core.assembly import (
     modular_assembly,
     vehicle_part_state,
 )
+from bc2_frostbite_importer.core.catalog import AssetCatalog
 from bc2_frostbite_importer.core.dbx import (
     DbxDocument,
     DbxElement,
@@ -26,6 +27,7 @@ from bc2_frostbite_importer.core.dbx import (
     parse_dbx,
 )
 from bc2_frostbite_importer.core.errors import CorruptDataError
+from bc2_frostbite_importer.core.fbrb import FbrbEntry
 from bc2_frostbite_importer.core.granny import (
     GrannyCurve,
     parse_granny_animation,
@@ -45,6 +47,7 @@ from bc2_frostbite_importer.core.mesh import (
     parse_watermesh,
     split_mesh_subset_by_parts,
 )
+from bc2_frostbite_importer.core.records import ArchiveDescriptor
 from bc2_frostbite_importer.core.repository import AssetRepository
 from bc2_frostbite_importer.core.shaderdb import (
     _rdef_texture_parameters,
@@ -2104,6 +2107,184 @@ class LevelDiscoveryTests(unittest.TestCase):
                 "Dist/win32/levels/mp_common/level-00.fbrb",
             ),
         )
+
+
+class CatalogTests(unittest.TestCase):
+    def test_content_groups_combine_with_type_and_word_filters(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            catalog = AssetCatalog(Path(temporary) / "catalog.sqlite3")
+            try:
+                archive_id = catalog.upsert_archive(
+                    ArchiveDescriptor(
+                        "Dist/Test.fbrb",
+                        4096,
+                        "pc",
+                        {"path": "Dist/Test.fbrb"},
+                    )
+                )
+                definitions = (
+                    (
+                        "Characters/Beach/3P/Jap_Infantry/"
+                        "Jap_Infantry_Mesh.res",
+                        "SkinnedMeshSet",
+                    ),
+                    (
+                        "Objects/Soldiers/Beach/SP_JP/"
+                        "SP_JP_Rifleman.dbx",
+                        "<non-resource>",
+                    ),
+                    (
+                        "Objects/Vehicles/Air/AH60/AH60_Mesh.res",
+                        "CompositeMeshSet",
+                    ),
+                    (
+                        "Objects/Weapons/Rifles/M16/M16_Mesh.res",
+                        "RigidMeshSet",
+                    ),
+                    (
+                        "Objects/Buildings/Barn/Barn_Mesh.res",
+                        "CompositeMeshSet",
+                    ),
+                    (
+                        "Objects/Street_Objects/Crate/Crate_Mesh.res",
+                        "RigidMeshSet",
+                    ),
+                    (
+                        "Vegetation/Trees/Pine/Pine_Mesh.res",
+                        "TreeMeshSet",
+                    ),
+                    ("Levels/MP_001/Level.dbx", "<non-resource>"),
+                    ("FX/Explosions/Dust.res", "ITexture"),
+                    ("Menu/Movies/Intro.res", "BinkMemory"),
+                    ("Sound/Ambience/Wind.res", "Wave"),
+                    ("Systems/GameSettings.dbx", "<non-resource>"),
+                )
+                catalog.replace_archive_assets(
+                    archive_id,
+                    tuple(
+                        FbrbEntry(
+                            path,
+                            asset_type,
+                            index * 16,
+                            16,
+                            16,
+                            1,
+                        )
+                        for index, (path, asset_type) in enumerate(
+                            definitions
+                        )
+                    ),
+                    payload_offset=0,
+                    payload_compressed=False,
+                    payload_size=4096,
+                )
+
+                expected_groups = {
+                    "CHARACTER": {definitions[0][0], definitions[1][0]},
+                    "VEHICLE": {definitions[2][0]},
+                    "WEAPON": {definitions[3][0]},
+                    "BUILDING": {definitions[4][0]},
+                    "PROP": {definitions[5][0]},
+                    "VEGETATION": {definitions[6][0]},
+                    "LEVEL": {definitions[7][0]},
+                    "EFFECT": {definitions[8][0]},
+                    "UI": {definitions[9][0]},
+                    "AUDIO": {definitions[10][0]},
+                    "OTHER": {definitions[11][0]},
+                }
+                grouped_paths = []
+                for content_group, expected_paths in expected_groups.items():
+                    rows = catalog.search_assets(
+                        "ALL",
+                        "",
+                        100,
+                        0,
+                        content_group,
+                    )
+                    actual_paths = {row["path"] for row in rows}
+                    self.assertEqual(actual_paths, expected_paths)
+                    self.assertEqual(
+                        catalog.asset_count(
+                            "ALL",
+                            "",
+                            content_group,
+                        ),
+                        len(rows),
+                    )
+                    grouped_paths.extend(actual_paths)
+                self.assertCountEqual(
+                    grouped_paths,
+                    [path for path, _asset_type in definitions],
+                )
+                self.assertEqual(
+                    len(grouped_paths),
+                    len(set(grouped_paths)),
+                )
+
+                character_meshes = catalog.search_assets(
+                    "MESH",
+                    "",
+                    100,
+                    0,
+                    "CHARACTER",
+                )
+                self.assertEqual(
+                    [row["path"] for row in character_meshes],
+                    [definitions[0][0]],
+                )
+                self.assertEqual(
+                    len(
+                        catalog.search_assets(
+                            "ALL",
+                            "",
+                            1,
+                            0,
+                            "CHARACTER",
+                        )
+                    ),
+                    1,
+                )
+                self.assertEqual(
+                    len(
+                        catalog.search_assets(
+                            "ALL",
+                            "",
+                            1,
+                            1,
+                            "CHARACTER",
+                        )
+                    ),
+                    1,
+                )
+                self.assertEqual(
+                    catalog.asset_count(
+                        "LEVEL_DATA",
+                        "Rifleman",
+                        "CHARACTER",
+                    ),
+                    1,
+                )
+                self.assertEqual(
+                    [
+                        row["path"]
+                        for row in catalog.search_assets(
+                            "MESH",
+                            "Mesh",
+                            100,
+                            0,
+                            "PROP",
+                        )
+                    ],
+                    [definitions[5][0]],
+                )
+                with self.assertRaises(ValueError):
+                    catalog.asset_count(
+                        "ALL",
+                        "",
+                        "NOT_A_CONTENT_GROUP",
+                    )
+            finally:
+                catalog.close()
 
 
 class RepositoryTests(unittest.TestCase):
