@@ -449,6 +449,22 @@ class BC2Settings(PropertyGroup):
         description="Show file sizes in the asset list",
         default=False,
     )
+    collapse_virtual_paths: BoolProperty(
+        name="Collapse identical paths",
+        description=(
+            "Show one result when the same case-insensitive virtual path "
+            "is stored in multiple archives"
+        ),
+        default=True,
+    )
+    hide_lod_variants: BoolProperty(
+        name="Hide LOD variants",
+        description=(
+            "Hide internal MeshData resources named like "
+            "*_lod0_data.res"
+        ),
+        default=True,
+    )
     assets: CollectionProperty(type=BC2AssetListItem)
     active_asset_index: IntProperty(default=0)
     archives: CollectionProperty(type=BC2ArchiveListItem)
@@ -661,6 +677,8 @@ def _load_assets(context, reset_page: bool = False):
         settings.category,
         settings.search,
         settings.content_group,
+        collapse_virtual_paths=settings.collapse_virtual_paths,
+        hide_lod_variants=settings.hide_lod_variants,
     )
     max_page = max(0, (settings.total_results - 1) // RESULTS_PER_PAGE)
     settings.page = min(settings.page, max_page)
@@ -670,6 +688,8 @@ def _load_assets(context, reset_page: bool = False):
         RESULTS_PER_PAGE,
         settings.page * RESULTS_PER_PAGE,
         settings.content_group,
+        collapse_virtual_paths=settings.collapse_virtual_paths,
+        hide_lod_variants=settings.hide_lod_variants,
     )
     settings.assets.clear()
     for row in rows:
@@ -6418,6 +6438,9 @@ class BC2_OT_change_page(Operator):
 def _draw_asset_browser(layout, settings: BC2Settings, *, rows: int, list_id: str):
     layout.prop(settings, "content_group")
     layout.prop(settings, "category")
+    options = layout.row(align=True)
+    options.prop(settings, "collapse_virtual_paths")
+    options.prop(settings, "hide_lod_variants")
     row = layout.row(align=True)
     row.prop(settings, "search", text="")
     row.prop(settings, "show_asset_sizes")

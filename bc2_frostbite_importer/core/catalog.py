@@ -59,6 +59,7 @@ _NON_PROP_OBJECT_PREFIXES = tuple(
     for prefix in prefixes
     if prefix.startswith("objects/")
 )
+_LOD_VARIANT_GLOB = "*_lod[0-9]*_data.res"
 
 
 def _prefix_filter(
@@ -105,6 +106,35 @@ def _content_group_filter(
         expression, parameters = _prefix_filter(column, recognized)
         return f"NOT {expression}", parameters
     raise ValueError(f"Unknown asset content group: {content_group}")
+
+
+def _asset_filter(
+    category: str,
+    query: str,
+    content_group: str,
+    hide_lod_variants: bool,
+) -> tuple[str, list[object]]:
+    where = ["(assets.path LIKE ? OR assets.asset_type LIKE ?)"]
+    parameters: list[object] = [f"%{query}%", f"%{query}%"]
+    if category != "ALL":
+        where.append("assets.category = ?")
+        parameters.append(category)
+    content_filter, content_parameters = _content_group_filter(
+        content_group,
+        "assets.path",
+    )
+    if content_filter is not None:
+        where.append(content_filter)
+        parameters.extend(content_parameters)
+    if hide_lod_variants:
+        where.append(
+            "NOT ("
+            "assets.asset_type = 'MeshData' "
+            "AND lower(assets.path) GLOB ?"
+            ")"
+        )
+        parameters.append(_LOD_VARIANT_GLOB)
+    return " AND ".join(where), parameters
 
 
 class AssetCatalog:
@@ -424,26 +454,41 @@ class AssetCatalog:
         limit: int = 200,
         offset: int = 0,
         content_group: str = "ALL",
+        collapse_virtual_paths: bool = False,
+        hide_lod_variants: bool = False,
     ):
-        where = ["(assets.path LIKE ? OR assets.asset_type LIKE ?)"]
-        parameters: list[object] = [f"%{query}%", f"%{query}%"]
-        if category != "ALL":
-            where.append("assets.category = ?")
-            parameters.append(category)
-        content_filter, content_parameters = _content_group_filter(
+        asset_filter, parameters = _asset_filter(
+            category,
+            query,
             content_group,
-            "assets.path",
+            hide_lod_variants,
         )
-        if content_filter is not None:
-            where.append(content_filter)
-            parameters.extend(content_parameters)
         parameters.extend((limit, offset))
+        if collapse_virtual_paths:
+            return self.connection.execute(
+                f"""
+                WITH matching_assets AS (
+                    SELECT MIN(assets.id) AS id
+                    FROM assets
+                    WHERE {asset_filter}
+                    GROUP BY assets.path COLLATE NOCASE
+                )
+                SELECT assets.*, archives.path AS archive_path,
+                       archives.platform
+                FROM matching_assets
+                JOIN assets ON assets.id = matching_assets.id
+                JOIN archives ON archives.id = assets.archive_id
+                ORDER BY assets.path COLLATE NOCASE, assets.id
+                LIMIT ? OFFSET ?
+                """,
+                parameters,
+            ).fetchall()
         return self.connection.execute(
             f"""
             SELECT assets.*, archives.path AS archive_path, archives.platform
             FROM assets JOIN archives ON archives.id = assets.archive_id
-            WHERE {' AND '.join(where)}
-            ORDER BY assets.path COLLATE NOCASE
+            WHERE {asset_filter}
+            ORDER BY assets.path COLLATE NOCASE, assets.id
             LIMIT ? OFFSET ?
             """,
             parameters,
@@ -454,21 +499,35 @@ class AssetCatalog:
         category: str = "ALL",
         query: str = "",
         content_group: str = "ALL",
+        collapse_virtual_paths: bool = False,
+        hide_lod_variants: bool = False,
     ) -> int:
-        where = ["(path LIKE ? OR asset_type LIKE ?)"]
-        parameters: list[object] = [f"%{query}%", f"%{query}%"]
-        if category != "ALL":
-            where.append("category = ?")
-            parameters.append(category)
-        content_filter, content_parameters = _content_group_filter(
+        asset_filter, parameters = _asset_filter(
+            category,
+            query,
             content_group,
-            "path",
+            hide_lod_variants,
         )
-        if content_filter is not None:
-            where.append(content_filter)
-            parameters.extend(content_parameters)
+        if collapse_virtual_paths:
+            row = self.connection.execute(
+                f"""
+                SELECT COUNT(*) AS count
+                FROM (
+                    SELECT 1
+                    FROM assets
+                    WHERE {asset_filter}
+                    GROUP BY assets.path COLLATE NOCASE
+                )
+                """,
+                parameters,
+            ).fetchone()
+            return int(row["count"])
         row = self.connection.execute(
-            f"SELECT COUNT(*) AS count FROM assets WHERE {' AND '.join(where)}",
+            f"""
+            SELECT COUNT(*) AS count
+            FROM assets
+            WHERE {asset_filter}
+            """,
             parameters,
         ).fetchone()
         return int(row["count"])

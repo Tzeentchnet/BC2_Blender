@@ -91,6 +91,16 @@ groups; remaining `Objects` paths map to Props; paths outside all known groups
 map to Other. Content group, resource category, and case-insensitive word
 search predicates are combined in SQLite before ordering and pagination.
 
+Two additional browser predicates are enabled by default. **Implemented
+heuristic:** Collapse identical paths groups case-insensitive virtual paths
+after applying the active filters and displays the lowest catalog record ID
+from each group. It does not remove archive entries or assert that payload
+bytes are identical. **Implemented heuristic, verified on the PC retail
+sample:** Hide LOD variants omits `MeshData` paths matching
+`*_lodN_data.res`; the observed sample uses `N` values 0 through 3. Both
+options affect browser counts and results before pagination, but do not alter
+mesh-set resolution or the stored catalog.
+
 Mesh-set resources are resolved to a matching `MeshData` path using the pattern
 `<base>_lod%_data.res`, preferring `_lod0_data.res` and then the same archive.
 This is a naming convention and lookup heuristic, not a decoded mesh-set

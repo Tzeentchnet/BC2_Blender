@@ -2286,6 +2286,146 @@ class CatalogTests(unittest.TestCase):
             finally:
                 catalog.close()
 
+    def test_collapses_duplicate_paths_and_hides_lod_variants(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            catalog = AssetCatalog(Path(temporary) / "catalog.sqlite3")
+            try:
+                first_archive_id = catalog.upsert_archive(
+                    ArchiveDescriptor(
+                        "Dist/First.fbrb",
+                        4096,
+                        "pc",
+                        {"path": "Dist/First.fbrb"},
+                    )
+                )
+                second_archive_id = catalog.upsert_archive(
+                    ArchiveDescriptor(
+                        "Dist/Second.fbrb",
+                        4096,
+                        "pc",
+                        {"path": "Dist/Second.fbrb"},
+                    )
+                )
+                catalog.replace_archive_assets(
+                    first_archive_id,
+                    (
+                        FbrbEntry(
+                            "Objects/Vehicles/Air/Mi28/Mi28_Mesh.res",
+                            "CompositeMeshSet",
+                            0,
+                            16,
+                            16,
+                            1,
+                        ),
+                        FbrbEntry(
+                            "Objects/Vehicles/Air/Mi28/"
+                            "Mi28_Mesh_lod0_data.res",
+                            "MeshData",
+                            16,
+                            16,
+                            16,
+                            1,
+                        ),
+                        FbrbEntry(
+                            "Objects/Vehicles/Air/Mi28/"
+                            "Mi28_Mesh_lod1_data.res",
+                            "MeshData",
+                            32,
+                            16,
+                            16,
+                            1,
+                        ),
+                    ),
+                    payload_offset=0,
+                    payload_compressed=False,
+                    payload_size=4096,
+                )
+                catalog.replace_archive_assets(
+                    second_archive_id,
+                    (
+                        FbrbEntry(
+                            "objects/vehicles/air/mi28/MI28_MESH.RES",
+                            "CompositeMeshSet",
+                            0,
+                            16,
+                            16,
+                            1,
+                        ),
+                        FbrbEntry(
+                            "objects/vehicles/air/mi28/"
+                            "MI28_MESH_LOD0_DATA.RES",
+                            "MeshData",
+                            16,
+                            16,
+                            16,
+                            1,
+                        ),
+                    ),
+                    payload_offset=0,
+                    payload_compressed=False,
+                    payload_size=4096,
+                )
+
+                def search(**options):
+                    return catalog.search_assets(
+                        "MESH",
+                        "Mi28",
+                        100,
+                        0,
+                        "VEHICLE",
+                        **options,
+                    )
+
+                def count(**options):
+                    return catalog.asset_count(
+                        "MESH",
+                        "Mi28",
+                        "VEHICLE",
+                        **options,
+                    )
+
+                self.assertEqual(len(search()), 5)
+                self.assertEqual(count(), 5)
+
+                collapsed = search(collapse_virtual_paths=True)
+                self.assertEqual(len(collapsed), 3)
+                self.assertEqual(
+                    count(collapse_virtual_paths=True),
+                    len(collapsed),
+                )
+                self.assertEqual(
+                    collapsed[0]["archive_path"],
+                    "Dist/First.fbrb",
+                )
+
+                without_lods = search(hide_lod_variants=True)
+                self.assertEqual(len(without_lods), 2)
+                self.assertEqual(
+                    count(hide_lod_variants=True),
+                    len(without_lods),
+                )
+                self.assertTrue(
+                    all(row["asset_type"] != "MeshData" for row in without_lods)
+                )
+
+                visible = search(
+                    collapse_virtual_paths=True,
+                    hide_lod_variants=True,
+                )
+                self.assertEqual(
+                    [row["path"] for row in visible],
+                    ["Objects/Vehicles/Air/Mi28/Mi28_Mesh.res"],
+                )
+                self.assertEqual(
+                    count(
+                        collapse_virtual_paths=True,
+                        hide_lod_variants=True,
+                    ),
+                    len(visible),
+                )
+            finally:
+                catalog.close()
+
 
 class RepositoryTests(unittest.TestCase):
     def test_indexes_all_pending_archives_and_records_failures(self):

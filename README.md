@@ -61,6 +61,11 @@ For a source checkout, install the repository root as an extension or add `bc2_f
    The word-search field remains active alongside both filters, so a search
    such as `Raven` within **Characters** and **Meshes** narrows the complete
    result set before pagination.
+   **Collapse identical paths** is enabled by default and shows one row when
+   the same virtual resource path is packaged in several archives.
+   **Hide LOD variants** is also enabled by default and hides internal
+   `*_lodN_data.res` mesh payloads; disable either option and refresh the list
+   when the individual archive copies or LOD resources are needed.
    Rows use a compact type icon so more of the asset name remains visible.
    Enable **Sizes** beside the search field only when file sizes are needed.
 7. Select an asset and click **Import Selected**, or use **Extract Raw**.

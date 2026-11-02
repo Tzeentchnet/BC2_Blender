@@ -108,6 +108,19 @@ def _test_settings_registration(context):
             raise AssertionError(
                 "Indexed assets must default to all content groups"
             )
+        collapse_property = blender_addon.BC2Settings.bl_rna.properties[
+            "collapse_virtual_paths"
+        ]
+        hide_lods_property = blender_addon.BC2Settings.bl_rna.properties[
+            "hide_lod_variants"
+        ]
+        if (
+            collapse_property.default is not True
+            or hide_lods_property.default is not True
+        ):
+            raise AssertionError(
+                "Duplicate paths and LOD variants must be hidden by default"
+            )
         if (
             blender_addon._asset_type_icon("SkinnedMeshSet", "Mesh.res")
             != "MOD_ARMATURE"
@@ -175,6 +188,10 @@ def _test_settings_registration(context):
             raise AssertionError("Forced default reset did not restore scale")
 
         class SyntheticCatalog:
+            def __init__(self):
+                self.asset_count_calls = []
+                self.search_asset_calls = []
+
             def archives(self, query="", limit=1000, offset=0):
                 test_archive = {
                     "id": 1,
@@ -197,7 +214,18 @@ def _test_settings_registration(context):
                 category="ALL",
                 query="",
                 content_group="ALL",
+                collapse_virtual_paths=False,
+                hide_lod_variants=False,
             ):
+                self.asset_count_calls.append(
+                    (
+                        category,
+                        query,
+                        content_group,
+                        collapse_virtual_paths,
+                        hide_lod_variants,
+                    )
+                )
                 return 1
 
             def search_assets(
@@ -207,7 +235,20 @@ def _test_settings_registration(context):
                 limit,
                 offset,
                 content_group="ALL",
+                collapse_virtual_paths=False,
+                hide_lod_variants=False,
             ):
+                self.search_asset_calls.append(
+                    (
+                        category,
+                        query,
+                        limit,
+                        offset,
+                        content_group,
+                        collapse_virtual_paths,
+                        hide_lod_variants,
+                    )
+                )
                 return (
                     {
                         "id": 1,
@@ -354,6 +395,17 @@ def _test_settings_registration(context):
             or "existing catalog preserved" not in settings.status
         ):
             raise AssertionError("Scan Disc did not repopulate the cached catalog")
+        if (
+            not repository.catalog.search_asset_calls
+            or repository.catalog.search_asset_calls[-1][-2:]
+            != (True, True)
+            or not repository.catalog.asset_count_calls
+            or repository.catalog.asset_count_calls[-1][-2:]
+            != (True, True)
+        ):
+            raise AssertionError(
+                "Indexed asset visibility options were not forwarded"
+            )
 
         class MapPanelLayout:
             def __init__(self):
