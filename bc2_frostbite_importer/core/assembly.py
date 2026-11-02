@@ -8,6 +8,7 @@ from pathlib import PurePosixPath
 
 from .dbx import DbxDocument, DbxElement
 from .errors import CorruptDataError
+from .level import FrostbiteTransform
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,10 @@ class AssemblyComponent:
     mesh_set_path: str
     shader_set_reference: str | None
     random_group: int | None
+    skeleton_reference: str | None = None
+    transform: FrostbiteTransform | None = None
+    source_type: str | None = None
+    source_guid: str | None = None
 
 
 @dataclass(frozen=True)
@@ -379,16 +384,91 @@ def _component(
     assembly_kind: str,
     shader_set_reference: str | None = None,
     random_group: int | None = None,
+    *,
+    name: str | None = None,
+    role: str | None = None,
+    skeleton_reference: str | None = None,
+    transform: FrostbiteTransform | None = None,
+    source_type: str | None = None,
+    source_guid: str | None = None,
 ) -> AssemblyComponent:
     path = _mesh_set_path(mesh_reference)
     return AssemblyComponent(
-        name=PurePosixPath(path).stem,
-        role=_component_role(path, assembly_kind),
+        name=name or PurePosixPath(path).stem,
+        role=role or _component_role(path, assembly_kind),
         mesh_reference=mesh_reference,
         mesh_set_path=path,
         shader_set_reference=shader_set_reference,
         random_group=random_group,
+        skeleton_reference=skeleton_reference,
+        transform=transform,
+        source_type=source_type,
+        source_guid=source_guid,
     )
+
+
+def _component_transform(component: DbxElement) -> FrostbiteTransform | None:
+    value = component.child("complex", "Transform")
+    if value is None or value.value is None:
+        return None
+    try:
+        values = tuple(float(item) for item in value.value.split("/"))
+    except ValueError as exc:
+        raise CorruptDataError(
+            "Vehicle component Transform contains a non-numeric value"
+        ) from exc
+    return FrostbiteTransform(values)
+
+
+def _vehicle_track_components(
+    document: DbxDocument,
+    entity: DbxElement,
+) -> tuple[AssemblyComponent, ...]:
+    components = []
+    visited = set()
+
+    def visit(component: DbxElement):
+        guid = component.attribute("guid")
+        key = guid.casefold() if guid else str(id(component))
+        if key in visited:
+            return
+        visited.add(key)
+
+        component_type = component.attribute("type") or ""
+        if component_type.endswith("TrackComponentData"):
+            mesh_reference = _reference(component, "Mesh")
+            if mesh_reference is not None:
+                source_name = _value(component, "Name")
+                components.append(
+                    _component(
+                        mesh_reference,
+                        "VEHICLE",
+                        name=(
+                            source_name
+                            if source_name
+                            else f"Track {len(components) + 1:02d}"
+                        ),
+                        role="TRACK",
+                        skeleton_reference=_reference(
+                            component,
+                            "Skeleton",
+                        ),
+                        transform=_component_transform(component),
+                        source_type=component_type,
+                        source_guid=guid,
+                    )
+                )
+
+        for reference in _array_references(component, "Components"):
+            child = document.instance(reference)
+            if child is not None:
+                visit(child)
+
+    for reference in _array_references(entity, "Components"):
+        component = document.instance(reference)
+        if component is not None:
+            visit(component)
+    return tuple(components)
 
 
 def _character_components(
@@ -451,18 +531,22 @@ def modular_assembly(
     if instance_type.endswith("VehicleEntityData"):
         mesh_reference = _reference(instance, "Mesh")
         if mesh_reference is not None:
+            components = (
+                _component(
+                    mesh_reference,
+                    "VEHICLE",
+                    _reference(instance, "MeshShaderSet"),
+                    None,
+                    source_type=instance_type,
+                    source_guid=instance.attribute("guid"),
+                ),
+                *_vehicle_track_components(document, instance),
+            )
             return ModularAssembly(
                 name=name,
                 kind="VEHICLE",
                 source_path=source_path,
-                components=(
-                    _component(
-                        mesh_reference,
-                        "VEHICLE",
-                        _reference(instance, "MeshShaderSet"),
-                        None,
-                    ),
-                ),
+                components=components,
                 parts=_vehicle_parts(document, instance),
             )
     return None

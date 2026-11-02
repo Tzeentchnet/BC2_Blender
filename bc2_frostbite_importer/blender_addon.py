@@ -127,6 +127,7 @@ class _ImportedAssemblyComponent:
     collection: object
     objects: tuple[object, ...]
     mesh_type: int
+    armature: object | None = None
 
 
 @dataclass(frozen=True)
@@ -1613,8 +1614,16 @@ def _skeleton_path_for_resource(repository, resource_asset) -> str:
     return _skeleton_path_for_document(parse_dbx(raw), descriptor_path)
 
 
-def _read_referenced_skeleton(repository, resource_asset):
-    skeleton_path = _skeleton_path_for_resource(repository, resource_asset)
+def _read_referenced_skeleton(
+    repository,
+    resource_asset,
+    skeleton_reference: str | None = None,
+):
+    skeleton_path = (
+        _reference_resource_path(skeleton_reference)
+        if skeleton_reference is not None
+        else _skeleton_path_for_resource(repository, resource_asset)
+    )
     skeleton_asset = repository.catalog.find_asset(
         skeleton_path,
         (resource_asset["archive_path"],),
@@ -1941,6 +1950,10 @@ def _create_modular_assembly(
     root_collection["bc2_assembly_kind"] = assembly.kind
     root_collection["bc2_assembly_path"] = assembly.source_path
     root_collection["bc2_component_count"] = len(assembly.components)
+    root_collection["bc2_track_component_count"] = sum(
+        component.role == "TRACK"
+        for component in assembly.components
+    )
     components_collection = _new_child_collection(
         root_collection,
         "Components",
@@ -1989,8 +2002,63 @@ def _create_modular_assembly(
         component_collection["bc2_component_index"] = component_index
         component_collection["bc2_component_path"] = component.mesh_set_path
         component_collection["bc2_component_role"] = component.role
+        if component.source_type is not None:
+            component_collection["bc2_component_source_type"] = (
+                component.source_type
+            )
+        if component.source_guid is not None:
+            component_collection["bc2_component_source_guid"] = (
+                component.source_guid
+            )
+        if component.skeleton_reference is not None:
+            component_collection["bc2_component_skeleton_path"] = (
+                _reference_resource_path(component.skeleton_reference)
+            )
+        if component.transform is not None:
+            component_collection["bc2_component_transform"] = list(
+                component.transform.values
+            )
         if component.random_group is not None:
             component_collection["bc2_random_group"] = component.random_group
+
+        component_skeleton = skeleton
+        component_skeleton_asset = skeleton_asset
+        component_armature = None
+        if (
+            component.skeleton_reference is not None
+            and str(mesh_set_asset["platform"]) == "pc"
+        ):
+            component_skeleton_asset, component_skeleton = (
+                _read_referenced_skeleton(
+                    repository,
+                    mesh_set_asset,
+                    component.skeleton_reference,
+                )
+            )
+            rig_collection = _new_child_collection(
+                component_collection,
+                "Rig",
+            )
+            component_armature = _create_armature_object(
+                context,
+                component_skeleton,
+                component_skeleton_asset,
+                settings,
+                collection=rig_collection,
+            )
+            component_armature["bc2_assembly_path"] = assembly.source_path
+            component_armature["bc2_component_path"] = (
+                component.mesh_set_path
+            )
+            component_armature["bc2_component_role"] = component.role
+            if component.source_guid is not None:
+                component_armature["bc2_component_source_guid"] = (
+                    component.source_guid
+                )
+            if component.transform is not None:
+                component_armature["bc2_component_transform"] = list(
+                    component.transform.values
+                )
 
         subset_materials, _, summary = _resolve_mesh_subset_materials(
             repository,
@@ -2028,8 +2096,8 @@ def _create_modular_assembly(
             settings,
             collection=component_collection,
             bone_names=(
-                tuple(bone.name for bone in skeleton.bones)
-                if skeleton is not None
+                tuple(bone.name for bone in component_skeleton.bones)
+                if component_skeleton is not None
                 else None
             ),
             subset_materials=subset_materials,
@@ -2041,14 +2109,43 @@ def _create_modular_assembly(
             obj["bc2_assembly_path"] = assembly.source_path
             obj["bc2_component_path"] = component.mesh_set_path
             obj["bc2_component_role"] = component.role
-        if armature_obj is not None:
-            _bind_meshes_to_armature(objects, armature_obj)
+            if component.source_guid is not None:
+                obj["bc2_component_source_guid"] = component.source_guid
+            if component.transform is not None:
+                obj["bc2_component_transform"] = list(
+                    component.transform.values
+                )
+        binding_armature = component_armature or armature_obj
+        if binding_armature is not None:
+            _bind_meshes_to_armature(objects, binding_armature)
+        if component.transform is not None:
+            component_matrix = Matrix(
+                component.transform.blender_matrix(
+                    axis_conversion=settings.axis_conversion,
+                    unit_scale=settings.unit_scale,
+                )
+            )
+            if component_armature is not None:
+                component_armature.matrix_world = component_matrix
+            elif armature_obj is None:
+                for obj in objects:
+                    obj.matrix_world = component_matrix @ obj.matrix_world
         resolved_material_count += summary["resolved_materials"]
         component_summaries.append(
             {
                 "name": component.name,
                 "role": component.role,
                 "path": component.mesh_set_path,
+                "skeleton": (
+                    _reference_resource_path(component.skeleton_reference)
+                    if component.skeleton_reference is not None
+                    else None
+                ),
+                "translation": (
+                    component.transform.translation
+                    if component.transform is not None
+                    else None
+                ),
                 **summary,
             }
         )
@@ -2058,6 +2155,7 @@ def _create_modular_assembly(
                 collection=component_collection,
                 objects=tuple(objects),
                 mesh_type=parsed.mesh_type,
+                armature=component_armature,
             )
         )
 

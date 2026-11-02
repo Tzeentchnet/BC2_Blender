@@ -21,7 +21,7 @@ the browser is not necessarily decoded.
 | `XenonTexture` | Texture | Xbox untile, byte correction, and DDS conversion |
 | `TerrainHeightfield` | Terrain | Downsampled native preview mesh |
 | soldier entity `.dbx` with `Meshes3p` | Level / DBX | PC: imports every linked LOD0 body/head/headgear module on one shared armature with source materials and modular collections |
-| vehicle entity `.dbx` with a composite `Mesh` | Level / DBX | Imports the linked LOD0 composite into named source-part collections with source materials |
+| vehicle entity `.dbx` with a composite `Mesh` | Level / DBX | Imports the linked LOD0 composite into named source-part collections with source materials; PC `TrackComponentData` records additionally instantiate their shared skinned mesh and explicit skeleton at each exact source transform |
 | other non-resource path ending `.dbx` | Level / DBX | Binary DBX converted to an XML Text datablock |
 | PC level DBX graph | Level / DBX | Complete static map assembly with direct/grouped placements, terrain, water, and DX11-bound materials |
 | `Dx11ShaderDatabase` | Other | Material keys and indexed texture bindings parsed during PC complete-map and skinned-character import |
@@ -44,7 +44,10 @@ High-level DBX assembly dispatch is intentionally deterministic. Selecting the
 soldier or vehicle entity imports its full linked assembly; selecting a
 `SkinnedMeshSet` or `CompositeMeshSet` imports only that component. The
 importer does not reverse-search component references because one body mesh
-can participate in both normal and upgraded soldier entities.
+can participate in both normal and upgraded soldier entities. The same rule
+applies to vehicle tracks: selecting a track `SkinnedMeshSet` imports one
+focused component, while the high-level vehicle graph supplies the repeated
+instances and placement.
 
 ## Cataloged but extracted raw
 

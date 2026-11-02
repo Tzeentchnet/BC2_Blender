@@ -403,6 +403,63 @@ assigns those surfaces to visible LOD0 subsets. See
 [Granny characters and animation](granny-animation.md) and
 [Shaders and materials](../shaders-and-materials.md).
 
+## Vehicle track component instances
+
+**Verified on PC retail BMD3, M1A2, and T90. Implemented for
+`TrackComponentData` in high-level vehicle imports.**
+
+Tracked vehicles do not store one already-assembled two-sided track mesh. Two
+instances in the nested `VehicleEntityData.Components` graph reference the
+same skinned mesh and skeleton:
+
+```text
+VehicleEntityData
+  Components[] -> VehicleComponentData
+    Components[] -> TrackComponentData
+      Name
+      Transform
+      Mesh -> Render.SkinnedMeshAsset
+      Skeleton -> GrannyModel
+      ScrollFactor
+```
+
+The PC binary DBX numeric words are big-endian. `Transform` contains 16
+`float32` words in column-major order; zero-based words 12, 13, and 14 are
+translation X, Y, and Z. Placement uses the upper-left 3x3 and this
+translation, converts `(x, y, z)` to Blender `(x, -z, y)`, and scales only the
+translation. The unused fourth row is not treated as placement data. This is
+important for T90, where the typed DBX renderer exposes non-finite marker
+words as their integer fallback value.
+
+| Vehicle | Instance | Source translation `(x, y, z)` |
+|---|---|---|
+| BMD3 | `Track Right` | `(-1.567699, 0.002113, -0.009618)` |
+| BMD3 | `Track Left` | `(1.567699, 0.002113, -0.009618)` |
+| M1A2 | unnamed instance 1 | `(-1.628634, -0.050659, -0.091767)` |
+| M1A2 | unnamed instance 2 | `(1.613156, -0.063159, -0.091767)` |
+| T90 | `Track Right` | `(-1.629941, 1.023512, -0.025497)` |
+| T90 | `Track Left` | `(1.612939, 1.023512, -0.025497)` |
+
+The asymmetry in the M1A2 values is direct evidence that a preview importer
+must preserve both source instances rather than mirror one side or apply a
+vehicle-name offset. The immediate chassis parent has an identity transform
+in all three verified samples.
+
+The importer creates one local source-backed armature per PC track instance,
+binds a fresh instance of the shared skinned geometry, and applies the exact
+component transform to that armature. BMD3's track resource has one LOD0
+subset with 1,138 vertices and 1,096 triangles; its referenced skeleton has
+eight bones. Component GUID, type, full 16-word transform, mesh path, and
+skeleton path are retained as Blender metadata.
+
+This does not reconstruct track motion. `ScrollFactor`, wheel-component
+physics, runtime bone driving, and non-identity ancestor-transform composition
+remain unsupported. Directly importing `BMD3Tracks_Mesh.res` correctly imports
+one focused mesh component; only the high-level BMD3 entity supplies the two
+vehicle instances and their placement. Export code must retain the two DBX
+component records and their references rather than deriving them from the
+mesh resource.
+
 ## WaterMesh
 
 WaterMesh uses platform byte order: little-endian on PC and big-endian on Xbox

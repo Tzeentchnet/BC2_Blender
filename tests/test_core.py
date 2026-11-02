@@ -1986,6 +1986,112 @@ class DbxTests(unittest.TestCase):
             "Objects/Vehicles/Air/AH60/AH60_Mesh.res",
         )
 
+    def test_vehicle_modular_assembly_preserves_track_instances(self):
+        entity = element(
+            "instance",
+            element(
+                "field",
+                name="Mesh",
+                ref="Objects/Vehicles/Land/BMD3/BMD3_Mesh/MESH-GUID",
+            ),
+            element(
+                "array",
+                element("item", ref="CHASSIS"),
+                name="Components",
+            ),
+            guid="ROOT",
+            type="GameSharedResources.VehicleEntityData",
+            id="Bmd3",
+        )
+        chassis = element(
+            "instance",
+            element(
+                "array",
+                element("item", ref="TRACK-RIGHT"),
+                element("item", ref="TRACK-LEFT"),
+                name="Components",
+            ),
+            guid="CHASSIS",
+            type="GameSharedResources.VehicleComponentData",
+        )
+
+        def track(guid, name, x):
+            return element(
+                "instance",
+                element("array", name="Components"),
+                element("field", name="Name", value=name),
+                element(
+                    "complex",
+                    name="Transform",
+                    value=(
+                        "1/0/0/0/0/1/0/0/0/0/1/0/"
+                        f"{x}/0.25/-0.1/0"
+                    ),
+                ),
+                element(
+                    "field",
+                    name="Mesh",
+                    ref=(
+                        "Objects/Vehicles/Land/BMD3/"
+                        "BMD3Tracks_Mesh/TRACK-MESH-GUID"
+                    ),
+                ),
+                element(
+                    "field",
+                    name="Skeleton",
+                    ref=(
+                        "Objects/Vehicles/Land/BMD3/"
+                        "BMD3Tracks_Skeleton/SKELETON-GUID"
+                    ),
+                ),
+                guid=guid,
+                type="GameSharedResources.TrackComponentData",
+            )
+
+        document = DbxDocument(
+            element(
+                "partition",
+                entity,
+                chassis,
+                track("TRACK-RIGHT", "Track Right", -1.5),
+                track("TRACK-LEFT", "Track Left", 1.5),
+                guid="PARTITION",
+                primaryInstance="ROOT",
+            )
+        )
+
+        assembly = modular_assembly(
+            document,
+            "Objects/Vehicles/Land/BMD3/BMD3.dbx",
+        )
+
+        self.assertIsNotNone(assembly)
+        self.assertEqual(
+            tuple(component.role for component in assembly.components),
+            ("VEHICLE", "TRACK", "TRACK"),
+        )
+        right, left = assembly.components[1:]
+        self.assertEqual((right.name, left.name), ("Track Right", "Track Left"))
+        self.assertEqual(right.mesh_set_path, left.mesh_set_path)
+        self.assertEqual(
+            right.mesh_set_path,
+            "Objects/Vehicles/Land/BMD3/BMD3Tracks_Mesh.res",
+        )
+        self.assertEqual(
+            right.skeleton_reference,
+            (
+                "Objects/Vehicles/Land/BMD3/"
+                "BMD3Tracks_Skeleton/SKELETON-GUID"
+            ),
+        )
+        self.assertEqual(right.transform.translation, (-1.5, 0.25, -0.1))
+        self.assertEqual(left.transform.translation, (1.5, 0.25, -0.1))
+        self.assertEqual(right.source_guid, "TRACK-RIGHT")
+        self.assertEqual(
+            right.source_type,
+            "GameSharedResources.TrackComponentData",
+        )
+
     def test_vehicle_parts_use_health_and_model_states(self):
         entity = element(
             "instance",

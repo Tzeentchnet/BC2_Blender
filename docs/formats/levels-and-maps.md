@@ -51,6 +51,10 @@ GameSharedResources.VehicleEntityData
   Components[] -> nested vehicle components
     HealthStates[] -> Health + MeshName
     LowRpmModel/HighRpmModel -> MeshName
+    TrackComponentData
+      Transform
+      Mesh -> Render.SkinnedMeshAsset
+      Skeleton -> GrannyModel
 ```
 
 The composite LOD0 is split using verified type-2 global part IDs and ordered
@@ -65,11 +69,22 @@ occur at least twice in one name to trigger that fallback; a single occurrence
 often identifies a destructible vehicle section rather than destroyed
 geometry.
 
+On verified PC BMD3, M1A2, and T90 entities, the nested graph also contains two
+`TrackComponentData` instances. Both instances reference one shared track mesh
+and skeleton but retain distinct component GUIDs and transforms. High-level
+vehicle import preserves both records, creates one source-backed local track
+armature per instance, and applies each exact transform. No side, reflection,
+or vehicle-specific offset is inferred. The immediate chassis parent is
+identity in the three verified samples; composition through an unverified
+non-identity ancestor remains unsupported.
+
 Non-default collections are preserved with their source transforms and
 metadata but hidden in both viewport and render. This creates an editable
-retail-like default assembly, not a vehicle rig: runtime pivots, parent links,
-automatic damage switching, rotor animation, and destruction animation remain
-unknown and are not synthesized. Geometry objects are also checked
+retail-like default assembly, not a complete runtime vehicle rig. The local
+track armatures come directly from explicit source skeleton references, but
+track scrolling/wheel driving, runtime pivots, parent links, automatic damage
+switching, rotor animation, and destruction animation remain unknown and are
+not synthesized. Geometry objects are also checked
 independently after part splitting: a source, object, or mesh name containing
 at least two case-insensitive `Wreck` occurrences is hidden in the viewport
 and render even if its part ID places the fragment in an otherwise healthy

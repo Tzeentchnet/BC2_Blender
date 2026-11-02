@@ -225,6 +225,18 @@ texture-conversion, or unresolved-subset diagnostics.
   dark diffuse scales, and Minigun Main uses `Symbols_Us` for color while
   `MiniGun_C` green controls specular. Save/reopen retains every transform,
   visibility state, and material graph and introduces no fabricated armature.
+- PC tracked-vehicle components: BMD3, M1A2, and T90 each contain two
+  `TrackComponentData` instances that share one skinned mesh/skeleton pair and
+  carry distinct transforms. Their immediate chassis parent transforms are
+  identity. BMD3 places `Track Right` at source translation
+  `(-1.567699, 0.002113, -0.009618)` and `Track Left` at
+  `(1.567699, 0.002113, -0.009618)`. M1A2 uses asymmetric X/Y values
+  `(-1.628634, -0.050659)` and `(1.613156, -0.063159)`; T90 uses X values
+  `-1.629941` and `1.612939`. This independently rules out a generic mirror or
+  fixed vehicle offset. The BMD3 Blender regression imports one composite body
+  plus two track instances. Each track retains 1,138 vertices, 1,096
+  triangles, a separate source-backed eight-bone armature, distinct component
+  GUID, exact transform metadata, and placement after save/reopen.
 - PC MI28 assembly: 24 source parts, 44 surface fragments, and 21,032 imported
   triangles. All ten LOD0 subsets retain the byte-32 part-selector declaration
   and coordinate offsets 24/28/36/40. Main and MainMetal use their verified
@@ -511,10 +523,14 @@ These behaviors are useful but need broader format research:
 - PC additive animation wrapper semantics outside the four verified
   `ske01` facial-delta samples.
 - Mesh-set-to-MeshData resolution by path.
-- Composite runtime pivots, parent hierarchy, automatic state switching, and
-  animation. Type-2 membership, ordered LOD0 names, bounds, and mesh-set bind
-  transforms are verified; wreck/damaged name classification remains a
-  fallback where DBX component state data is incomplete.
+- Composite runtime pivots, general parent hierarchy, automatic state
+  switching, and animation. Type-2 membership, ordered LOD0 names, bounds, and
+  mesh-set bind transforms are verified. Direct PC track-component mesh,
+  skeleton, and local transforms are additionally verified on BMD3, M1A2, and
+  T90, whose immediate chassis parents are identity; non-identity ancestor
+  composition and runtime track/wheel driving remain unsupported.
+  Wreck/damaged name classification remains a fallback where DBX component
+  state data is incomplete.
 - TerrainHeightfield trailing offset/LOD table after the height samples.
 - Small FbRB declared-payload discrepancy tolerance.
 - Binary DBX 32-bit integer-versus-float rendering.

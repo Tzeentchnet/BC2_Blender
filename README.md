@@ -121,7 +121,13 @@ alternatives hidden by default. Geometry whose individual source, object, or
 mesh name contains `Wreck` at least twice is also hidden independently of its
 part collection. A single occurrence does not hide either an object or its
 part collection. The **Show All Imported Parts** option leaves these variants
-visible without changing their decoded state metadata.
+visible without changing their decoded state metadata. On verified PC tracked
+vehicles, the same high-level import also follows each nested
+`TrackComponentData`: the shared skinned track mesh is instantiated once per
+source component, bound to that component's referenced track skeleton, and
+placed with its exact DBX transform. Importing the track mesh set directly
+remains a focused single-component import and therefore does not reconstruct
+the left/right vehicle instances.
 **Import related animations** defaults to enabled for direct PC
 `SkinnedMeshSet` imports and modular character `.dbx` imports. The importer
 searches the mesh's and referenced skeleton's exact parent folders. For a PC
@@ -182,7 +188,7 @@ The provided Xbox example indexes 630 Frostbite archives and 251,251 active asse
 | `CompositeMeshSet` | Resolves LOD0 geometry and source materials, corrects shared/global index streams, separates verified source part IDs into named collections, applies decoded mesh-set bind transforms, and hides decoded damaged/destroyed/blurred parts plus geometry or collections with two `Wreck` occurrences in one name by default. A single `Wreck` occurrence alone remains visible. |
 | PC `SkinnedMeshSet` | Resolves LOD0 geometry, the DBX skeleton reference, the default surface set, and source DX11 texture bindings; preserves declaration-specific UV layers (two for verified stride-48 assets and four for stride-64 characters), creates named vertex groups and source materials, adds Armature modifiers, and imports bounded exact-folder plus character-tree Actions when enabled. Console mesh sets remain geometry-only. |
 | PC soldier entity `.dbx` | Resolves every `Meshes3p` body/head/headgear component at LOD0, applies per-component shader-set overrides, binds all modules to one verified skeleton, creates modular component collections, follows character-specific static/facial/kit/revive animation links, and optionally selects eight verified rifle locomotion clips through the explicit shared base-set link. |
-| PC vehicle entity `.dbx` | Resolves the linked composite LOD0 mesh, source-backed materials, ordered named part collections, mesh-set bind transforms, and DBX-backed default/damaged/alternate states without inventing runtime pivots, parenting, or an armature. Matching shader databases are selected by source/duplicate-path/material-key provenance and cached; compatible shader variants route texture bindings to physical UV offsets. Verified AH60 and MI28 families retain dedicated arithmetic while other vehicle glass uses a semantic transmissive fallback. Unknown composite UV declarations remain an explicitly marked cross-subset topology fallback rather than a vehicle-name exception. |
+| PC vehicle entity `.dbx` | Resolves the linked composite LOD0 mesh, source-backed materials, ordered named part collections, mesh-set bind transforms, and DBX-backed default/damaged/alternate states without inventing runtime pivots or parenting. Nested `TrackComponentData` instances are preserved separately: each resolves its shared skinned mesh and explicit skeleton, receives a source-backed local armature, and uses the exact component transform. Matching shader databases are selected by source/duplicate-path/material-key provenance and cached; compatible shader variants route texture bindings to physical UV offsets. Verified AH60 and MI28 families retain dedicated arithmetic while other vehicle glass uses a semantic transmissive fallback. Unknown composite UV declarations remain an explicitly marked cross-subset topology fallback rather than a vehicle-name exception. |
 | PC `GrannyModel` | Creates a native Blender armature while preserving the complete source hierarchy, local transforms, source flags, and physics-joint metadata. |
 | PC `GrannyAnimation` | Creates a Blender 5.2 layered/slotted Action on the matching armature, sampled at the source time step with root motion, quaternion continuity, and representable bone scale. Degrees 0-3 and the documented human/Raven codecs are implemented. |
 | `WaterMesh` | Creates native water geometry from every body using platform-endian 32-bit triangle indices. |
@@ -222,6 +228,10 @@ component metadata rather than used to hide optional modules. Vehicle parts
 are split only where retail part IDs and triangle membership agree; ordered
 `lod0|PartName` records provide names, local bounds, and authoritative bind
 transforms. Those transforms place movable parts in the assembled vehicle.
+Tracked vehicles can add sibling `TRACK` component collections, each with a
+local `Rig` collection. These are distinct source instances even when both
+refer to the same mesh and skeleton; the importer does not infer mirroring or
+hard-code vehicle offsets.
 Nested DBX component health states and low/high-RPM model fields identify the
 default model; lower-health, destroyed, and blurred alternatives remain
 available in collections but are hidden in the viewport and render by
@@ -462,7 +472,8 @@ blender --background --factory-startup --python tests\benchmark_blender_import.p
 
 The tests cover PC/Xbox mesh byte order, shared composite index streams,
 source part-ID inference, lossless splitting, little-/big-endian composite
-bind records, modular DBX resolution and vehicle state classification,
+bind records, modular DBX resolution, repeated skinned-track component
+transforms, and vehicle state classification,
 accelerated and fallback Xbox texture paths, DDS generation, terrain sampling,
 DBX conversion, an end-to-end
 synthetic XDVDFS -> FbRB -> MeshData path, bounded Granny skeleton/animation
@@ -567,6 +578,21 @@ translations, authored WingLeft LOD0 topology, its four declared coordinate
 layers, verified Main/glass/interior/minigun graphs, source-backed materials
 and images, assembly metadata, and save/reopen persistence without introducing
 an unverified vehicle armature.
+
+The BMD3 track-component integration check is:
+
+```powershell
+blender --background --factory-startup `
+  --python tests\blender_vehicle_track_integration.py -- `
+  --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
+  --output <OUTPUT_BLEND>
+```
+
+It verifies the repeated-track source pattern on BMD3, M1A2, and T90, then
+imports BMD3 as one composite body plus two independently transformed track
+instances. Each track retains 1,138 vertices, 1,096 triangles, its own
+source-backed eight-bone rig, the shared mesh/skeleton references, distinct
+component GUID, exact lateral placement, and save/reopen persistence.
 
 The equivalent MI28 UV and glass integration check is:
 
