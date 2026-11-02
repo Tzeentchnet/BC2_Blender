@@ -31,7 +31,7 @@ The documents use these terms deliberately:
 | MeshData, mesh sets, and WaterMesh | [Meshes](formats/meshes.md) |
 | Granny skeletons, skinning, and transform animation | [Granny characters and animation](formats/granny-animation.md) |
 | ITexture, XenonTexture, tiling, and DDS | [Textures](formats/textures.md) |
-| TerrainHeightfield and binary DBX | [Terrain and DBX](formats/terrain-and-dbx.md) |
+| TerrainHeightfield, TerrainMaterialMap, binary DBX grammar, and semantic support boundaries | [Terrain and DBX](formats/terrain-and-dbx.md) |
 | Level graphs, transforms, instancing, and building destruction research | [Levels and complete maps](formats/levels-and-maps.md) |
 | Shader database findings and normal decoding | [Shaders and materials](shaders-and-materials.md) |
 | BF3/BF4 MaxScript evidence and applicability limits | [External MaxScript reference audit](maxscript-reference-audit.md) |

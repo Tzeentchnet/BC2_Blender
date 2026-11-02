@@ -366,7 +366,9 @@ Current tests cover:
 - PC/Xbox TerrainHeightfield header byte order, sample byte order, and
   downsampling;
 - TerrainMaterialMap tile RLE, nibble order, names, and bounds validation;
-- binary DBX typed-tree and XML parity;
+- a minimal synthetic binary DBX partition/container and its typed-tree/XML
+  parity; semantic DBX tests mostly construct the typed tree directly, so this
+  is not exhaustive binary value-type coverage;
 - Frostbite placement translation and basis conversion;
 - compact-group spawn/Havok enumeration validation;
 - synthetic DX11 shader material, texture binding, and `RDEF` resource-name

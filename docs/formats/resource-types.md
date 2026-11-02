@@ -22,7 +22,7 @@ the browser is not necessarily decoded.
 | `TerrainHeightfield` | Terrain | Downsampled native preview mesh |
 | soldier entity `.dbx` with `Meshes3p` | Level / DBX | PC: imports every linked LOD0 body/head/headgear module on one shared armature with source materials and modular collections |
 | vehicle entity `.dbx` with a composite `Mesh` | Level / DBX | Imports the linked LOD0 composite into named source-part collections with source materials; PC `TrackComponentData` records additionally instantiate their shared skinned mesh and explicit skeleton at each exact source transform |
-| other non-resource path ending `.dbx` | Level / DBX | Binary DBX converted to an XML Text datablock |
+| other non-resource path ending `.dbx` | Level / DBX | Implemented binary DBX subset converted to an XML Text datablock for inspection; unrecognized fields are not native Blender behavior and XML-to-DBX writing is unsupported |
 | PC level DBX graph | Level / DBX | Complete static map assembly with direct/grouped placements, terrain, water, and DX11-bound materials |
 | `Dx11ShaderDatabase` | Other | Material keys and indexed texture bindings parsed during PC complete-map and skinned-character import |
 | `GrannyModel` | Animation | PC little-endian skeleton converted to a native armature |
@@ -48,6 +48,11 @@ can participate in both normal and upgraded soldier entities. The same rule
 applies to vehicle tracks: selecting a track `SkinnedMeshSet` imports one
 focused component, while the high-level vehicle graph supplies the repeated
 instances and placement.
+
+The generic DBX reader and the semantic importers have different support
+boundaries. See [Terrain and DBX](terrain-and-dbx.md) for the binary grammar,
+the exact fields interpreted by Blender, and the major instance families that
+remain XML-only or ignored.
 
 ## Cataloged but extracted raw
 

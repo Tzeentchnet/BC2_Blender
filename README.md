@@ -195,9 +195,14 @@ The provided Xbox example indexes 630 Frostbite archives and 251,251 active asse
 | `ITexture` | Converts PC texture resources to DDS and creates an Image plus node material. |
 | `XenonTexture` | Untiles Xbox 360 surfaces, fixes compressed-block byte order, converts to DDS, and creates an Image plus node material. DXT1, DXT3, DXT5, ARGB8888, and L8 headers are recognized. Grouped, padded mip allocations import their base level so Blender can generate lower display mips. |
 | `TerrainHeightfield` | Creates a Blender terrain mesh with configurable sampling. The 1024-edge default preserves the complete `MP_001` playable heightfield; lower settings are explicit previews. |
-| Other binary `.dbx` | Converts the Frostbite binary document to XML in a Blender Text datablock. |
+| Other binary `.dbx` | Converts the implemented Frostbite binary subset to XML in a Blender Text datablock for inspection. Arbitrary instances and fields are not converted into native Blender data, and the XML is not editable round-trip source. |
 | PC complete map | Resolves direct and compact-group placements into linked Blender objects; imports all level heightfields and water; combines mesh subsets; and applies the selected material mode. A JSON diagnostics Text datablock and diagnostic empty are created only when detailed diagnostics are enabled. |
 | Other resources | Extracts the original resource to the cache without pretending that a native import succeeded. |
+
+DBX XML visibility is not the same as native import support. The exact binary
+encodings, semantically interpreted fields, ignored runtime systems, and
+round-trip blockers are documented in
+[Terrain and DBX](docs/formats/terrain-and-dbx.md).
 
 The axis option converts Frostbite Y-up coordinates to Blender Z-up
 coordinates. DirectX V coordinates can be flipped during mesh import.
