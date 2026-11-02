@@ -2352,6 +2352,32 @@ class ShaderDatabaseTests(unittest.TestCase):
             ((259, 0),),
         )
 
+    def test_selective_shader_parse_skips_unrelated_variants(self):
+        raw = make_shader_database()
+        with mock.patch(
+            "bc2_frostbite_importer.core.shaderdb.shader_resources",
+            side_effect=AssertionError(
+                "Unselected shader variants were resolved"
+            ),
+        ):
+            database = parse_shader_database(
+                raw,
+                material_keys=("Objects/Other/Shaders/Missing",),
+            )
+        self.assertEqual(database.materials, ())
+        self.assertEqual(
+            database.material_keys,
+            ("Objects/Test/Mesh/Shaders/Surface",),
+        )
+
+        selected = parse_shader_database(
+            raw,
+            material_keys=(),
+            shader_partitions=("objects/test/mesh/shaders/surface",),
+        )
+        self.assertEqual(len(selected.materials), 1)
+        self.assertEqual(len(selected.materials[0].variants), 1)
+
     def test_traces_texture_coordinates_to_physical_uv_offset(self):
         vertex_shader = _dxbc_program(
             _dxbc_instruction(
@@ -2908,6 +2934,31 @@ class CatalogTests(unittest.TestCase):
                         ("Dist/First.fbrb", 1),
                     ],
                 )
+                partition_sources = catalog.shader_database_sources(
+                    (),
+                    ("objects/test/shaders/glass",),
+                )
+                self.assertEqual(
+                    [
+                        row["archive_path"]
+                        for row in partition_sources
+                    ],
+                    ["Dist/Second.fbrb"],
+                )
+                self.assertTrue(
+                    catalog.shader_database_recorded(
+                        int(databases[1]["id"])
+                    )
+                )
+                self.assertEqual(
+                    catalog.shader_database_material_keys(
+                        int(databases[1]["id"])
+                    ),
+                    (
+                        "objects/test/shaders/glass",
+                        "objects/test/shaders/main",
+                    ),
+                )
 
                 catalog.replace_archive_assets(
                     archive_ids[1],
@@ -3246,6 +3297,46 @@ class CatalogTests(unittest.TestCase):
 
 
 class RepositoryTests(unittest.TestCase):
+    def test_shader_candidates_skip_scanned_nonmatches(self):
+        databases = (
+            {
+                "id": 1,
+                "archive_path": "Dist/Preferred.fbrb",
+                "shader_scanned": 1,
+            },
+            {
+                "id": 2,
+                "archive_path": "Dist/Matching.fbrb",
+                "shader_scanned": 1,
+            },
+            {
+                "id": 3,
+                "archive_path": "Dist/Unknown.fbrb",
+                "shader_scanned": 0,
+            },
+        )
+        repository = object.__new__(AssetRepository)
+        repository.catalog = SimpleNamespace(
+            shader_database_assets=lambda: databases,
+            shader_database_sources=lambda keys, partitions: (
+                {
+                    **databases[1],
+                    "matching_materials": 1,
+                },
+            ),
+        )
+
+        candidates = repository.shader_database_candidates(
+            ("Objects/Test/Shaders/Main",),
+            ("Dist/Preferred.fbrb",),
+            shader_partitions=("objects/test/shaders/main",),
+        )
+
+        self.assertEqual(
+            [candidate["id"] for candidate in candidates],
+            [2, 3],
+        )
+
     def test_indexes_all_pending_archives_and_records_failures(self):
         repository = object.__new__(AssetRepository)
         repository.catalog = SimpleNamespace(

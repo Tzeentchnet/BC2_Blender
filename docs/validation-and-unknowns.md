@@ -244,6 +244,15 @@ texture-conversion, or unresolved-subset diagnostics.
   `(1.612939, 0.025497, 1.023512)` after axis conversion and remain exact
   after save/reopen. `T90Tracks_Mesh.res` is separately verified not to
   promote to the main assembly.
+- PC T90 import performance: Blender 5.2.2 LTS with bundled NumPy 2.3.4
+  confirms that the direct full-material path creates 63 mesh objects, two
+  track armatures, seven materials, and 15 file-backed images. The previous
+  profiled path spent 632.25 of 633.88 seconds scanning 35 complete shader
+  databases. Selective material-key/partition parsing reduced the same
+  profiled import to 3.66 seconds with a populated shader-key catalog and
+  29.66 seconds with only those catalog tables cleared. Unprofiled wall times
+  were 1.75 and 19.38 seconds respectively. The 62-resource vehicle shader
+  audit still reports zero parser failures after this change.
 - PC MI28 assembly: 24 source parts, 44 surface fragments, and 21,032 imported
   triangles. All ten LOD0 subsets retain the byte-32 part-selector declaration
   and coordinate offsets 24/28/36/40. Main and MainMetal use their verified

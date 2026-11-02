@@ -220,6 +220,10 @@ Blender's bundled NumPy is used when available for bulk mesh, topology, UV,
 terrain, and Xbox texture operations. The importer retains pure-Python
 fallbacks. Converted textures remain file-backed DDS images loaded through
 Blender's native image subsystem instead of expanding pixels in Python.
+Full-material imports also persist each inspected shader database's material
+keys in the asset catalog. Later imports exclude known nonmatching databases
+and symbolically trace only variants that can satisfy the selected asset's
+surfaces, rather than reprocessing every indexed level shader.
 
 ### Modular character and vehicle organization
 
@@ -364,6 +368,8 @@ The cache location is configurable in Add-on Preferences, where **Open Cache
 Folder** opens it without deleting or rebuilding any data. It contains:
 
 - the persistent SQLite asset catalog;
+- persistent shader-database material-key indexes used to narrow full-material
+  imports;
 - the extracted PC installer database;
 - PC cabinets staged on demand;
 - extracted `.fbrb` archives;

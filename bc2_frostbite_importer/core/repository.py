@@ -5,6 +5,7 @@ from __future__ import annotations
 import gzip
 import json
 import os
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Callable
 
@@ -38,7 +39,14 @@ class AssetRepository:
         self.catalog = AssetCatalog(self.source_cache / "catalog.sqlite3")
         self._archive_info_cache = {}
         self._payload_path_cache = {}
-        self._shader_database_cache: dict[int, ShaderDatabase] = {}
+        self._shader_database_cache: dict[
+            tuple[
+                int,
+                tuple[str, ...] | None,
+                tuple[str, ...],
+            ],
+            ShaderDatabase,
+        ] = {}
 
     @property
     def kind(self) -> str:
@@ -108,6 +116,7 @@ class AssetRepository:
         material_keys: tuple[str, ...],
         preferred_archives: tuple[str, ...] = (),
         mesh_path: str | None = None,
+        shader_partitions: tuple[str, ...] = (),
     ):
         databases = self.catalog.shader_database_assets()
         by_archive: dict[str, list[object]] = {}
@@ -121,10 +130,21 @@ class AssetRepository:
 
         ordered = []
         seen = set()
+        sources = self.catalog.shader_database_sources(
+            material_keys,
+            shader_partitions,
+        )
+        matching_ids = {int(source["id"]) for source in sources}
 
         def add(asset):
             asset_id = int(asset["id"])
-            if asset_id not in seen:
+            if (
+                asset_id not in seen
+                and (
+                    not bool(asset["shader_scanned"])
+                    or asset_id in matching_ids
+                )
+            ):
                 seen.add(asset_id)
                 ordered.append(asset)
 
@@ -138,7 +158,7 @@ class AssetRepository:
                     (),
                 ):
                     add(asset)
-        for source in self.catalog.shader_database_sources(material_keys):
+        for source in sources:
             asset = by_id.get(int(source["id"]))
             if asset is not None:
                 add(asset)
@@ -149,20 +169,54 @@ class AssetRepository:
     def read_shader_database(
         self,
         asset_id: int,
+        *,
+        material_keys: Iterable[str] | None = None,
+        shader_partitions: Iterable[str] = (),
     ) -> tuple[object, ShaderDatabase]:
-        cached = self._shader_database_cache.get(asset_id)
+        normalized_keys = (
+            None
+            if material_keys is None
+            else tuple(
+                sorted(
+                    {
+                        key.replace("\\", "/").strip("/").casefold()
+                        for key in material_keys
+                    }
+                )
+            )
+        )
+        normalized_partitions = tuple(
+            sorted(
+                {
+                    partition.replace("\\", "/").strip("/").casefold()
+                    for partition in shader_partitions
+                    if partition.strip("/\\")
+                }
+            )
+        )
+        cache_key = (
+            asset_id,
+            normalized_keys,
+            normalized_partitions,
+        )
+        cached = self._shader_database_cache.get(cache_key)
         if cached is not None:
             asset = self.catalog.asset(asset_id)
             if asset is None:
                 raise ExtractionError(f"Unknown shader database id: {asset_id}")
             return asset, cached
         asset, raw = self.read_asset(asset_id, max_size=1 << 30)
-        database = parse_shader_database(raw)
-        self.catalog.record_shader_database(
-            asset_id,
-            (material.key for material in database.materials),
+        database = parse_shader_database(
+            raw,
+            material_keys=normalized_keys,
+            shader_partitions=normalized_partitions,
         )
-        self._shader_database_cache[asset_id] = database
+        if not self.catalog.shader_database_recorded(asset_id):
+            self.catalog.record_shader_database(
+                asset_id,
+                database.material_keys,
+            )
+        self._shader_database_cache[cache_key] = database
         return asset, database
 
     def index_all_archives(

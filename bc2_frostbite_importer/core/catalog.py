@@ -399,11 +399,32 @@ class AssetCatalog:
     def shader_database_sources(
         self,
         material_keys: Iterable[str],
+        shader_partitions: Iterable[str] = (),
     ):
         keys = tuple(dict.fromkeys(key.casefold() for key in material_keys))
-        if not keys:
+        partitions = tuple(
+            dict.fromkeys(
+                partition.replace("\\", "/").strip("/").casefold()
+                for partition in shader_partitions
+                if partition.strip("/\\")
+            )
+        )
+        if not keys and not partitions:
             return []
-        placeholders = ",".join("?" for _ in keys)
+        conditions = []
+        values = []
+        if keys:
+            placeholders = ",".join("?" for _ in keys)
+            conditions.append(
+                f"shader_material_keys.material_key IN ({placeholders})"
+            )
+            values.extend(keys)
+        for partition in partitions:
+            conditions.append(
+                "(lower(shader_material_keys.material_key) = ? "
+                "OR lower(shader_material_keys.material_key) LIKE ?)"
+            )
+            values.extend((partition, "%/" + partition))
         return self.connection.execute(
             f"""
             SELECT assets.*, archives.path AS archive_path,
@@ -415,15 +436,41 @@ class AssetCatalog:
             FROM shader_material_keys
             JOIN assets ON assets.id = shader_material_keys.asset_id
             JOIN archives ON archives.id = assets.archive_id
-            WHERE shader_material_keys.material_key IN ({placeholders})
+            WHERE {" OR ".join(conditions)}
             GROUP BY assets.id
             ORDER BY matching_materials DESC,
                      archives.path COLLATE NOCASE,
                      assets.path COLLATE NOCASE,
                      assets.id
             """,
-            keys,
+            values,
         ).fetchall()
+
+    def shader_database_material_keys(
+        self,
+        asset_id: int,
+    ) -> tuple[str, ...]:
+        return tuple(
+            row[0]
+            for row in self.connection.execute(
+                """
+                SELECT material_key
+                FROM shader_material_keys
+                WHERE asset_id = ?
+                ORDER BY material_key COLLATE NOCASE
+                """,
+                (asset_id,),
+            )
+        )
+
+    def shader_database_recorded(self, asset_id: int) -> bool:
+        return (
+            self.connection.execute(
+                "SELECT 1 FROM shader_databases WHERE asset_id = ?",
+                (asset_id,),
+            ).fetchone()
+            is not None
+        )
 
     def asset(self, asset_id: int):
         return self.connection.execute(

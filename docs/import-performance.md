@@ -145,6 +145,30 @@ path and shader key respectively. Whole-map progress covers archive indexing,
 direct-reference resolution, compact groups, mesh/material construction,
 placement creation, terrain, and water.
 
+## Selective shader-database discovery
+
+**Implemented:** direct full-material imports persist the complete material-key
+inventory of every inspected DX11 shader database in the SQLite catalog. A
+subsequent lookup considers:
+
+- indexed databases containing an exact requested key or a unique matching
+  shader-partition suffix;
+- unindexed databases whose contents are not known yet;
+- source-archive and duplicate-mesh provenance when ranking those candidates.
+
+Known indexed databases that cannot resolve any remaining surface are skipped.
+The shader database parser still validates the complete container structure,
+but it decodes texture bindings and symbolically traces DXBC coordinate routes
+only for requested material keys or shader partitions. Missing source keys
+remain explicit diagnostics; they no longer force every known nonmatching
+database to be parsed again. Catalog records are invalidated automatically
+when their owning archive is reindexed.
+
+This optimization is separate from NumPy. The expensive path was Python DXBC
+symbolic execution over unrelated shader variants, not vertex upload. The
+bulk string reader used by shader-database indexing also replaces
+byte-at-a-time C-string reads without changing the decoded text or bounds.
+
 ## Measured Blender 5.2 results
 
 The reproducible benchmark is
@@ -160,6 +184,29 @@ Repeated Windows runs used Blender 5.2.2 LTS and bundled NumPy 2.3.4.
 
 These are directional microbenchmarks, not performance guarantees. Hardware,
 Blender builds, mesh layout, cache state, and asset size affect timings.
+
+One PC retail T90 test on Blender 5.2.2 LTS with bundled NumPy 2.3.4 measured
+the complete direct `T90_Mesh.res` operator path. It created 63 mesh objects,
+two track armatures, seven materials, and 15 file-backed images:
+
+| T90 full-material condition | Observed result |
+|---|---:|
+| Previous implementation under `cProfile` | 633.88 seconds |
+| Selective implementation under `cProfile`, copied catalog with shader-key tables cleared | 29.66 seconds |
+| Selective implementation under `cProfile`, populated shader-key catalog | 3.66 seconds |
+| Selective implementation without profiler, copied catalog with shader-key tables cleared | 19.38 seconds |
+| Selective implementation without profiler, populated shader-key catalog | 1.75 seconds |
+| Materials Only under `cProfile` | 1.52 seconds |
+| Simple Placeholders under `cProfile` | 1.46 seconds |
+
+The copied-catalog case intentionally removed only the shader-key inventory;
+source extraction and converted texture caches remained available. It
+therefore measures first-use shader discovery rather than a completely cold
+disc/cache setup. In the old profile, 632.25 seconds were inside shader
+discovery, 35 complete databases were parsed, and DXBC route analysis expanded
+to about 1.45 billion Python calls. Blender mesh construction took about 0.17
+seconds, confirming that NumPy batching was already effective and not the T90
+bottleneck.
 
 With the three map payloads and converted DDS files warm in the cache, the
 real-media Blender integration runner assembled, saved, reopened, and validated

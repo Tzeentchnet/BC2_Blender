@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import struct
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from .dxbc import (
@@ -114,10 +115,16 @@ class ShaderDatabase:
         materials: tuple[ShaderMaterial, ...],
         trailing_bytes: int,
         layouts: tuple[ShaderVertexLayout, ...] = (),
+        material_keys: tuple[str, ...] | None = None,
     ):
         self.materials = materials
         self.trailing_bytes = trailing_bytes
         self.layouts = layouts
+        self.material_keys = (
+            material_keys
+            if material_keys is not None
+            else tuple(material.key for material in materials)
+        )
         self._materials_by_key = {
             material.key.casefold(): material for material in materials
         }
@@ -147,7 +154,6 @@ class ShaderDatabase:
 @dataclass(frozen=True)
 class _ShaderProgram:
     data: bytes
-    resources: tuple[DxbcResourceBinding, ...]
 
 
 @dataclass(frozen=True)
@@ -218,12 +224,12 @@ def _cstring(
     context: str,
     maximum: int = 16_384,
 ) -> str:
-    value = bytearray()
-    for _ in range(maximum):
-        byte = read_exact(stream, 1, context)
-        if byte == b"\0":
-            return value.decode("utf-8", "replace")
-        value.extend(byte)
+    start = stream.tell()
+    data = stream.getvalue()
+    end = data.find(b"\0", start, min(len(data), start + maximum))
+    if end >= 0:
+        stream.seek(end + 1)
+        return data[start:end].decode("utf-8", "replace")
     raise CorruptDataError(f"{context} exceeds {maximum:,} bytes")
 
 
@@ -433,7 +439,7 @@ def _shader(
     if total_size < 32 or stream.tell() != start + total_size:
         raise CorruptDataError("DXBC shader record size does not match its data")
     data = stream.getvalue()[start : start + total_size]
-    return _ShaderProgram(data=data, resources=shader_resources(data))
+    return _ShaderProgram(data=data)
 
 
 def _skip_shader_declaration(stream: io.BytesIO):
@@ -586,7 +592,12 @@ def _block7(stream: io.BytesIO) -> dict[bytes, tuple[int, ...]]:
     return items
 
 
-def parse_shader_database(data: bytes) -> ShaderDatabase:
+def parse_shader_database(
+    data: bytes,
+    *,
+    material_keys: Iterable[str] | None = None,
+    shader_partitions: Iterable[str] = (),
+) -> ShaderDatabase:
     if len(data) < 32:
         raise CorruptDataError("Shader database is too short")
     stream = io.BytesIO(data)
@@ -598,6 +609,31 @@ def parse_shader_database(data: bytes) -> ShaderDatabase:
     block5_children, layouts = _block5(stream)
     block6 = _block6(stream)
     block7 = _block7(stream)
+    selected_keys = (
+        None
+        if material_keys is None
+        else {
+            key.replace("\\", "/").strip("/").casefold()
+            for key in material_keys
+        }
+    )
+    selected_partitions = tuple(
+        dict.fromkeys(
+            partition.replace("\\", "/").strip("/").casefold()
+            for partition in shader_partitions
+            if partition.strip("/\\")
+        )
+    )
+
+    def selected(key: str) -> bool:
+        if selected_keys is None:
+            return True
+        normalized = key.replace("\\", "/").strip("/").casefold()
+        return normalized in selected_keys or any(
+            normalized == partition
+            or normalized.endswith("/" + partition)
+            for partition in selected_partitions
+        )
 
     variant_cache: dict[
         int,
@@ -640,7 +676,7 @@ def parse_shader_database(data: bytes) -> ShaderDatabase:
             pixel_shader = pixel_shaders[item.pixel_shader_index]
         resources: dict[int, list[DxbcResourceBinding]] = {}
         if pixel_shader is not None:
-            for resource in pixel_shader.resources:
+            for resource in shader_resources(pixel_shader.data):
                 resources.setdefault(resource.index, []).append(resource)
         child = (
             block5_children[block4_index]
@@ -697,12 +733,16 @@ def parse_shader_database(data: bytes) -> ShaderDatabase:
         return resolved
 
     materials = []
+    all_material_keys = []
     seen_keys = set()
     for key, reference in block6:
         normalized_key = key.casefold()
         if normalized_key in seen_keys:
             raise CorruptDataError(f"Duplicate shader material key: {key}")
         seen_keys.add(normalized_key)
+        all_material_keys.append(key)
+        if not selected(key):
+            continue
         textures = []
         texture_parameters: dict[
             tuple[int, str], list[str]
@@ -774,4 +814,5 @@ def parse_shader_database(data: bytes) -> ShaderDatabase:
         materials=tuple(materials),
         trailing_bytes=len(data) - stream.tell(),
         layouts=tuple(layouts.values()),
+        material_keys=tuple(all_material_keys),
     )

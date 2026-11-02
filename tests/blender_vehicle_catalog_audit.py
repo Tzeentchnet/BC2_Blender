@@ -97,27 +97,55 @@ def _material_sources(
     preferred_archives: tuple[str, ...],
     mesh_path: str,
 ):
-    keys = tuple(
-        dict.fromkeys(surface.database_key for surface in surfaces)
-    )
-    surface_by_key = {
-        surface.database_key.casefold(): surface for surface in surfaces
+    lookup_keys = []
+    shader_partitions = []
+    for surface in surfaces:
+        keys, partitions = blender_addon._shader_lookup_terms(surface)
+        lookup_keys.extend(keys)
+        shader_partitions.extend(partitions)
+    unresolved = {
+        surface.database_key.casefold(): surface
+        for surface in surfaces
     }
-    unresolved = {key.casefold(): key for key in keys}
     materials = {}
     sources = {}
     candidates = repository.shader_database_candidates(
-        keys,
+        tuple(dict.fromkeys(lookup_keys)),
         preferred_archives,
         mesh_path,
+        tuple(dict.fromkeys(shader_partitions)),
     )
     for candidate in candidates:
-        _, database = repository.read_shader_database(int(candidate["id"]))
-        for normalized, key in tuple(unresolved.items()):
+        remaining = tuple(unresolved.values())
+        if (
+            bool(candidate["shader_scanned"])
+            and not blender_addon._catalog_shader_database_matches_surfaces(
+                repository.catalog,
+                int(candidate["id"]),
+                remaining,
+            )
+        ):
+            continue
+        remaining_keys = []
+        remaining_partitions = []
+        for surface in remaining:
+            keys, partitions = blender_addon._shader_lookup_terms(
+                surface
+            )
+            remaining_keys.extend(keys)
+            remaining_partitions.extend(partitions)
+        _, database = repository.read_shader_database(
+            int(candidate["id"]),
+            material_keys=tuple(dict.fromkeys(remaining_keys)),
+            shader_partitions=tuple(
+                dict.fromkeys(remaining_partitions)
+            ),
+        )
+        for normalized, surface in tuple(unresolved.items()):
             material = _find_material(
                 database,
-                key,
-                surface_by_key[normalized].shader_partition,
+                surface.database_key,
+                surface.shader_partition,
             )
             if material is None:
                 continue
@@ -128,7 +156,14 @@ def _material_sources(
             del unresolved[normalized]
         if not unresolved:
             break
-    return materials, sources, tuple(unresolved.values())
+    return (
+        materials,
+        sources,
+        tuple(
+            surface.database_key
+            for surface in unresolved.values()
+        ),
+    )
 
 
 def _mesh_definition(repository, mesh_set_asset):

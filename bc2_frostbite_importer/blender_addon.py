@@ -4954,15 +4954,18 @@ def _find_shader_material(
     key: str,
     shader_partition: str = "",
 ):
-    material = shader_database.material(key)
-    if material is not None:
-        return material, material.key, "exact"
+    lookup_keys = [key]
     prefix, separator, name = key.rpartition("/")
     if separator and name.casefold().startswith("cheap_"):
-        alias = prefix + "/" + name[len("cheap_") :]
-        material = shader_database.material(alias)
+        lookup_keys.append(prefix + "/" + name[len("cheap_") :])
+    for index, lookup_key in enumerate(lookup_keys):
+        material = shader_database.material(lookup_key)
         if material is not None:
-            return material, material.key, "cheap_alias"
+            return (
+                material,
+                material.key,
+                "exact" if index == 0 else "cheap_alias",
+            )
     partitions = [shader_partition]
     partition_prefix, partition_separator, partition_name = (
         shader_partition.rpartition("/")
@@ -4981,6 +4984,31 @@ def _find_shader_material(
         if len(matches) == 1:
             return matches[0], matches[0].key, "shader_reference_suffix"
     return None, key, "missing"
+
+
+def _shader_lookup_terms(
+    surface: SurfaceShader,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    keys = [surface.database_key]
+    prefix, separator, name = surface.database_key.rpartition("/")
+    if separator and name.casefold().startswith("cheap_"):
+        keys.append(prefix + "/" + name[len("cheap_") :])
+    partitions = [surface.shader_partition]
+    partition_prefix, partition_separator, partition_name = (
+        surface.shader_partition.rpartition("/")
+    )
+    if (
+        partition_separator
+        and partition_name.casefold().startswith("cheap_")
+    ):
+        partitions.append(
+            partition_prefix
+            + "/"
+            + partition_name[len("cheap_") :]
+        )
+    return tuple(keys), tuple(
+        partition for partition in partitions if partition
+    )
 
 
 def _surface_material(
@@ -5490,7 +5518,17 @@ def _extend_source_shader_database(
     if asset_id in material_context.loaded_shader_assets:
         return False
     material_context.loaded_shader_assets.add(asset_id)
-    asset, database = repository.read_shader_database(asset_id)
+    lookup_keys = []
+    shader_partitions = []
+    for surface in surfaces:
+        surface_keys, surface_partitions = _shader_lookup_terms(surface)
+        lookup_keys.extend(surface_keys)
+        shader_partitions.extend(surface_partitions)
+    asset, database = repository.read_shader_database(
+        asset_id,
+        material_keys=tuple(dict.fromkeys(lookup_keys)),
+        shader_partitions=tuple(dict.fromkeys(shader_partitions)),
+    )
     archive_path = str(asset["archive_path"])
     shader_path = str(asset["path"])
     source = f"{archive_path}|{shader_path}"
@@ -5570,6 +5608,40 @@ def _extend_source_shader_database(
     return bool(selected)
 
 
+def _catalog_shader_database_matches_surfaces(
+    catalog,
+    asset_id: int,
+    surfaces: tuple[SurfaceShader, ...],
+) -> bool:
+    material_keys = tuple(
+        key.replace("\\", "/").strip("/").casefold()
+        for key in catalog.shader_database_material_keys(asset_id)
+    )
+    material_key_set = set(material_keys)
+    for surface in surfaces:
+        lookup_keys, partitions = _shader_lookup_terms(surface)
+        if any(
+            key.replace("\\", "/").strip("/").casefold()
+            in material_key_set
+            for key in lookup_keys
+        ):
+            return True
+        for partition in partitions:
+            normalized = (
+                partition.replace("\\", "/").strip("/").casefold()
+            )
+            suffix = "/" + normalized
+            if (
+                sum(
+                    key == normalized or key.endswith(suffix)
+                    for key in material_keys
+                )
+                == 1
+            ):
+                return True
+    return False
+
+
 def _ensure_source_shader_materials(
     repository,
     material_context: _SourceMaterialContext,
@@ -5577,12 +5649,14 @@ def _ensure_source_shader_materials(
     mesh_path: str | None = None,
     preferred_archives: tuple[str, ...] = (),
 ):
-    shader_keys = tuple(
-        dict.fromkeys(surface.database_key for surface in surfaces)
-    )
-    surface_by_key = {
-        surface.database_key.casefold(): surface for surface in surfaces
-    }
+    shader_keys = []
+    shader_partitions = []
+    for surface in surfaces:
+        lookup_keys, lookup_partitions = _shader_lookup_terms(surface)
+        shader_keys.extend(lookup_keys)
+        shader_partitions.extend(lookup_partitions)
+    shader_keys = tuple(dict.fromkeys(shader_keys))
+    shader_partitions = tuple(dict.fromkeys(shader_partitions))
     if (
         repository.kind != "PC_ISO"
         or not material_context.import_textures
@@ -5592,41 +5666,48 @@ def _ensure_source_shader_materials(
 
     def unresolved():
         database = material_context.shader_database
-        return (
-            database is None
-            or any(
+        if database is None:
+            return surfaces
+        return tuple(
+            surface
+            for surface in surfaces
+            if (
                 _find_shader_material(
                     database,
-                    key,
-                    surface_by_key[key.casefold()].shader_partition,
+                    surface.database_key,
+                    surface.shader_partition,
                 )[0]
                 is None
-                for key in shader_keys
             )
         )
 
     if not unresolved():
         return
-    lookup_keys = []
-    for key in shader_keys:
-        lookup_keys.append(key)
-        prefix, separator, name = key.rpartition("/")
-        if separator and name.casefold().startswith("cheap_"):
-            lookup_keys.append(prefix + "/" + name[len("cheap_") :])
     candidates = repository.shader_database_candidates(
-        tuple(dict.fromkeys(lookup_keys)),
+        shader_keys,
         preferred_archives or material_context.material_archives,
         mesh_path,
+        shader_partitions,
     )
     for shader_asset in candidates:
+        remaining = unresolved()
+        if not remaining:
+            return
+        if (
+            bool(shader_asset["shader_scanned"])
+            and not _catalog_shader_database_matches_surfaces(
+                repository.catalog,
+                int(shader_asset["id"]),
+                remaining,
+            )
+        ):
+            continue
         _extend_source_shader_database(
             repository,
             material_context,
             shader_asset,
-            surfaces,
+            remaining,
         )
-        if not unresolved():
-            return
 
 
 def _resolve_mesh_subset_materials(

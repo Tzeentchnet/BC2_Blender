@@ -1258,6 +1258,39 @@ def _test_shader_key_alias():
         raise AssertionError(
             "Ambiguous component shader partitions did not remain unresolved"
         )
+    surface = SurfaceShader(
+        "Tracks",
+        shader_partition,
+        "Objects/Test/MainMesh/" + shader_partition,
+        shader_partition,
+    )
+    matching_catalog = SimpleNamespace(
+        shader_database_material_keys=lambda asset_id: (
+            component_key,
+        )
+    )
+    if not blender_addon._catalog_shader_database_matches_surfaces(
+        matching_catalog,
+        1,
+        (surface,),
+    ):
+        raise AssertionError(
+            "Indexed unique shader partition was not selected"
+        )
+    ambiguous_catalog = SimpleNamespace(
+        shader_database_material_keys=lambda asset_id: (
+            component_key,
+            "Objects/Test/OtherMesh/" + shader_partition,
+        )
+    )
+    if blender_addon._catalog_shader_database_matches_surfaces(
+        ambiguous_catalog,
+        1,
+        (surface,),
+    ):
+        raise AssertionError(
+            "Indexed ambiguous shader partitions were selected"
+        )
 
 
 def _test_shader_driven_vehicle_routes():
