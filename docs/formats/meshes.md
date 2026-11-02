@@ -78,10 +78,12 @@ usable Blender preview:
   extreme axis imbalance are scored over distributed sample vertices.
   Selection is performed once across all subsets sharing a stride in one
   MeshData resource, not independently per subset.
-- UV0 is a half-float pair selected by a stride-aware heuristic. Candidate
-  scanning starts at byte 16 so packed normal/tangent fields at earlier
-  offsets are not misread as plausible UVs. Tested preferred offsets include
-  16, 20, 24, 28, and 32 bytes depending on stride.
+- UV0 is a half-float pair selected by declaration rules or a stride-aware
+  heuristic. General candidate scanning starts at byte 16 so packed
+  normal/tangent fields at earlier offsets are not misread as plausible UVs.
+  Tested preferred offsets include 16, 20, 24, 28, and 32 bytes depending on
+  stride. Unknown little-endian type-2 composite declarations use the more
+  constrained topology resolver documented below.
 - The common retail PC 48-byte static declaration stores
   `R16G16B16A16_FLOAT` inputs at bytes 24 and 32. The inspected vertex shaders
   consume their `.zw` halves as the object and repeating coordinates, while
@@ -129,6 +131,45 @@ usable Blender preview:
   repeated field cannot independently identify byte 32. The stored part
   metadata remains unset for those one-part subsets; only declaration
   selection is inherited.
+- Unknown little-endian PC type-2 composite declarations use an
+  **implemented heuristic**, not a vehicle-name table. Aligned half-float
+  pairs are considered from byte 24 through the end of each vertex. The
+  inferred repeated part-selector field is excluded. For all related subsets
+  sharing the stride, each remaining field is scored by:
+
+  - the fraction of source triangles with nonzero two-dimensional UV area;
+  - the fraction of values within the approximately normalized
+    `[-0.05, 1.05]` range.
+
+  The highest deterministic score becomes `UVMap`. Adjacent and strongly
+  supported physical coordinate fields are retained, up to six channels, and
+  the resulting declaration is propagated to related one-part subsets where
+  a repeated selector cannot be inferred independently. The subset's
+  `part_index_offset` remains unset in that case; declaration propagation
+  does not fabricate part metadata.
+
+  This resolves recurring declarations without asset-specific exceptions.
+  It is still preview-import evidence, not a safe writer specification:
+  topology can identify useful coordinates but cannot establish every shader
+  semantic or whether a constant declared field must be written back.
+- Two stride-64, byte-48-selector samples show why the resolver preserves
+  multiple physical channels:
+
+  | PC retail sample | Imported offset order | Evidence |
+  |---|---|---|
+  | Zero Fighter LOD0 | 36, 40, 44 | Pixel shader `401` samples normal, color, and repeated dirt/detail from byte 36. Byte 36 is therefore the verified primary coordinate; bytes 40 and 44 are retained heuristic candidates. |
+  | T90 LOD0 | 36, 32, 40, 44 | Pixel shader `94` uses byte 36 for base color, dirt, and generic mask; byte 32 for normal/detail; and byte 40 for symbols. Byte 44 is retained as an additional candidate. |
+
+  Zero Fighter vertex shader `1107` also consumes the byte-48 part selector.
+  On its MainBody and glass subsets, the former byte-24 fallback is
+  topologically degenerate while byte 36 is not.
+- A retail PC survey parsed all 62 unique vehicle LOD0 MeshData resources in
+  the indexed catalog with no failures: 21 type-0, nine type-1, and 32 type-2
+  meshes. Representative recurring type-2 families include AH64 at selector
+  byte 44 with primary byte 28, M1A2 at selector byte 40 with primary byte 28,
+  Zero Fighter and T90 at selector byte 48 with primary byte 36, plus the
+  exact AH60 and MI28 declarations above. This is broad parser evidence, not
+  proof that every vehicle texture binding uses `UVMap`.
 - The implemented little-endian type-1, palette-backed stride-48 skinned
   declaration exposes two half-float coordinate pairs:
 
@@ -253,10 +294,11 @@ The decoded matrix is the mesh-set bind placement, not evidence of a runtime
 pivot or hierarchy. Composite runtime pivots, parent links, state switching,
 and animation remain unknown and are not inferred.
 
-Normals, tangents, colors, morph data, arbitrary UV declarations outside the
-verified static and PC skinned layouts, and every vertex declaration variant
-are not yet decoded generically. Do not treat the preview decoder as a
-complete vertex-layout specification.
+Normals, tangents, colors, morph data, complete shader semantics, and every
+vertex declaration variant are not yet decoded generically. Unknown PC
+composite coordinate fields are topology-resolved as described above, but
+that preview heuristic is not a complete vertex-layout specification and is
+not exporter-safe.
 
 ### MaxScript cross-check
 

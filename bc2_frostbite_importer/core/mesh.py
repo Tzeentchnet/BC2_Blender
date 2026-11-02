@@ -349,9 +349,128 @@ def _pc_stride_48_uv_offsets(
             return 24, 28, 36, 40
         if part_index_offset == 36:
             return 24, 28, 32, 40
+        if part_index_offset is None:
+            return 28, 36, 32, 24
+        return ()
     # The static declaration exposes object and repeating UVs through the
     # .zw halves at byte 28 and 36. The .xy halves are atlas selectors.
     return 28, 36, 32, 24
+
+
+def _uv_triangle_coverage(
+    values: tuple[tuple[float, float], ...],
+    header: _SubsetHeader,
+    indices: tuple[int, ...],
+    index_base: int,
+) -> tuple[int, int]:
+    nondegenerate = 0
+    for face in range(header.primitive_count):
+        offset = header.index_offset + face * 3
+        first, second, third = (
+            values[int(indices[offset + corner]) - index_base]
+            for corner in range(3)
+        )
+        area = abs(
+            (second[0] - first[0]) * (third[1] - first[1])
+            - (second[1] - first[1]) * (third[0] - first[0])
+        ) * 0.5
+        if area >= 1e-10:
+            nondegenerate += 1
+    return nondegenerate, header.primitive_count
+
+
+def _pc_composite_uv_offsets(
+    data: bytes,
+    vertex_start: int,
+    headers: tuple[_SubsetHeader, ...],
+    layouts: dict[_SubsetHeader, int],
+    indices: tuple[int, ...],
+    part_index_offset: int | None,
+) -> tuple[int, ...]:
+    if not headers:
+        return ()
+    stride = headers[0].stride
+    candidates: dict[int, tuple[float, float]] = {}
+    for offset in range(24, stride - 3, 4):
+        if offset == part_index_offset:
+            continue
+        total_triangles = 0
+        nondegenerate_triangles = 0
+        typical_values = 0
+        value_count = 0
+        for header in headers:
+            index_base = layouts[header]
+            subset_start = (
+                vertex_start
+                + header.vertex_offset
+                + index_base * header.stride
+            )
+            values = _decode_uv_channel(
+                data,
+                subset_start,
+                header.vertex_count,
+                header.stride,
+                offset,
+                "<",
+                require_variation=False,
+            )
+            if values is None:
+                break
+            nondegenerate, triangle_count = _uv_triangle_coverage(
+                values,
+                header,
+                indices,
+                index_base,
+            )
+            nondegenerate_triangles += nondegenerate
+            total_triangles += triangle_count
+            typical_values += sum(
+                -0.05 <= u <= 1.05 and -0.05 <= v <= 1.05
+                for u, v in values
+            )
+            value_count += len(values)
+        else:
+            if (
+                total_triangles
+                and value_count
+                and nondegenerate_triangles
+            ):
+                coverage = nondegenerate_triangles / total_triangles
+                typical_fraction = typical_values / value_count
+                candidates[offset] = (
+                    coverage * 6.0 + typical_fraction * 4.0,
+                    coverage,
+                )
+    if not candidates:
+        return ()
+
+    primary = max(
+        candidates,
+        key=lambda offset: (candidates[offset][0], -offset),
+    )
+    ordered = [primary]
+    for direction in (-4, 4):
+        offset = primary + direction
+        while 24 <= offset + 3 < stride:
+            if offset == part_index_offset:
+                offset += direction
+                continue
+            if offset not in candidates:
+                break
+            ordered.append(offset)
+            offset += direction
+
+    primary_score = candidates[primary][0]
+    for offset in sorted(
+        candidates,
+        key=lambda value: (-candidates[value][0], value),
+    ):
+        if offset in ordered:
+            continue
+        if candidates[offset][0] < primary_score * 0.8:
+            continue
+        ordered.append(offset)
+    return tuple(ordered[:6])
 
 
 def _read_influences(
@@ -528,6 +647,47 @@ def parse_meshdata(
                     header.stride,
                     set(),
                 ).add(part_data[1])
+    declaration_part_offsets = {}
+    composite_declaration_headers: dict[
+        tuple[int, int | None],
+        list[_SubsetHeader],
+    ] = {}
+    for header in active_headers:
+        _, part_index_offset = composite_part_data.get(
+            header,
+            ((), None),
+        )
+        declaration_part_offset = part_index_offset
+        if declaration_part_offset is None:
+            related_offsets = composite_layout_offsets.get(
+                header.stride,
+                set(),
+            )
+            if len(related_offsets) == 1:
+                declaration_part_offset = next(iter(related_offsets))
+        declaration_part_offsets[header] = declaration_part_offset
+        if mesh_type == 2 and endian == "<":
+            composite_declaration_headers.setdefault(
+                (header.stride, declaration_part_offset),
+                [],
+            ).append(header)
+    composite_uv_offsets = {}
+    for key, related_headers in composite_declaration_headers.items():
+        stride, declaration_part_offset = key
+        if _pc_stride_48_uv_offsets(
+            mesh_type,
+            stride,
+            declaration_part_offset,
+        ):
+            continue
+        composite_uv_offsets[key] = _pc_composite_uv_offsets(
+            data,
+            vertex_start,
+            tuple(related_headers),
+            layouts,
+            indices,
+            declaration_part_offset,
+        )
     position_formats = {}
     for stride in {header.stride for header in active_headers}:
         position_formats[stride] = _position_format(
@@ -580,14 +740,7 @@ def parse_meshdata(
             header,
             ((), None),
         )
-        declaration_part_offset = part_index_offset
-        if declaration_part_offset is None:
-            related_offsets = composite_layout_offsets.get(
-                header.stride,
-                set(),
-            )
-            if len(related_offsets) == 1:
-                declaration_part_offset = next(iter(related_offsets))
+        declaration_part_offset = declaration_part_offsets.get(header)
         explicit_uv_offsets = (
             _pc_skinned_uv_offsets(
                 mesh_type,
@@ -602,6 +755,15 @@ def parse_meshdata(
                 mesh_type,
                 header.stride,
                 declaration_part_offset,
+            )
+        if (
+            not explicit_uv_offsets
+            and endian == "<"
+            and mesh_type == 2
+        ):
+            explicit_uv_offsets = composite_uv_offsets.get(
+                (header.stride, declaration_part_offset),
+                (),
             )
         decoded_channels = ()
         if explicit_uv_offsets:
@@ -628,7 +790,11 @@ def parse_meshdata(
                     )
         if explicit_uv_offsets:
             uvs = decoded_channels[0]
-            secondary_uvs = decoded_channels[1]
+            secondary_uvs = (
+                decoded_channels[1]
+                if len(decoded_channels) > 1
+                else ()
+            )
             additional_uvs = decoded_channels[2:]
             uv_offsets = explicit_uv_offsets
         if not explicit_uv_offsets:

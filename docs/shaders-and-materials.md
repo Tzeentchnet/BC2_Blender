@@ -485,6 +485,37 @@ texture. This is a recoverable appearance approximation: Frostbite's
 distance-fade factor, reflection environment, and exact cubic response are not
 reconstructed.
 
+### Implemented semantic vehicle-glass fallback
+
+Vehicle glass outside the exact AH60 and MI28 families no longer falls
+through to an opaque generic material. The **implemented** fallback requires
+both vehicle identity and a glass surface/shader identity; it is not applied
+to unrelated materials that merely contain one of those terms.
+
+Sky or environment textures, and vehicle-glass binding indices at or above
+`256`, are retained with the `ENVIRONMENT` role instead of being promoted to
+Base Color. The Blender graph uses a dark neutral tint, Principled
+transmission `1.0`, roughness `0.12`, IOR `1.45`, and dithered
+Fresnel-controlled opacity. When a source mask exists, its red channel is
+combined with the Fresnel term. Surface or shader identities containing
+`inside` or `interior` receive an additional `0.1` opacity scale.
+
+The PC retail Zero Fighter provides direct evidence for this shared policy:
+
+- outer `Glass` binds the beach sky/environment at `t257` and
+  `Msk_Generic` at `t2` and `t0`;
+- inner `GlassInside` binds `Msk_Generic` at `t1` and `t0`;
+- pixel shader `905` combines the source mask with view-angle opacity;
+- pixel shader `980` uses the same relationship with a `0.1` opacity scale.
+
+The Zero Fighter relationship is **verified**; applying the policy to other
+vehicle glass is **semantic/heuristic**. The environment binding is preserved
+as metadata and an image node but is not treated as a two-dimensional color
+map. Exact Frostbite cube reflection, lighting buffers, distance fade, and
+shader-specific opacity curves remain unreconstructed. The AH60 and MI28
+verified families reuse the shared graph builder while retaining their
+family-specific metadata and evidence.
+
 ### Verified representative map families
 
 FXC disassembly of retail `MP_001` permutations established these patterns:

@@ -1792,6 +1792,91 @@ def _test_verified_vehicle_material_graphs():
     ):
         raise AssertionError("Verified MI28 glass graph is incomplete")
 
+    generic_glass_surface = SurfaceShader(
+        "Glass",
+        (
+            "objects/vehicles/beach/willys-mb/shaders/"
+            "willys-mb_glass/guid"
+        ),
+        (
+            "Objects/Vehicles/Beach/Test/Test_Mesh/"
+            "Objects/Vehicles/Beach/Willys-MB/Shaders/Willys-MB_Glass"
+        ),
+    )
+    generic_bindings = (
+        ShaderTextureBinding(
+            257,
+            "Textures/Sky/Sky_Beach_Generic_RGBA16f",
+        ),
+        ShaderTextureBinding(0, "Textures/_MASK/Msk_Generic"),
+    )
+    roles = blender_addon._surface_binding_roles(
+        generic_glass_surface,
+        generic_bindings,
+    )
+    if roles != ("ENVIRONMENT", "MASK"):
+        raise AssertionError(
+            f"Semantic vehicle glass roles are incorrect: {roles}"
+        )
+    material = bpy.data.materials.new("BC2 Semantic Vehicle Glass")
+    nodes, links, shader = blender_addon._material_nodes(material)
+    texture_nodes = tuple(
+        (
+            binding,
+            role,
+            nodes.new("ShaderNodeTexImage"),
+        )
+        for binding, role in zip(generic_bindings, roles)
+    )
+    if not blender_addon._configure_verified_surface_material(
+        material,
+        generic_glass_surface,
+        nodes,
+        links,
+        shader,
+        texture_nodes,
+    ):
+        raise AssertionError("Semantic vehicle glass graph was not created")
+    if (
+        material.get("bc2_material_family") != "vehicle glass"
+        or material.get("bc2_material_status")
+        != "resolved semantic vehicle glass graph"
+        or not shader.inputs["Alpha"].is_linked
+        or shader.inputs["Transmission Weight"].default_value != 1.0
+        or material.surface_render_method != "DITHERED"
+        or nodes["BC2 glass opacity"].operation != "ADD"
+    ):
+        raise AssertionError("Semantic vehicle glass graph is incomplete")
+
+    inside_surface = SurfaceShader(
+        "GlassInside",
+        (
+            "objects/vehicles/beach/willys-mb/shaders/"
+            "willys-mb_glassinside/guid"
+        ),
+        (
+            "Objects/Vehicles/Beach/Test/Test_Mesh/"
+            "Objects/Vehicles/Beach/Willys-MB/Shaders/"
+            "Willys-MB_GlassInside"
+        ),
+    )
+    material = bpy.data.materials.new("BC2 Semantic Interior Glass")
+    nodes, links, shader = blender_addon._material_nodes(material)
+    if not blender_addon._configure_verified_surface_material(
+        material,
+        inside_surface,
+        nodes,
+        links,
+        shader,
+        (),
+    ):
+        raise AssertionError("Semantic interior glass graph was not created")
+    if (
+        material.get("bc2_material_family") != "vehicle interior glass"
+        or nodes.get("BC2 glass opacity scale") is None
+    ):
+        raise AssertionError("Interior glass opacity policy is missing")
+
 
 def _test_character_material_graph():
     surface = SurfaceShader(

@@ -182,7 +182,7 @@ The provided Xbox example indexes 630 Frostbite archives and 251,251 active asse
 | `CompositeMeshSet` | Resolves LOD0 geometry and source materials, corrects shared/global index streams, separates verified source part IDs into named collections, applies decoded mesh-set bind transforms, and hides decoded damaged/destroyed/blurred parts plus geometry or collections with two `Wreck` occurrences in one name by default. A single `Wreck` occurrence alone remains visible. |
 | PC `SkinnedMeshSet` | Resolves LOD0 geometry, the DBX skeleton reference, the default surface set, and source DX11 texture bindings; preserves declaration-specific UV layers (two for verified stride-48 assets and four for stride-64 characters), creates named vertex groups and source materials, adds Armature modifiers, and imports bounded exact-folder plus character-tree Actions when enabled. Console mesh sets remain geometry-only. |
 | PC soldier entity `.dbx` | Resolves every `Meshes3p` body/head/headgear component at LOD0, applies per-component shader-set overrides, binds all modules to one verified skeleton, creates modular component collections, follows character-specific static/facial/kit/revive animation links, and optionally selects eight verified rifle locomotion clips through the explicit shared base-set link. |
-| PC vehicle entity `.dbx` | Resolves the linked composite LOD0 mesh, source-backed materials, ordered named part collections, mesh-set bind transforms, and DBX-backed default/damaged/alternate states without inventing runtime pivots, parenting, or an armature. Verified AH60 Main, glass, interior, cockpit-interior, and minigun shader relationships receive dedicated Blender graphs. |
+| PC vehicle entity `.dbx` | Resolves the linked composite LOD0 mesh, source-backed materials, ordered named part collections, mesh-set bind transforms, and DBX-backed default/damaged/alternate states without inventing runtime pivots, parenting, or an armature. Verified AH60 and MI28 families receive dedicated graphs; other vehicle glass uses a semantic transmissive fallback. Unknown composite UV declarations are selected from cross-subset topology rather than vehicle-name exceptions. |
 | PC `GrannyModel` | Creates a native Blender armature while preserving the complete source hierarchy, local transforms, source flags, and physics-joint metadata. |
 | PC `GrannyAnimation` | Creates a Blender 5.2 layered/slotted Action on the matching armature, sampled at the source time step with root motion, quaternion continuity, and representable bone scale. Degrees 0-3 and the documented human/Raven codecs are implemented. |
 | `WaterMesh` | Creates native water geometry from every body using platform-endian 32-bit triangle indices. |
@@ -324,6 +324,16 @@ receive their recovered color graphs. The textureless
 `06_lod0_Windshields_Glass` surface receives a transmissive view-angle glass
 graph rather than an opaque fallback.
 
+The validated Zero Fighter import creates 24 objects totaling 8,459 triangles.
+Its stride-64 LOD0 declaration uses a byte-48 composite part selector and
+byte-36 primary `UVMap`; the previous byte-24 fallback was degenerate. Outer
+and interior glass now receive shared transmissive vehicle-glass graphs, with
+the sky texture retained as an environment binding instead of becoming Base
+Color. A retail survey parses all 62 unique vehicle LOD0 MeshData resources
+without failure and exercises recurring byte-32, byte-36, byte-40, byte-44,
+and byte-48 selector families. Unknown declarations remain topology-driven
+preview heuristics, not exporter-safe format specifications.
+
 ## Cache behavior
 
 The cache location is configurable in Add-on Preferences, where **Open Cache
@@ -358,9 +368,10 @@ scoped derivatives and may likewise be deleted when Blender is closed.
 - PC modular character materials are validated with the complete US Assault
   body/head/headgear set. Shared character bindings use `MP_001`'s duplicated
   DX11 database; standalone AH60 bindings fall back to the matching `MP_004`
-  database. AH60 Main/glass/interior/minigun source relationships are
-  verified, but exact Frostbite environment lighting and every alternate
-  vehicle kit still require additional validation.
+  database. AH60 and MI28 graph relationships plus Zero Fighter glass are
+  verified. Other vehicle glass uses a semantic approximation, and exact
+  Frostbite environment lighting, generic per-binding UV routes, and every
+  alternate vehicle kit still require additional validation.
 - Composite part membership, ordered LOD0 records, bounds, and mesh-set bind
   transforms are imported. Initial visibility uses DBX health/model states
   plus explicit wreck/damaged/blurred names. Runtime pivots, parent hierarchy,
@@ -570,3 +581,17 @@ It verifies 24 source parts, 44 surface fragments, 21,032 imported triangles,
 the byte-32 part selector and 24/28/36/40 coordinate layout across all ten
 LOD0 subsets, shader-verified Main/MainMetal texture routing, the 36-vertex
 transmissive windshield, and save/reopen persistence.
+
+The broader vehicle declaration and Zero Fighter glass check is:
+
+```powershell
+blender --background --factory-startup `
+  --python tests\blender_vehicle_family_integration.py -- `
+  --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
+  --output <OUTPUT_BLEND>
+```
+
+It imports and reopens Zero Fighter, verifies 24 objects, 8,459 triangles,
+the byte-48 selector, byte-36 primary UV, and semantic outer/interior glass
+graphs. It also checks the recurring AH60, AH64, MI28, M1A2, and T90
+declaration families directly from retail resources.

@@ -975,6 +975,128 @@ class MeshTests(unittest.TestCase):
             places=3,
         )
 
+    def test_pc_composite_stride_64_ranks_uvs_by_topology(self):
+        metadata = bytearray(struct.pack("<IHB", 2, 0, 2))
+        definitions = (
+            ("multi_part", 2, 6, 0, 0, (2, 3)),
+            ("single_part", 1, 3, 6, 6 * 64, (7,)),
+        )
+        for (
+            name,
+            primitive_count,
+            vertex_count,
+            index_offset,
+            vertex_offset,
+            palette,
+        ) in definitions:
+            metadata.extend(name.encode("ascii") + b"\0")
+            metadata.extend(
+                struct.pack(
+                    "<IIIIBBBBH",
+                    primitive_count,
+                    vertex_count,
+                    index_offset,
+                    vertex_offset,
+                    64,
+                    3,
+                    0,
+                    len(palette),
+                    len(palette),
+                )
+            )
+            metadata.extend(
+                struct.pack(f"<{len(palette)}H", *palette)
+            )
+
+        positions = (
+            (0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (2.0, 0.0, 0.0),
+            (3.0, 0.0, 0.0),
+            (2.0, 1.0, 0.0),
+        )
+        primary_uvs = (
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (0.0, 1.0),
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (0.0, 1.0),
+        )
+        secondary_uvs = (
+            (0.1, 0.2),
+            (0.9, 0.2),
+            (0.1, 0.8),
+            (0.1, 0.2),
+            (0.9, 0.2),
+            (0.1, 0.8),
+        )
+        vertices = bytearray()
+        for subset_index, definition in enumerate(definitions):
+            palette = definition[-1]
+            subset_positions = positions if subset_index == 0 else positions[:3]
+            for index, position in enumerate(subset_positions):
+                vertex = bytearray(64)
+                struct.pack_into("<eee", vertex, 0, *position)
+                struct.pack_into("<ee", vertex, 24, index / 3.0, 0.0)
+                struct.pack_into("<ee", vertex, 28, index / 4.0, 0.0)
+                struct.pack_into("<ee", vertex, 32, index / 5.0, 0.0)
+                struct.pack_into(
+                    "<ee",
+                    vertex,
+                    36,
+                    *primary_uvs[index],
+                )
+                struct.pack_into(
+                    "<ee",
+                    vertex,
+                    40,
+                    *secondary_uvs[index],
+                )
+                part_index = (
+                    palette[0 if index < 3 else 1]
+                    if len(palette) > 1
+                    else palette[0]
+                )
+                vertex[48:52] = bytes((part_index,)) * 4
+                vertices.extend(vertex)
+
+        indices = struct.pack(
+            "<9H",
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            0,
+            1,
+            2,
+        )
+        metadata.extend(
+            struct.pack("<III", len(vertices), len(indices), 0)
+        )
+        mesh = parse_meshdata(
+            bytes(metadata + vertices + indices),
+            "pc",
+            position_format="HALF",
+        )
+        multi_part, single_part = mesh.subsets
+
+        self.assertEqual(multi_part.part_index_offset, 48)
+        self.assertEqual(multi_part.uv_offsets, (36, 40))
+        self.assertEqual(single_part.part_index_offset, None)
+        self.assertEqual(single_part.uv_offsets, (36, 40))
+        self.assertAlmostEqual(multi_part.uvs[2][1], 1.0, places=3)
+        self.assertAlmostEqual(
+            single_part.secondary_uvs[1][0],
+            0.9,
+            places=3,
+        )
+        split = dict(split_mesh_subset_by_parts(multi_part))
+        self.assertEqual(split[2].uv_offsets, (36, 40))
+
     def test_stride_48_uses_declared_uv_channels(self):
         metadata = bytearray(struct.pack("<IHB", 1, 0, 1))
         metadata.extend(b"surface\0")

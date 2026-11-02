@@ -231,6 +231,23 @@ texture-conversion, or unresolved-subset diagnostics.
   normal, color, symbol, dirt, detail, and 10x mask routes. The 36-vertex,
   20-triangle `lod0_Windshields_Glass` surface uses transmissive view-angle
   opacity and retains its graph after save/reopen.
+- PC vehicle declaration survey: all 62 unique cataloged vehicle LOD0
+  MeshData resources parse with no failures: 21 type-0, nine type-1, and 32
+  type-2 resources. The representative family regression confirms AH60
+  24/28/32/40 with selector byte 36, MI28 24/28/36/40 with selector byte 32,
+  AH64 primary byte 28 with selector byte 44, M1A2 primary byte 28 with
+  selector byte 40, and Zero Fighter/T90 primary byte 36 with selector byte
+  48. These last four families exercise the topology-driven composite
+  declaration resolver rather than path-specific exceptions.
+- PC Zero Fighter direct mesh-set import: four LOD0 subsets split into 24
+  objects and 8,459 triangles with no material diagnostics. Every subset,
+  including the one-part blurred rotor, retains the 36/40/44 coordinate
+  declaration; the three multi-part subsets retain the byte-48 selector.
+  MainBody, outer glass, and inner glass use nondegenerate byte-36 `UVMap`
+  data. Outer glass retains the sky binding as `ENVIRONMENT`, uses
+  transmission with Fresnel/mask opacity, and inner glass retains the
+  shader-observed `0.1` opacity scale. Geometry, UV metadata, roles, and both
+  glass graphs survive save/reopen.
 - PC `ske01`: local transforms composed against every transposed stored
   inverse-world matrix with a maximum identity residual below `7.5e-7`.
 - PC rifle third-person `StandIdle` and `RunForward`: 39 named transform
@@ -273,10 +290,15 @@ Current tests cover:
 - the declared four-channel little-endian stride-48 MI28 composite layout when
   the verified part-ID field is at byte 32, including propagation to
   one-part subsets;
+- topology-ranked little-endian stride-64 composite coordinates when bytes
+  24/28 are degenerate, including exclusion of a byte-48 part selector and
+  declaration propagation to a one-part subset;
 - verified AH60 Main/glass/interior/cockpit/minigun texture roles, UV channels,
   shader constants, and Blender graph construction;
 - verified MI28 Main/MainMetal coordinate routes and color constants plus its
   textureless transmissive glass graph;
+- semantic vehicle outer/interior glass graphs, including environment-role
+  preservation, transmission, linked opacity, and the interior scale;
 - the declared four-channel little-endian stride-64 skinned coordinate layout
   including constant declared channels, plus nondegenerate routing for
   LegStandard, MOLLE, and pouches;
@@ -385,6 +407,19 @@ blender --background --factory-startup `
   --output <OUTPUT_BLEND>
 ```
 
+The PC vehicle-family runner imports Zero Fighter, verifies its 24 objects,
+8,459 triangles, byte-48 selector, 36/40/44 coordinate declaration, outer and
+inner glass graphs, and save/reopen persistence. It also parses representative
+AH60, AH64, MI28, M1A2, and T90 LOD0 resources to lock the recurring
+declaration families:
+
+```powershell
+blender --background --factory-startup `
+  --python tests\blender_vehicle_family_integration.py -- `
+  --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
+  --output <OUTPUT_BLEND>
+```
+
 ## External-reference validation
 
 All eight supplied BF3/BF4 MaxScripts were reviewed against every current
@@ -411,8 +446,9 @@ These behaviors are useful but need broader format research:
 - MeshData payload-header search.
 - Half-float versus float position scoring across all related subsets sharing
   a vertex stride.
-- UV offset selection from stride and value ranges outside the verified
-  48-byte static, 48-byte PC skinned, and 64-byte PC skinned declarations.
+- Topology- and normalized-range-based coordinate selection for unknown PC
+  composite declarations. The resolver is surveyed across 62 vehicle LOD0
+  resources, but coordinate meaning remains shader-specific.
 - Skinned vertex influence offsets.
 - PC Granny field locations and curve codecs outside the documented human and
   Raven v7 samples.
@@ -437,8 +473,8 @@ naive alternative choose incorrectly.
 
 ## Unsupported or incomplete areas
 
-- Full vertex declarations, normals, tangents, colors, and arbitrary UV
-  layouts beyond the verified static and PC skinned declarations.
+- Full vertex declarations, normals, tangents, colors, and exporter-safe
+  semantics for topology-resolved composite coordinate layouts.
 - Complete shader arithmetic, constants, swizzles, UV sources, and all texture
   semantics.
 - Xbox 360/PS3 Granny skeleton/model and animation conversion.

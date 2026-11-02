@@ -3508,9 +3508,23 @@ def _verified_surface_family(surface: SurfaceShader) -> str | None:
     }.get(partition)
 
 
+def _is_vehicle_glass_surface(surface: SurfaceShader) -> bool:
+    identity = (
+        f"{surface.name}/{surface.reference}/{surface.database_key}"
+        .replace("\\", "/")
+        .casefold()
+    )
+    return "/vehicles/" in identity and "glass" in identity
+
+
 def _surface_binding_roles(surface: SurfaceShader, bindings):
     roles = list(_binding_roles(bindings))
     family = _verified_surface_family(surface)
+    if _is_vehicle_glass_surface(surface):
+        for index, binding in enumerate(bindings):
+            normalized_path = binding.path.replace("\\", "/").casefold()
+            if binding.index >= 256 or "/textures/sky/" in normalized_path:
+                roles[index] = "ENVIRONMENT"
     if family == "AH60_MAIN":
         verified_roles = {
             1: "COLOR",
@@ -4346,6 +4360,83 @@ def _configure_verified_vehicle_main(
     return True
 
 
+def _configure_vehicle_glass_material(
+    material,
+    nodes,
+    links,
+    shader,
+    texture_nodes,
+    *,
+    family_label: str,
+    color_model: str,
+    evidence: str,
+    status: str,
+    opacity_scale: float = 1.0,
+) -> bool:
+    material.diffuse_color = (0.06, 0.08, 0.10, 0.2)
+    shader.inputs["Base Color"].default_value = (
+        0.06,
+        0.08,
+        0.10,
+        1.0,
+    )
+    shader.inputs["Roughness"].default_value = 0.12
+    shader.inputs["IOR"].default_value = 1.45
+    transmission = shader.inputs.get("Transmission Weight")
+    if transmission is not None:
+        transmission.default_value = 1.0
+
+    fresnel = nodes.new("ShaderNodeFresnel")
+    fresnel.name = "BC2 glass Fresnel"
+    fresnel.label = "Source view-angle opacity"
+    fresnel.inputs["IOR"].default_value = 1.45
+    fresnel.location = (100, -260)
+    opacity = fresnel.outputs["Fac"]
+    dirt_node = _binding_texture_node(texture_nodes, 2)
+    if dirt_node is None:
+        dirt_node = _binding_texture_node(texture_nodes, 0)
+    if dirt_node is None:
+        dirt_node = next(
+            (
+                node
+                for _binding, role, node in texture_nodes
+                if role == "MASK"
+            ),
+            None,
+        )
+    if dirt_node is not None:
+        channels = nodes.new("ShaderNodeSeparateColor")
+        channels.name = "BC2 glass dirt channels"
+        channels.label = "Source glass mask red"
+        channels.location = (-180, -300)
+        links.new(dirt_node.outputs["Color"], channels.inputs["Color"])
+        add = nodes.new("ShaderNodeMath")
+        add.name = "BC2 glass opacity"
+        add.label = "Fresnel + source mask red"
+        add.operation = "ADD"
+        add.use_clamp = True
+        add.location = (320, -240)
+        links.new(fresnel.outputs["Fac"], add.inputs[0])
+        links.new(channels.outputs["Red"], add.inputs[1])
+        opacity = add.outputs[0]
+    if opacity_scale != 1.0:
+        scale = nodes.new("ShaderNodeMath")
+        scale.name = "BC2 glass opacity scale"
+        scale.label = f"Interior glass opacity x {opacity_scale:g}"
+        scale.operation = "MULTIPLY"
+        scale.inputs[1].default_value = opacity_scale
+        scale.location = (500, -240)
+        links.new(opacity, scale.inputs[0])
+        opacity = scale.outputs[0]
+    links.new(opacity, shader.inputs["Alpha"])
+    material.surface_render_method = "DITHERED"
+    material["bc2_material_family"] = family_label
+    material["bc2_color_model"] = color_model
+    material["bc2_material_evidence"] = evidence
+    material["bc2_material_status"] = status
+    return True
+
+
 def _configure_verified_surface_material(
     material,
     surface: SurfaceShader,
@@ -4422,69 +4513,62 @@ def _configure_verified_surface_material(
         )
 
     if family in {"AH60_GLASS", "MI28_GLASS"}:
-        material.diffuse_color = (0.06, 0.08, 0.10, 0.2)
-        shader.inputs["Base Color"].default_value = (
-            0.06,
-            0.08,
-            0.10,
-            1.0,
-        )
-        shader.inputs["Roughness"].default_value = 0.12
-        shader.inputs["IOR"].default_value = 1.45
-        transmission = shader.inputs.get("Transmission Weight")
-        if transmission is not None:
-            transmission.default_value = 1.0
-
-        fresnel = nodes.new("ShaderNodeFresnel")
-        fresnel.name = "BC2 glass Fresnel"
-        fresnel.label = "Source view-angle opacity"
-        fresnel.inputs["IOR"].default_value = 1.45
-        fresnel.location = (100, -260)
-        opacity = fresnel.outputs["Fac"]
-        dirt_node = _binding_texture_node(texture_nodes, 2)
-        if dirt_node is None:
-            dirt_node = _binding_texture_node(texture_nodes, 0)
-        if dirt_node is not None:
-            channels = nodes.new("ShaderNodeSeparateColor")
-            channels.name = "BC2 glass dirt channels"
-            channels.label = "DirtMaskRGB red"
-            channels.location = (-180, -300)
-            links.new(dirt_node.outputs["Color"], channels.inputs["Color"])
-            add = nodes.new("ShaderNodeMath")
-            add.name = "BC2 glass opacity"
-            add.label = "Fresnel + dirt red"
-            add.operation = "ADD"
-            add.use_clamp = True
-            add.location = (320, -240)
-            links.new(fresnel.outputs["Fac"], add.inputs[0])
-            links.new(channels.outputs["Red"], add.inputs[1])
-            opacity = add.outputs[0]
-        links.new(opacity, shader.inputs["Alpha"])
-        material.surface_render_method = "DITHERED"
         if family == "MI28_GLASS":
-            material["bc2_material_family"] = "MI28 glass"
-            material["bc2_color_model"] = (
-                "transparent reflective glass with view-angle opacity"
+            return _configure_vehicle_glass_material(
+                material,
+                nodes,
+                links,
+                shader,
+                texture_nodes,
+                family_label="MI28 glass",
+                color_model=(
+                    "transparent reflective glass with view-angle opacity"
+                ),
+                evidence="MP_005 pixel shaders 1221, 1346, and 1655",
+                status="resolved verified MI28 glass graph",
             )
-            material["bc2_material_evidence"] = (
-                "MP_005 pixel shaders 1221, 1346, and 1655"
-            )
-            material["bc2_material_status"] = (
-                "resolved verified MI28 glass graph"
-            )
-        else:
-            material["bc2_material_family"] = "AH60 glass"
-            material["bc2_color_model"] = (
+        return _configure_vehicle_glass_material(
+            material,
+            nodes,
+            links,
+            shader,
+            texture_nodes,
+            family_label="AH60 glass",
+            color_model=(
                 "transparent reflective glass with Fresnel plus "
                 "DirtMaskRGB red opacity"
-            )
-            material["bc2_material_evidence"] = (
-                "MP_004 pixel shaders 978, 1135, and 2110"
-            )
-            material["bc2_material_status"] = (
-                "resolved verified AH60 glass graph"
-            )
-        return True
+            ),
+            evidence="MP_004 pixel shaders 978, 1135, and 2110",
+            status="resolved verified AH60 glass graph",
+        )
+
+    if _is_vehicle_glass_surface(surface):
+        identity = (
+            f"{surface.name}/{surface.reference}/{surface.database_key}"
+            .replace("\\", "/")
+            .casefold()
+        )
+        inside = "inside" in identity or "interior" in identity
+        return _configure_vehicle_glass_material(
+            material,
+            nodes,
+            links,
+            shader,
+            texture_nodes,
+            family_label=(
+                "vehicle interior glass" if inside else "vehicle glass"
+            ),
+            color_model=(
+                "semantic transmissive vehicle glass with view-angle and "
+                "source-mask opacity"
+            ),
+            evidence=(
+                "shared PC retail vehicle glass shader behavior; exact "
+                "reflection and distance response remain heuristic"
+            ),
+            status="resolved semantic vehicle glass graph",
+            opacity_scale=0.1 if inside else 1.0,
+        )
 
     if family in {"AH60_INTERIOR", "AH60_COCKPIT_INTERIOR"}:
         color_node = _binding_texture_node(texture_nodes, 1)
