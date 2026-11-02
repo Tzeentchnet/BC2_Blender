@@ -34,7 +34,9 @@ from .core.assembly import (
     AssemblyPart,
     CharacterAnimationLinks,
     ModularAssembly,
+    animation_tree_base_set_references,
     animation_tree_clip_references,
+    animation_tree_replacement_references,
     character_animation_links,
     modular_assembly,
     vehicle_part_state,
@@ -97,6 +99,17 @@ ADDON_ID = (
 RESULTS_PER_PAGE = 150
 _MAX_RELATED_ANIMATIONS = 64
 _MAX_CHARACTER_ANIMATION_DESCRIPTORS = 256
+_CORE_GAMEPLAY_TREE_STEM = "soldieranimtree3prif"
+_CORE_GAMEPLAY_ANIMATION_PATHS = (
+    "characters/animations/bset_rif/3p/standidle.res",
+    "characters/animations/bset_rif/3p/standrelaxedidle.res",
+    "characters/animations/bset_rif/3p/crouchidle.res",
+    "characters/animations/bset_rif/3p/walkforward.res",
+    "characters/animations/bset_rif/3p/walkbackward.res",
+    "characters/animations/bset_rif/3p/runforward.res",
+    "characters/animations/bset_rif/3p/runbackward.res",
+    "characters/animations/bset_rif/3p/sneakforward.res",
+)
 _PC_MODULAR_SHADER_FALLBACKS = (
     (
         "Dist/win32/levels/mp_004/level-00.fbrb",
@@ -136,6 +149,12 @@ class _RelatedAnimationImport:
     @property
     def catalog_complete(self) -> bool:
         return self.indexed_archive_count == self.total_archive_count
+
+
+@dataclass(frozen=True)
+class _RelatedAnimationAsset:
+    asset: object
+    additive_base_asset: object | None = None
 
 
 @dataclass(frozen=True)
@@ -319,8 +338,16 @@ class BC2AddonPreferences(AddonPreferences):
         name="Import related animations",
         description=(
             "With a rigged PC mesh, import exact-folder clips and clips "
-            "explicitly listed by character-specific animation trees after "
-            "verifying that each clip references that exact skeleton"
+            "explicitly listed by character animation trees after verifying "
+            "that each clip references that exact skeleton"
+        ),
+        default=True,
+    )
+    default_import_core_gameplay_animations: BoolProperty(
+        name="Import core gameplay animations",
+        description=(
+            "For PC human soldiers, also import eight verified rifle "
+            "locomotion clips explicitly linked through the Shared tree"
         ),
         default=True,
     )
@@ -350,6 +377,9 @@ class BC2AddonPreferences(AddonPreferences):
         defaults.prop(self, "default_material_mode")
         defaults.prop(self, "default_composite_visibility")
         defaults.prop(self, "default_import_related_animations")
+        gameplay = defaults.row()
+        gameplay.active = self.default_import_related_animations
+        gameplay.prop(self, "default_import_core_gameplay_animations")
 
         diagnostics = self.layout.box()
         diagnostics.label(text="Diagnostics", icon="INFO")
@@ -444,6 +474,14 @@ class BC2Settings(PropertyGroup):
         ),
         default=True,
     )
+    import_core_gameplay_animations: BoolProperty(
+        name="Import core gameplay animations",
+        description=(
+            "Import eight verified rifle locomotion clips for PC human "
+            "soldiers through their explicit Shared animation tree"
+        ),
+        default=True,
+    )
     map_name: StringProperty(
         name="Level name",
         description=(
@@ -480,6 +518,9 @@ def _apply_preference_defaults(
     settings.composite_visibility = preferences.default_composite_visibility
     settings.import_related_animations = (
         preferences.default_import_related_animations
+    )
+    settings.import_core_gameplay_animations = (
+        preferences.default_import_core_gameplay_animations
     )
     settings.defaults_initialized = True
 
@@ -2076,15 +2117,51 @@ def _create_animation_action(
     skeleton: GrannySkeleton,
     animation: GrannyAnimation,
     settings: BC2Settings,
+    additive_base: GrannyAnimation | None = None,
 ):
     source_names = {bone.name for bone in skeleton.bones}
     armature_names = {bone.name for bone in armature_obj.data.bones}
+    additive = bool(animation.additive_bone_indices)
+    if additive and additive_base is None:
+        raise BC2Error(
+            f"Additive animation {animation.name!r} requires an authored "
+            "base pose; import it through its character mesh or soldier "
+            "descriptor"
+        )
+    if additive_base is not None and additive_base.additive_bone_indices:
+        raise BC2Error(
+            f"Animation base {additive_base.name!r} is itself additive"
+        )
+
+    animation_tracks = {track.name: track for track in animation.tracks}
+    if len(animation_tracks) != len(animation.tracks):
+        raise BC2Error(
+            f"Animation {animation.name!r} contains duplicate track names"
+        )
+    base_tracks = (
+        {track.name: track for track in additive_base.tracks}
+        if additive_base is not None
+        else {}
+    )
+    if (
+        additive_base is not None
+        and len(base_tracks) != len(additive_base.tracks)
+    ):
+        raise BC2Error(
+            f"Animation base {additive_base.name!r} contains duplicate "
+            "track names"
+        )
+    action_tracks = (
+        additive_base.tracks
+        if additive_base is not None
+        else animation.tracks
+    )
     missing_source = [
-        track.name for track in animation.tracks
+        track.name for track in action_tracks
         if track.name not in source_names
     ]
     missing_armature = [
-        track.name for track in animation.tracks
+        track.name for track in action_tracks
         if track.name not in armature_names
     ]
     if missing_source or missing_armature:
@@ -2094,7 +2171,6 @@ def _create_animation_action(
             + ", ".join(missing[:8])
         )
 
-    additive = bool(animation.additive_bone_indices)
     if additive:
         invalid_indices = tuple(
             index
@@ -2123,6 +2199,13 @@ def _create_animation_action(
                 "Additive animation bone-index metadata does not match its "
                 "transform tracks: " + "; ".join(details)
             )
+        missing_base_tracks = sorted(track_names - set(base_tracks))
+        if missing_base_tracks:
+            raise BC2Error(
+                f"Animation base {additive_base.name!r} does not define "
+                "the additive tracks: "
+                + ", ".join(missing_base_tracks[:8])
+            )
 
     source_fps = max(1, round(1.0 / animation.time_step))
     interval_count = max(1, round(animation.duration / animation.time_step))
@@ -2145,7 +2228,7 @@ def _create_animation_action(
     action = bpy.data.actions.new(animation.name)
     action.use_fake_user = True
     channelbag = _new_action_channelbag(action, armature_obj)
-    for track in animation.tracks:
+    for track in action_tracks:
         pose_bone = armature_obj.pose.bones[track.name]
         pose_bone.rotation_mode = "QUATERNION"
         locations = []
@@ -2153,18 +2236,37 @@ def _create_animation_action(
         scales = []
         previous_rotation = None
         for time in times:
-            animated_local = _convert_skeleton_matrix(
-                _source_transform_matrix(
+            if additive:
+                base_track = base_tracks[track.name]
+                base_local = _source_transform_matrix(
+                    base_track.translation.evaluate(0.0),
+                    base_track.rotation_at(0.0),
+                    base_track.scale_shear.evaluate(0.0),
+                )
+                delta_track = animation_tracks.get(track.name)
+                source_local = (
+                    base_local
+                    if delta_track is None
+                    else base_local
+                    @ _source_transform_matrix(
+                        delta_track.translation.evaluate(time),
+                        delta_track.rotation_at(time),
+                        delta_track.scale_shear.evaluate(time),
+                    )
+                )
+            else:
+                source_local = _source_transform_matrix(
                     track.translation.evaluate(time),
                     track.rotation_at(time),
                     track.scale_shear.evaluate(time),
-                ),
+                )
+            animated_local = _convert_skeleton_matrix(
+                source_local,
                 settings,
             )
             basis = (
-                animated_local
-                if additive
-                else rest_by_name[track.name].inverted_safe() @ animated_local
+                rest_by_name[track.name].inverted_safe()
+                @ animated_local
             )
             location, rotation, scale = basis.decompose()
             reconstructed = Matrix.LocRotScale(location, rotation, scale)
@@ -2222,10 +2324,14 @@ def _create_animation_action(
     action["bc2_time_step_seconds"] = animation.time_step
     action["bc2_source_fps"] = source_fps
     action["bc2_track_count"] = len(animation.tracks)
+    action["bc2_baked_track_count"] = len(action_tracks)
     action["bc2_additive"] = additive
+    action["bc2_additive_baked"] = additive
     action["bc2_additive_bone_count"] = len(
         animation.additive_bone_indices
     )
+    if additive_base is not None:
+        action["bc2_additive_base_name"] = additive_base.name
     armature_obj.animation_data_create()
     armature_obj.animation_data.action = action
     context.scene.render.fps = source_fps
@@ -2318,9 +2424,13 @@ def _character_linked_animation_paths(
     sources: tuple[_CharacterAnimationSource, ...],
     skeleton_path: str,
     preferred_archives: tuple[str, ...],
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    include_core_gameplay: bool,
+) -> tuple[tuple[str, ...], dict[str, str], tuple[str, ...]]:
     paths = {}
     tree_sources = {}
+    shared_tree_sources = {}
+    additive_base_paths = {}
+    ambiguous_base_paths = set()
     issues = []
     for source in sources:
         for reference in source.links.animation_references:
@@ -2337,6 +2447,16 @@ def _character_linked_animation_paths(
                 issues.append(f"{source.descriptor_path}: {exc}")
                 continue
             tree_sources.setdefault(
+                path.casefold(),
+                (path, source.archive_path),
+            )
+        for reference in source.links.shared_animation_tree_references:
+            try:
+                path = _reference_descriptor_path(reference)
+            except BC2Error as exc:
+                issues.append(f"{source.descriptor_path}: {exc}")
+                continue
+            shared_tree_sources.setdefault(
                 path.casefold(),
                 (path, source.archive_path),
             )
@@ -2366,9 +2486,13 @@ def _character_linked_animation_paths(
                 )
                 continue
             references = animation_tree_clip_references(document)
+            replacement_references = (
+                animation_tree_replacement_references(document)
+            )
         except (BC2Error, OSError, ValueError) as exc:
             issues.append(f"{path}: {exc}")
             continue
+        clip_paths = []
         for reference in references:
             try:
                 clip_path = _reference_resource_path(reference)
@@ -2376,8 +2500,155 @@ def _character_linked_animation_paths(
                 issues.append(f"{path}: {exc}")
                 continue
             paths.setdefault(clip_path.casefold(), clip_path)
+            clip_paths.append(clip_path)
+        replacement_paths = []
+        for reference in replacement_references:
+            try:
+                replacement_paths.append(
+                    _reference_resource_path(reference)
+                )
+            except BC2Error as exc:
+                issues.append(f"{path}: {exc}")
+        if len(replacement_paths) == 1:
+            base_path = replacement_paths[0]
+            base_key = base_path.casefold()
+            for clip_path in clip_paths:
+                clip_key = clip_path.casefold()
+                if clip_key == base_key or clip_key in ambiguous_base_paths:
+                    continue
+                existing = additive_base_paths.get(clip_key)
+                if (
+                    existing is not None
+                    and existing.casefold() != base_key
+                ):
+                    additive_base_paths.pop(clip_key, None)
+                    ambiguous_base_paths.add(clip_key)
+                    issues.append(
+                        f"{clip_path}: character trees specify conflicting "
+                        "replacement poses"
+                    )
+                else:
+                    additive_base_paths[clip_key] = base_path
+        elif len(replacement_paths) > 1:
+            issues.append(
+                f"{path}: multiple replacement poses make automatic "
+                "additive composition ambiguous"
+            )
+
+    if include_core_gameplay:
+        for path, source_archive in sorted(
+            shared_tree_sources.values(),
+            key=lambda item: item[0].casefold(),
+        ):
+            preferred = tuple(
+                dict.fromkeys((source_archive, *preferred_archives))
+            )
+            shared_asset = repository.catalog.find_asset(path, preferred)
+            if shared_asset is None:
+                issues.append(
+                    f"Shared character animation tree is not indexed: {path}"
+                )
+                continue
+            try:
+                _, raw = repository.read_asset(
+                    int(shared_asset["id"]),
+                    max_size=256 << 20,
+                )
+                document = parse_dbx(raw)
+                tree_skeleton = _skeleton_path_for_document(document, path)
+                if tree_skeleton.casefold() != skeleton_path.casefold():
+                    issues.append(
+                        f"{path}: tree skeleton {tree_skeleton} does not "
+                        f"match {skeleton_path}"
+                    )
+                    continue
+                base_set_references = animation_tree_base_set_references(
+                    document
+                )
+            except (BC2Error, OSError, ValueError) as exc:
+                issues.append(f"{path}: {exc}")
+                continue
+
+            rifle_trees = []
+            for reference in base_set_references:
+                try:
+                    candidate_path = _reference_descriptor_path(reference)
+                except BC2Error as exc:
+                    issues.append(f"{path}: {exc}")
+                    continue
+                if (
+                    PurePosixPath(candidate_path).stem.casefold()
+                    == _CORE_GAMEPLAY_TREE_STEM
+                ):
+                    rifle_trees.append(candidate_path)
+            if not rifle_trees:
+                issues.append(
+                    f"{path}: Shared BaseSetAnimTrees does not link the "
+                    "verified rifle tree"
+                )
+                continue
+
+            for rifle_path in rifle_trees:
+                rifle_preferred = tuple(
+                    dict.fromkeys(
+                        (
+                            str(shared_asset["archive_path"]),
+                            *preferred,
+                        )
+                    )
+                )
+                rifle_asset = repository.catalog.find_asset(
+                    rifle_path,
+                    rifle_preferred,
+                )
+                if rifle_asset is None:
+                    issues.append(
+                        "Core rifle animation tree is not indexed: "
+                        f"{rifle_path}"
+                    )
+                    continue
+                try:
+                    _, raw = repository.read_asset(
+                        int(rifle_asset["id"]),
+                        max_size=256 << 20,
+                    )
+                    rifle_document = parse_dbx(raw)
+                    rifle_skeleton = _skeleton_path_for_document(
+                        rifle_document,
+                        rifle_path,
+                    )
+                    if rifle_skeleton.casefold() != skeleton_path.casefold():
+                        issues.append(
+                            f"{rifle_path}: tree skeleton {rifle_skeleton} "
+                            f"does not match {skeleton_path}"
+                        )
+                        continue
+                    rifle_references = animation_tree_clip_references(
+                        rifle_document
+                    )
+                except (BC2Error, OSError, ValueError) as exc:
+                    issues.append(f"{rifle_path}: {exc}")
+                    continue
+                rifle_paths = {}
+                for reference in rifle_references:
+                    try:
+                        clip_path = _reference_resource_path(reference)
+                    except BC2Error as exc:
+                        issues.append(f"{rifle_path}: {exc}")
+                        continue
+                    rifle_paths.setdefault(clip_path.casefold(), clip_path)
+                for expected_path in _CORE_GAMEPLAY_ANIMATION_PATHS:
+                    clip_path = rifle_paths.get(expected_path)
+                    if clip_path is None:
+                        issues.append(
+                            f"{rifle_path}: core gameplay clip is not "
+                            f"listed: {expected_path}"
+                        )
+                        continue
+                    paths.setdefault(clip_path.casefold(), clip_path)
     return (
         tuple(sorted(paths.values(), key=str.casefold)),
+        additive_base_paths,
         tuple(issues),
     )
 
@@ -2387,8 +2658,9 @@ def _related_animation_assets(
     resource_asset,
     skeleton_asset,
     preferred_archives: tuple[str, ...],
+    include_core_gameplay: bool,
     known_source: _CharacterAnimationSource | None = None,
-) -> tuple[tuple[object, ...], tuple[str, ...], int, int]:
+) -> tuple[tuple[_RelatedAnimationAsset, ...], tuple[str, ...], int, int]:
     skeleton_path = str(skeleton_asset["path"])
     folders = tuple(
         sorted(
@@ -2420,11 +2692,14 @@ def _related_animation_assets(
         preferred_archives,
         known_source,
     )
-    graph_paths, graph_issues = _character_linked_animation_paths(
-        repository,
-        sources,
-        skeleton_path,
-        preferred_archives,
+    graph_paths, additive_base_paths, graph_issues = (
+        _character_linked_animation_paths(
+            repository,
+            sources,
+            skeleton_path,
+            preferred_archives,
+            include_core_gameplay,
+        )
     )
     paths = dict(folder_paths)
     for path in graph_paths:
@@ -2446,6 +2721,7 @@ def _related_animation_assets(
         )
 
     assets = []
+    validated_base_assets = {}
     graph_path_keys = {path.casefold() for path in graph_paths}
     for path in ordered_paths:
         asset = repository.catalog.find_asset(path, preferred_archives)
@@ -2457,14 +2733,92 @@ def _related_animation_assets(
         except (BC2Error, OSError, ValueError) as exc:
             issues.append(f"{path}: {exc}")
             continue
-        if referenced_path.casefold() == skeleton_path.casefold():
-            assets.append(asset)
-        elif path.casefold() in graph_path_keys:
-            issues.append(
-                f"{path}: clip skeleton {referenced_path} does not match "
-                f"{skeleton_path}"
+        if referenced_path.casefold() != skeleton_path.casefold():
+            if path.casefold() in graph_path_keys:
+                issues.append(
+                    f"{path}: clip skeleton {referenced_path} does not match "
+                    f"{skeleton_path}"
+                )
+            continue
+
+        additive_base_asset = None
+        base_path = additive_base_paths.get(path.casefold())
+        if base_path is not None:
+            base_key = base_path.casefold()
+            if base_key not in validated_base_assets:
+                candidate = repository.catalog.find_asset(
+                    base_path,
+                    preferred_archives,
+                )
+                if candidate is None:
+                    issues.append(
+                        f"{path}: additive base pose is not indexed: "
+                        f"{base_path}"
+                    )
+                    validated_base_assets[base_key] = None
+                else:
+                    try:
+                        base_skeleton_path = _skeleton_path_for_resource(
+                            repository,
+                            candidate,
+                        )
+                    except (BC2Error, OSError, ValueError) as exc:
+                        issues.append(f"{base_path}: {exc}")
+                        validated_base_assets[base_key] = None
+                    else:
+                        if (
+                            base_skeleton_path.casefold()
+                            != skeleton_path.casefold()
+                        ):
+                            issues.append(
+                                f"{base_path}: base-pose skeleton "
+                                f"{base_skeleton_path} does not match "
+                                f"{skeleton_path}"
+                            )
+                            validated_base_assets[base_key] = None
+                        else:
+                            validated_base_assets[base_key] = candidate
+            additive_base_asset = validated_base_assets[base_key]
+            if additive_base_asset is None:
+                continue
+        assets.append(
+            _RelatedAnimationAsset(
+                asset=asset,
+                additive_base_asset=additive_base_asset,
             )
+        )
     return tuple(assets), tuple(issues), indexed_count, total_count
+
+
+def _create_animation_action_for_resource(
+    context,
+    resource_asset,
+    animation: GrannyAnimation,
+    armature_obj,
+    skeleton: GrannySkeleton,
+    settings: BC2Settings,
+    additive_base: GrannyAnimation | None = None,
+    additive_base_asset=None,
+):
+    action = _create_animation_action(
+        context,
+        armature_obj,
+        skeleton,
+        animation,
+        settings,
+        additive_base,
+    )
+    action["bc2_asset_path"] = resource_asset["path"]
+    action["bc2_archive_path"] = resource_asset["archive_path"]
+    action["bc2_source_additive"] = bool(
+        animation.additive_bone_indices
+    )
+    if additive_base_asset is not None:
+        action["bc2_baked_base_asset_path"] = additive_base_asset["path"]
+        action["bc2_baked_base_archive_path"] = additive_base_asset[
+            "archive_path"
+        ]
+    return action
 
 
 def _create_animation_action_from_resource(
@@ -2480,16 +2834,14 @@ def _create_animation_action_from_resource(
         resource_asset["platform"],
         Path(resource_asset["path"]).stem,
     )
-    action = _create_animation_action(
+    return _create_animation_action_for_resource(
         context,
+        resource_asset,
+        animation,
         armature_obj,
         skeleton,
-        animation,
         settings,
     )
-    action["bc2_asset_path"] = resource_asset["path"]
-    action["bc2_archive_path"] = resource_asset["archive_path"]
-    return action
 
 
 def _import_related_animations(
@@ -2525,25 +2877,69 @@ def _import_related_animations(
             resource_asset,
             skeleton_asset,
             preferred_archives,
+            settings.import_core_gameplay_animations,
             known_source,
         )
     )
     actions = []
     issues = list(discovery_issues)
-    for asset in assets:
+    parsed_animations = {}
+    candidate_assets = {
+        str(asset["path"]).casefold(): asset
+        for related_asset in assets
+        for asset in (
+            related_asset.asset,
+            related_asset.additive_base_asset,
+        )
+        if asset is not None
+    }
+    for key, asset in candidate_assets.items():
         try:
             resource, raw = repository.read_asset(
                 int(asset["id"]),
                 max_size=256 << 20,
             )
+            parsed_animations[key] = (
+                resource,
+                parse_granny_animation(
+                    raw,
+                    resource["platform"],
+                    Path(resource["path"]).stem,
+                ),
+            )
+        except (BC2Error, OSError, ValueError) as exc:
+            issues.append(f"{asset['path']}: {exc}")
+
+    for related_asset in assets:
+        asset = related_asset.asset
+        parsed = parsed_animations.get(str(asset["path"]).casefold())
+        if parsed is None:
+            continue
+        resource, animation = parsed
+        additive_base = None
+        additive_base_asset = None
+        if (
+            animation.additive_bone_indices
+            and related_asset.additive_base_asset is not None
+        ):
+            base_key = str(
+                related_asset.additive_base_asset["path"]
+            ).casefold()
+            parsed_base = parsed_animations.get(base_key)
+            if parsed_base is None:
+                continue
+            additive_base_asset, additive_base = parsed_base
+        try:
             actions.append(
-                _create_animation_action_from_resource(
+                _create_animation_action_for_resource(
                     context,
                     resource,
-                    raw,
+                    animation,
                     armature_obj,
                     skeleton,
                     settings,
+                    additive_base,
+                    additive_base_asset,
                 )
             )
         except (BC2Error, OSError, ValueError) as exc:
@@ -6040,6 +6436,9 @@ def _draw_import_settings(layout, settings: BC2Settings):
     layout.prop(settings, "material_mode")
     layout.prop(settings, "composite_visibility")
     layout.prop(settings, "import_related_animations")
+    gameplay = layout.row()
+    gameplay.active = settings.import_related_animations
+    gameplay.prop(settings, "import_core_gameplay_animations")
     layout.prop(settings, "axis_conversion")
     layout.prop(settings, "flip_v")
     layout.prop(settings, "unit_scale")

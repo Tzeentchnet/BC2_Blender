@@ -12,7 +12,9 @@ from pathlib import Path
 
 from bc2_frostbite_importer.core import texture
 from bc2_frostbite_importer.core.assembly import (
+    animation_tree_base_set_references,
     animation_tree_clip_references,
+    animation_tree_replacement_references,
     character_animation_links,
     modular_assembly,
     vehicle_part_state,
@@ -1333,7 +1335,7 @@ class TerrainTests(unittest.TestCase):
 
 
 class DbxTests(unittest.TestCase):
-    def test_character_animation_links_exclude_shared_tree(self):
+    def test_character_animation_links_separate_shared_tree(self):
         mesh = element(
             "complex",
             element(
@@ -1410,6 +1412,10 @@ class DbxTests(unittest.TestCase):
                 "Characters/AnimTree/JapFacial/FACIAL-GUID",
             ),
         )
+        self.assertEqual(
+            links.shared_animation_tree_references,
+            ("Characters/AnimTree/Shared/SHARED-GUID",),
+        )
         self.assertIsNone(
             character_animation_links(
                 document,
@@ -1469,6 +1475,51 @@ class DbxTests(unittest.TestCase):
                 "Characters/Jap/FacePose/FACE-GUID",
             ),
         )
+        self.assertEqual(
+            animation_tree_replacement_references(document),
+            ("Animations/Faces/DeadPose/DEAD-GUID",),
+        )
+
+    def test_shared_animation_tree_uses_explicit_base_set(self):
+        shared = element(
+            "instance",
+            element(
+                "array",
+                element(
+                    "item",
+                    ref="Characters/AnimTree/SoldierAnimTree3pRif/RIF-GUID",
+                ),
+                element(
+                    "item",
+                    ref="Characters/AnimTree/SoldierAnimTree3pHg/HG-GUID",
+                ),
+                name="BaseSetAnimTrees",
+            ),
+            element(
+                "field",
+                name="DeathAnimTree",
+                ref="Characters/AnimTree/DeathAnimTree3p/DEATH-GUID",
+            ),
+            guid="SHARED",
+            type="GameSharedResources.SharedSoldierAnimationTreeData",
+        )
+        document = DbxDocument(
+            element(
+                "partition",
+                shared,
+                guid="PARTITION",
+                primaryInstance="SHARED",
+            )
+        )
+
+        self.assertEqual(
+            animation_tree_base_set_references(document),
+            (
+                "Characters/AnimTree/SoldierAnimTree3pRif/RIF-GUID",
+                "Characters/AnimTree/SoldierAnimTree3pHg/HG-GUID",
+            ),
+        )
+
 
     def test_character_modular_assembly_uses_meshes3p(self):
         body = element(

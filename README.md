@@ -115,27 +115,41 @@ visible without changing their decoded state metadata.
 `SkinnedMeshSet` imports and modular character `.dbx` imports. The importer
 searches the mesh's and referenced skeleton's exact parent folders. For a PC
 soldier mesh, it also reverse-matches bounded `Objects/Soldiers` descriptors
-through `Meshes3p`, then follows only the character-specific static, facial,
-kit-joint, and revive animation-tree links and their explicit clip lists. The
-broad shared locomotion tree and cutscene-only trees are deliberately excluded.
-Resource paths are deduplicated, and every tree and clip must reference the
-exact skeleton. This imports Raven's six verified clips and six bounded Actions
-for each validated Beach Scout/Japanese infantry mesh without loading the
-hundreds of clips that can share `ske01`. The four facial motion clips are
-additive Actions; they play over the rest pose directly and can be layered over
-another Action with Blender's NLA tools.
+through `Meshes3p`, then follows the character-specific static, facial,
+kit-joint, and revive animation-tree links and their explicit clip lists. For
+human soldiers, it also follows the explicit `Shared` link only as far as the
+rifle base-set tree and selects eight verified locomotion clips: `StandIdle`,
+`StandRelaxedIdle`, `CrouchIdle`, forward/backward walk and run, and
+`SneakForward`. Other weapon, AI-behavior, death, and cutscene branches remain
+excluded. Resource paths are deduplicated, and every tree and clip must
+reference the exact skeleton. This imports Raven's six verified clips and 14
+bounded Actions for each validated Beach Scout/Japanese infantry mesh without
+loading the hundreds of clips that can share `ske01`.
+
+The four facial motion resources are source-additive deltas, not complete
+rest-pose Actions. The character facial tree's replacement array identifies
+its authored `FacePose`; the importer bakes `FacePose @ delta` into each
+standalone 46-track Blender Action. Selecting a dead-pose or blink Action
+therefore retains the character-specific neutral face instead of distorting it.
+The `bc2_additive` metadata records the source encoding, while
+`bc2_additive_baked` and `bc2_baked_base_asset_path` record the standalone
+bake.
 
 Only indexed assets are searchable; Blender reports a warning when unindexed
 archives mean discovery may be incomplete. Direct soldier reverse lookup is
 limited to 256 descriptors and caches the selected compressed archive payload
 once before bounded random reads. **Index All (Slow)** provides full catalog
 coverage, while the session checkbox or its Add-on Preference default can
-disable automatic Action import. A combined 64-clip safety limit prevents
-unexpectedly broad discovery from locking Blender.
+disable automatic Action import. A second default-on checkbox controls the
+eight core gameplay Actions independently. A combined 64-clip safety limit
+prevents unexpectedly broad discovery from locking Blender.
 
 Direct `CompositeMeshSet` imports remain focused component imports. Importing
-a selected `GrannyAnimation` adds one Action to the matching armature; if that
-armature is absent, the referenced skeleton is created automatically.
+a selected absolute `GrannyAnimation` adds one Action to the matching
+armature; if that armature is absent, the referenced skeleton is created
+automatically. Direct import of a sparse source-additive clip fails explicitly
+when its character tree is unavailable because applying it over the generic
+rest pose would be incorrect.
 
 The provided Xbox example indexes 630 Frostbite archives and 251,251 active assets. The provided PC example exposes 625 extractable Frostbite archives through the installer database.
 
@@ -147,7 +161,7 @@ The provided Xbox example indexes 630 Frostbite archives and 251,251 active asse
 | Rigid and tree mesh sets | Resolves a matching LOD `MeshData` resource when available, preferring LOD0. |
 | `CompositeMeshSet` | Resolves LOD0 geometry and source materials, corrects shared/global index streams, separates verified source part IDs into named collections, applies decoded mesh-set bind transforms, and hides decoded damaged/destroyed/blurred parts plus geometry or collections with two `Wreck` occurrences in one name by default. A single `Wreck` occurrence alone remains visible. |
 | PC `SkinnedMeshSet` | Resolves LOD0 geometry, the DBX skeleton reference, the default surface set, and source DX11 texture bindings; preserves declaration-specific UV layers (two for verified stride-48 assets and four for stride-64 characters), creates named vertex groups and source materials, adds Armature modifiers, and imports bounded exact-folder plus character-tree Actions when enabled. Console mesh sets remain geometry-only. |
-| PC soldier entity `.dbx` | Resolves every `Meshes3p` body/head/headgear component at LOD0, applies per-component shader-set overrides, binds all modules to one verified skeleton, creates modular component collections, and follows character-specific static/facial/kit/revive animation links while excluding the broad shared tree. |
+| PC soldier entity `.dbx` | Resolves every `Meshes3p` body/head/headgear component at LOD0, applies per-component shader-set overrides, binds all modules to one verified skeleton, creates modular component collections, follows character-specific static/facial/kit/revive animation links, and optionally selects eight verified rifle locomotion clips through the explicit shared base-set link. |
 | PC vehicle entity `.dbx` | Resolves the linked composite LOD0 mesh, source-backed materials, ordered named part collections, mesh-set bind transforms, and DBX-backed default/damaged/alternate states without inventing runtime pivots, parenting, or an armature. Verified AH60 Main, glass, interior, cockpit-interior, and minigun shader relationships receive dedicated Blender graphs. |
 | PC `GrannyModel` | Creates a native Blender armature while preserving the complete source hierarchy, local transforms, source flags, and physics-joint metadata. |
 | PC `GrannyAnimation` | Creates a Blender 5.2 layered/slotted Action on the matching armature, sampled at the source time step with root motion, quaternion continuity, and representable bone scale. Degrees 0-3 and the documented human/Raven codecs are implemented. |
@@ -470,7 +484,9 @@ blender --background --factory-startup `
 It imports the 11-subset Scout on the 147-bone `ske01` rig. The mesh-folder
 `FacePose` and `Us_Scout_SkeletonPose` become 46- and 147-track Actions; the
 authored facial tree adds `DeltaBlink`, `DeltaEyeIdle`, and two dead-pose
-deltas with 4, 6, 21, and 14 tracks. All six survive save/reopen.
+deltas with 4, 6, 21, and 14 source tracks, baked over the 46-track
+`FacePose`. The explicit shared rifle tree adds eight 39-track core locomotion
+Actions. All 14 survive save/reopen.
 
 The Japanese infantry graph and additive conversion check is:
 
@@ -483,8 +499,11 @@ blender --background --factory-startup `
 
 It imports eight Japanese infantry mesh subsets on the 147-bone `ske01` rig,
 resolves the regular soldier entity's facial and kit-joint trees, verifies the
-same six Action classes with Japanese-specific pose assets, measures nonzero
-eyelid motion from `DeltaBlink`, and checks save/reopen persistence.
+same six character-specific Action classes plus eight core rifle locomotion
+Actions, and checks save/reopen persistence. It also compares
+`dead_pose2_Delta` against the Japanese `FacePose` baseline: maximum, p99, and
+mean mesh displacement must remain below 0.012, 0.005, and 0.0004 Blender
+units, with explicit eye/lid vertex coverage.
 
 The equivalent AH60 vehicle integration check is:
 

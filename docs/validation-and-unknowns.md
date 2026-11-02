@@ -159,17 +159,31 @@ texture-conversion, or unresolved-subset diagnostics.
   the skeleton. Exact-folder discovery imports `FacePose` with 46 tracks and
   `Us_Scout_SkeletonPose` with 147 tracks. The explicitly linked Scout facial
   tree adds 4-track `DeltaBlink`, 6-track `DeltaEyeIdle`, and 21/14-track
-  dead-pose deltas. A Blender 5.2.2 scene retained all six Actions and all 11
+  dead-pose sources, each baked over the Scout `FacePose` into a standalone
+  46-track Action. The explicit shared rifle tree adds eight 39-track core
+  locomotion Actions. A Blender 5.2.2 scene retained all 14 Actions and all 11
   skinned subsets after save/reopen.
 - PC Beach Japanese infantry animation: four regular soldier descriptors
   explicitly connect `Jap_Infantry_Mesh` to its 147-track static pose, a
   kit-joint tree, and `JapInfantryFacialAnimTree`. That tree lists the local
   46-track `FacePose` and the same four facial deltas used by Scout. The
   nonzero animation-wrapper tables contain 4, 6, 21, and 14 `ske01` bone
-  indices whose names exactly match their transform tracks. They are converted
-  as additive pose-basis Actions; `DeltaBlink` produced a maximum sampled
-  eyelid delta of about 0.1575. A Blender 5.2.2 scene retained all six Actions,
-  the 147-bone armature, and all eight mesh subsets after save/reopen.
+  indices whose names exactly match their transform tracks. Direct rest-pose
+  application produced visibly invalid eye/face deformation. Baked
+  `FacePose @ delta` conversion reduced final `dead_pose2_Delta`
+  FacePose-relative maximum/p99/mean vertex displacement to about
+  0.00905/0.00344/0.000160 Blender units; the maximum explicitly occurs among
+  eye/lid-weighted vertices and remains below the 0.012 regression bound.
+  `DeltaBlink` retains a maximum sampled pose-channel delta of about 0.1575.
+  The explicit shared rifle tree adds the same eight 39-track core locomotion
+  Actions used by Scout. A Blender 5.2.2 scene retained all 14 Actions, the
+  147-bone armature, and all eight mesh subsets after save/reopen.
+- PC shared human gameplay graph: both verified default/squad AI soldier roots
+  expand through 11 trees to about 644 unique clips, including 202 clips in
+  the rifle tree. Automatic import follows only the explicit shared
+  `BaseSetAnimTrees` link and selects eight named rifle locomotion clips. This
+  is an implemented bounded preview policy; it is not evidence that the other
+  runtime branches are understood or exporter-safe.
 - PC Japanese `combat_pose`: the 46-track, one-frame pose is referenced by the
   `SP_01` level/cutscene graphs, including Soldier Ambush and CS_02 trees, but
   not by the regular soldier entity's facial/kit graph. It is intentionally

@@ -41,33 +41,88 @@ EXPECTED_ACTIONS = {
         "Characters/Animations/3P/DeltaBlink.res",
         4,
         True,
+        46,
     ),
     "DeltaEyeIdle": (
         "Characters/Animations/3P/DeltaEyeIdle.res",
         6,
         True,
+        46,
     ),
     "FacePose": (
         "Characters/Beach/3P/Us_Scout/FacePose.res",
         46,
         False,
+        46,
     ),
     "Us_Scout_SkeletonPose": (
         "Characters/Beach/3P/Us_Scout/Us_Scout_SkeletonPose.res",
         147,
         False,
+        147,
+    ),
+    "CrouchIdle": (
+        "Characters/Animations/BSet_Rif/3P/CrouchIdle.res",
+        39,
+        False,
+        39,
+    ),
+    "RunBackward": (
+        "Characters/Animations/BSet_Rif/3P/RunBackward.res",
+        39,
+        False,
+        39,
+    ),
+    "RunForward": (
+        "Characters/Animations/BSet_Rif/3P/RunForward.res",
+        39,
+        False,
+        39,
+    ),
+    "SneakForward": (
+        "Characters/Animations/BSet_Rif/3P/SneakForward.res",
+        39,
+        False,
+        39,
+    ),
+    "StandIdle": (
+        "Characters/Animations/BSet_Rif/3P/StandIdle.res",
+        39,
+        False,
+        39,
+    ),
+    "StandRelaxedIdle": (
+        "Characters/Animations/BSet_Rif/3P/StandRelaxedIdle.res",
+        39,
+        False,
+        39,
+    ),
+    "WalkBackward": (
+        "Characters/Animations/BSet_Rif/3P/WalkBackward.res",
+        39,
+        False,
+        39,
+    ),
+    "WalkForward": (
+        "Characters/Animations/BSet_Rif/3P/WalkForward.res",
+        39,
+        False,
+        39,
     ),
     "dead_pose1_Delta": (
         "Animations/Faces/Generic/dead_pose1_Delta.res",
         21,
         True,
+        46,
     ),
     "dead_pose2_Delta": (
         "Animations/Faces/Generic/dead_pose2_Delta.res",
         14,
         True,
+        46,
     ),
 }
+FACE_POSE_PATH = EXPECTED_ACTIONS["FacePose"][0]
 
 
 def _arguments():
@@ -94,6 +149,7 @@ def _settings():
             "composite_visibility": "DEFAULT_STATE",
             "create_diagnostics": False,
             "import_related_animations": True,
+            "import_core_gameplay_animations": True,
         },
     )()
 
@@ -147,7 +203,12 @@ def main():
                 f"Scout actions are {sorted(actions)}, expected "
                 f"{sorted(EXPECTED_ACTIONS)}"
             )
-        for name, (path, track_count, additive) in EXPECTED_ACTIONS.items():
+        for name, (
+            path,
+            track_count,
+            additive,
+            baked_track_count,
+        ) in EXPECTED_ACTIONS.items():
             action = actions[name]
             if action["bc2_asset_path"] != path:
                 raise AssertionError(f"{name} source path is incorrect")
@@ -155,6 +216,21 @@ def main():
                 raise AssertionError(f"{name} track count is incorrect")
             if bool(action["bc2_additive"]) is not additive:
                 raise AssertionError(f"{name} additive metadata is incorrect")
+            if bool(action["bc2_source_additive"]) is not additive:
+                raise AssertionError(
+                    f"{name} source-additive metadata is incorrect"
+                )
+            if int(action["bc2_baked_track_count"]) != baked_track_count:
+                raise AssertionError(
+                    f"{name} baked track count is incorrect"
+                )
+            if additive:
+                if not bool(action["bc2_additive_baked"]):
+                    raise AssertionError(f"{name} was not baked")
+                if action["bc2_baked_base_asset_path"] != FACE_POSE_PATH:
+                    raise AssertionError(
+                        f"{name} used the wrong additive base pose"
+                    )
         action_counts = {
             name: int(action["bc2_track_count"])
             for name, action in actions.items()

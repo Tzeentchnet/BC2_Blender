@@ -33,6 +33,7 @@ class AssemblyPart:
 class CharacterAnimationLinks:
     animation_references: tuple[str, ...] = ()
     animation_tree_references: tuple[str, ...] = ()
+    shared_animation_tree_references: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -93,6 +94,7 @@ def _character_animation_links(
 ) -> CharacterAnimationLinks:
     animation_references = []
     animation_tree_references = []
+    shared_animation_tree_references = []
     tree_reference = _reference(instance, "AnimTree3p")
     tree = document.instance(tree_reference)
     if tree is None:
@@ -118,10 +120,17 @@ def _character_animation_links(
                 if reference and "/" in reference:
                     animation_tree_references.append(reference)
 
+    shared_reference = _reference(tree, "Shared")
+    if shared_reference and "/" in shared_reference:
+        shared_animation_tree_references.append(shared_reference)
+
     return CharacterAnimationLinks(
         animation_references=_unique_references(animation_references),
         animation_tree_references=_unique_references(
             animation_tree_references
+        ),
+        shared_animation_tree_references=_unique_references(
+            shared_animation_tree_references
         ),
     )
 
@@ -148,21 +157,16 @@ def character_animation_links(
     return _character_animation_links(document, instance)
 
 
-def animation_tree_clip_references(
+def _animation_tree_array_references(
     document: DbxDocument,
+    names: set[str],
 ) -> tuple[str, ...]:
-    list_names = {
-        "animationlist",
-        "aimanimationlist",
-        "replacmentanimations",
-        "replacementanimations",
-    }
     references = []
 
     def visit(element: DbxElement, in_animation_list: bool = False):
         is_animation_list = (
             element.tag == "array"
-            and (element.attribute("name") or "").casefold() in list_names
+            and (element.attribute("name") or "").casefold() in names
         )
         active = in_animation_list or is_animation_list
         if active:
@@ -174,6 +178,41 @@ def animation_tree_clip_references(
 
     visit(document.root)
     return _unique_references(references)
+
+
+def animation_tree_clip_references(
+    document: DbxDocument,
+) -> tuple[str, ...]:
+    return _animation_tree_array_references(
+        document,
+        {
+            "animationlist",
+            "aimanimationlist",
+            "replacmentanimations",
+            "replacementanimations",
+        },
+    )
+
+
+def animation_tree_replacement_references(
+    document: DbxDocument,
+) -> tuple[str, ...]:
+    return _animation_tree_array_references(
+        document,
+        {
+            "replacmentanimations",
+            "replacementanimations",
+        },
+    )
+
+
+def animation_tree_base_set_references(
+    document: DbxDocument,
+) -> tuple[str, ...]:
+    return _animation_tree_array_references(
+        document,
+        {"basesetanimtrees"},
+    )
 
 
 def vehicle_part_state(name: str) -> str:

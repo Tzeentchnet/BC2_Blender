@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT))
 
 from bc2_frostbite_importer import blender_addon
 from bc2_frostbite_importer.core.assembly import AssemblyPart
+from bc2_frostbite_importer.core.errors import BC2Error
 from bc2_frostbite_importer.core.level import (
     FrostbiteTransform,
     LevelPlacement,
@@ -71,14 +72,26 @@ def _test_settings_registration(context):
                 "default_import_related_animations"
             ]
         )
+        preference_gameplay_property = (
+            blender_addon.BC2AddonPreferences.bl_rna.properties[
+                "default_import_core_gameplay_animations"
+            ]
+        )
         session_animation_property = (
             blender_addon.BC2Settings.bl_rna.properties[
                 "import_related_animations"
             ]
         )
+        session_gameplay_property = (
+            blender_addon.BC2Settings.bl_rna.properties[
+                "import_core_gameplay_animations"
+            ]
+        )
         if (
             preference_animation_property.default is not True
             or session_animation_property.default is not True
+            or preference_gameplay_property.default is not True
+            or session_gameplay_property.default is not True
         ):
             raise AssertionError(
                 "Related animation import must default to enabled"
@@ -123,6 +136,7 @@ def _test_settings_registration(context):
             default_material_mode="MATERIALS_ONLY",
             default_composite_visibility="SHOW_ALL",
             default_import_related_animations=False,
+            default_import_core_gameplay_animations=False,
         )
         blender_addon._apply_preference_defaults(
             settings,
@@ -138,6 +152,7 @@ def _test_settings_registration(context):
             or settings.material_mode != "MATERIALS_ONLY"
             or settings.composite_visibility != "SHOW_ALL"
             or settings.import_related_animations is not False
+            or settings.import_core_gameplay_animations is not False
         ):
             raise AssertionError("Preference defaults were not copied")
         settings.unit_scale = 7.0
@@ -1727,6 +1742,7 @@ def _test_armature_and_action(context):
         unit_scale=2.0,
         flip_v=True,
         import_related_animations=True,
+        import_core_gameplay_animations=True,
     )
     asset = {
         "path": "Characters/Test/Skeleton.res",
@@ -1848,18 +1864,56 @@ def _test_armature_and_action(context):
         ),
         (1,),
     )
+    additive_base = GrannyAnimation(
+        "SyntheticFacePose",
+        0.5,
+        0.5,
+        1.0,
+        (
+            GrannyTransformTrack(
+                "child",
+                0,
+                identity_rotation,
+                GrannyCurve(
+                    "DaConstant32f",
+                    0,
+                    (0.0,),
+                    ((1.0, 0.0, 0.0),),
+                ),
+                identity_scale,
+            ),
+        ),
+    )
+    try:
+        blender_addon._create_animation_action(
+            context,
+            armature,
+            skeleton,
+            additive_animation,
+            settings,
+        )
+    except BC2Error as exc:
+        if "requires an authored base pose" not in str(exc):
+            raise
+    else:
+        raise AssertionError("Additive Action accepted no authored base pose")
     additive_action = blender_addon._create_animation_action(
         context,
         armature,
         skeleton,
         additive_animation,
         settings,
+        additive_base,
     )
     if (
         additive_action["bc2_additive"] is not True
+        or additive_action["bc2_additive_baked"] is not True
         or additive_action["bc2_additive_bone_count"] != 1
+        or additive_action["bc2_baked_track_count"] != 1
+        or additive_action["bc2_additive_base_name"]
+        != "SyntheticFacePose"
     ):
-        raise AssertionError("Additive Action metadata is incorrect")
+        raise AssertionError("Baked additive Action metadata is incorrect")
     context.scene.frame_set(1)
     _assert_vector(armature.pose.bones["child"].location, (0.0, 0.0, 0.0))
     context.scene.frame_set(3)
@@ -1974,6 +2028,9 @@ def _test_armature_and_action(context):
     original_tree_references = (
         blender_addon.animation_tree_clip_references
     )
+    original_replacement_references = (
+        blender_addon.animation_tree_replacement_references
+    )
     try:
         blender_addon._skeleton_path_for_resource = (
             lambda _repository, resource: (
@@ -2006,6 +2063,9 @@ def _test_armature_and_action(context):
                 "Characters/Animations/GraphDelta/CLIP-GUID",
             )
         )
+        blender_addon.animation_tree_replacement_references = (
+            lambda _document: ()
+        )
         related = blender_addon._import_related_animations(
             context,
             RelatedRepository(),
@@ -2028,6 +2088,9 @@ def _test_armature_and_action(context):
         blender_addon.character_animation_links = original_character_links
         blender_addon.animation_tree_clip_references = (
             original_tree_references
+        )
+        blender_addon.animation_tree_replacement_references = (
+            original_replacement_references
         )
     if len(related.actions) != 3:
         raise AssertionError("Related animations were not deduplicated")

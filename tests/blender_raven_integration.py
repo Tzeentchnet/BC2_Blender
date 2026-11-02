@@ -72,6 +72,7 @@ def _settings():
             "composite_visibility": "DEFAULT_STATE",
             "create_diagnostics": False,
             "import_related_animations": True,
+            "import_core_gameplay_animations": True,
         },
     )()
 

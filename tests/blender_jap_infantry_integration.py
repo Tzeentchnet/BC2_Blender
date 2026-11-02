@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import math
 import os
 import sys
 import traceback
@@ -41,34 +42,89 @@ EXPECTED_ACTIONS = {
         "Characters/Animations/3P/DeltaBlink.res",
         4,
         True,
+        46,
     ),
     "DeltaEyeIdle": (
         "Characters/Animations/3P/DeltaEyeIdle.res",
         6,
         True,
+        46,
     ),
     "FacePose": (
         "Characters/Beach/3P/Jap_Infantry/FacePose.res",
         46,
         False,
+        46,
     ),
     "Jap_Infantry_SkeletonPose": (
         "Characters/Beach/3P/Jap_Infantry/"
         "Jap_Infantry_SkeletonPose.res",
         147,
         False,
+        147,
+    ),
+    "CrouchIdle": (
+        "Characters/Animations/BSet_Rif/3P/CrouchIdle.res",
+        39,
+        False,
+        39,
+    ),
+    "RunBackward": (
+        "Characters/Animations/BSet_Rif/3P/RunBackward.res",
+        39,
+        False,
+        39,
+    ),
+    "RunForward": (
+        "Characters/Animations/BSet_Rif/3P/RunForward.res",
+        39,
+        False,
+        39,
+    ),
+    "SneakForward": (
+        "Characters/Animations/BSet_Rif/3P/SneakForward.res",
+        39,
+        False,
+        39,
+    ),
+    "StandIdle": (
+        "Characters/Animations/BSet_Rif/3P/StandIdle.res",
+        39,
+        False,
+        39,
+    ),
+    "StandRelaxedIdle": (
+        "Characters/Animations/BSet_Rif/3P/StandRelaxedIdle.res",
+        39,
+        False,
+        39,
+    ),
+    "WalkBackward": (
+        "Characters/Animations/BSet_Rif/3P/WalkBackward.res",
+        39,
+        False,
+        39,
+    ),
+    "WalkForward": (
+        "Characters/Animations/BSet_Rif/3P/WalkForward.res",
+        39,
+        False,
+        39,
     ),
     "dead_pose1_Delta": (
         "Animations/Faces/Generic/dead_pose1_Delta.res",
         21,
         True,
+        46,
     ),
     "dead_pose2_Delta": (
         "Animations/Faces/Generic/dead_pose2_Delta.res",
         14,
         True,
+        46,
     ),
 }
+FACE_POSE_PATH = EXPECTED_ACTIONS["FacePose"][0]
 
 
 def _arguments():
@@ -95,8 +151,64 @@ def _settings():
             "composite_visibility": "DEFAULT_STATE",
             "create_diagnostics": False,
             "import_related_animations": True,
+            "import_core_gameplay_animations": True,
         },
     )()
+
+
+def _evaluated_positions(objects):
+    dependency_graph = bpy.context.evaluated_depsgraph_get()
+    positions = {}
+    for obj in objects:
+        evaluated = obj.evaluated_get(dependency_graph)
+        mesh = evaluated.to_mesh()
+        try:
+            positions[obj.name] = tuple(
+                tuple(vertex.co) for vertex in mesh.vertices
+            )
+        finally:
+            evaluated.to_mesh_clear()
+    return positions
+
+
+def _pose_displacements(reference, posed):
+    return tuple(
+        math.dist(reference[name][index], posed[name][index])
+        for name in reference
+        for index in range(len(reference[name]))
+    )
+
+
+def _eyelid_vertex_indices(objects):
+    eyelid_bones = {
+        "LeftEye",
+        "LeftLowerLid",
+        "LeftUpperLid",
+        "RightEye",
+        "RightLowerLid",
+        "RightUpperLid",
+    }
+    result = {}
+    for obj in objects:
+        group_indices = {
+            group.index
+            for group in obj.vertex_groups
+            if group.name in eyelid_bones
+        }
+        if not group_indices:
+            continue
+        indices = tuple(
+            vertex.index
+            for vertex in obj.data.vertices
+            if any(
+                assignment.group in group_indices
+                and assignment.weight > 0.0
+                for assignment in vertex.groups
+            )
+        )
+        if indices:
+            result[obj.name] = indices
+    return result
 
 
 def main():
@@ -157,7 +269,12 @@ def main():
                 f"Japanese infantry actions are {sorted(actions)}, expected "
                 f"{sorted(EXPECTED_ACTIONS)}"
             )
-        for name, (path, track_count, additive) in EXPECTED_ACTIONS.items():
+        for name, (
+            path,
+            track_count,
+            additive,
+            baked_track_count,
+        ) in EXPECTED_ACTIONS.items():
             action = actions[name]
             if action["bc2_asset_path"] != path:
                 raise AssertionError(f"{name} source path is incorrect")
@@ -165,6 +282,14 @@ def main():
                 raise AssertionError(f"{name} track count is incorrect")
             if bool(action["bc2_additive"]) is not additive:
                 raise AssertionError(f"{name} additive metadata is incorrect")
+            if bool(action["bc2_source_additive"]) is not additive:
+                raise AssertionError(
+                    f"{name} source-additive metadata is incorrect"
+                )
+            if int(action["bc2_baked_track_count"]) != baked_track_count:
+                raise AssertionError(
+                    f"{name} baked track count is incorrect"
+                )
             expected_additive_count = track_count if additive else 0
             if (
                 int(action["bc2_additive_bone_count"])
@@ -173,6 +298,13 @@ def main():
                 raise AssertionError(
                     f"{name} additive bone count is incorrect"
                 )
+            if additive:
+                if not bool(action["bc2_additive_baked"]):
+                    raise AssertionError(f"{name} was not baked")
+                if action["bc2_baked_base_asset_path"] != FACE_POSE_PATH:
+                    raise AssertionError(
+                        f"{name} used the wrong additive base pose"
+                    )
 
         armature.animation_data.action = actions["DeltaBlink"]
         blink = actions["DeltaBlink"]
@@ -207,6 +339,69 @@ def main():
         if maximum_delta <= 1e-5:
             raise AssertionError(
                 "DeltaBlink did not produce an additive eyelid pose"
+            )
+
+        armature.animation_data.action = actions["FacePose"]
+        bpy.context.scene.frame_set(1)
+        bpy.context.view_layer.update()
+        face_pose_positions = _evaluated_positions(objects)
+        eyelid_indices = _eyelid_vertex_indices(objects)
+        if not eyelid_indices:
+            raise AssertionError(
+                "Japanese infantry exposes no eye/lid weighted vertices"
+            )
+
+        dead_pose = actions["dead_pose2_Delta"]
+        armature.animation_data.action = dead_pose
+        dead_pose_frame = (
+            round(
+                float(dead_pose["bc2_duration_seconds"])
+                / float(dead_pose["bc2_time_step_seconds"])
+            )
+            + 1
+        )
+        bpy.context.scene.frame_set(dead_pose_frame)
+        bpy.context.view_layer.update()
+        dead_pose_positions = _evaluated_positions(objects)
+        displacements = _pose_displacements(
+            face_pose_positions,
+            dead_pose_positions,
+        )
+        sorted_displacements = sorted(displacements)
+        maximum_dead_pose_displacement = sorted_displacements[-1]
+        p99_dead_pose_displacement = sorted_displacements[
+            min(
+                len(sorted_displacements) - 1,
+                math.ceil(len(sorted_displacements) * 0.99) - 1,
+            )
+        ]
+        mean_dead_pose_displacement = sum(displacements) / len(
+            displacements
+        )
+        eyelid_displacements = tuple(
+            math.dist(
+                face_pose_positions[name][index],
+                dead_pose_positions[name][index],
+            )
+            for name, indices in eyelid_indices.items()
+            for index in indices
+        )
+        maximum_eyelid_displacement = max(eyelid_displacements)
+        if (
+            maximum_dead_pose_displacement >= 0.012
+            or p99_dead_pose_displacement >= 0.005
+            or mean_dead_pose_displacement >= 0.0004
+        ):
+            raise AssertionError(
+                "dead_pose2_Delta is not composed over FacePose: "
+                f"max={maximum_dead_pose_displacement}, "
+                f"p99={p99_dead_pose_displacement}, "
+                f"mean={mean_dead_pose_displacement}"
+            )
+        if not 1e-5 < maximum_eyelid_displacement < 0.012:
+            raise AssertionError(
+                "dead_pose2_Delta eye/lid deformation is implausible: "
+                f"{maximum_eyelid_displacement}"
             )
 
         action_counts = {
@@ -244,11 +439,18 @@ def main():
             raise AssertionError(
                 "Saved scene lost Japanese infantry Actions"
             )
-        for name, (_, track_count, additive) in EXPECTED_ACTIONS.items():
+        for name, (
+            _,
+            track_count,
+            additive,
+            baked_track_count,
+        ) in EXPECTED_ACTIONS.items():
             action = reopened_actions[name]
             if (
                 int(action["bc2_track_count"]) != track_count
                 or bool(action["bc2_additive"]) is not additive
+                or int(action["bc2_baked_track_count"])
+                != baked_track_count
             ):
                 raise AssertionError(
                     f"Saved {name} metadata is incorrect"
@@ -259,6 +461,14 @@ def main():
             "mesh_objects": mesh_object_count,
             "actions": dict(sorted(action_counts.items())),
             "maximum_blink_delta": maximum_delta,
+            "dead_pose2_maximum_displacement": (
+                maximum_dead_pose_displacement
+            ),
+            "dead_pose2_p99_displacement": p99_dead_pose_displacement,
+            "dead_pose2_mean_displacement": mean_dead_pose_displacement,
+            "dead_pose2_maximum_eyelid_displacement": (
+                maximum_eyelid_displacement
+            ),
             "catalog_complete": related.catalog_complete,
             "issues": list(related.issues),
             "output": str(output),

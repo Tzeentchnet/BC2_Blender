@@ -13,7 +13,8 @@ little-endian Granny resources validated here:
 - the 17-bone Raven skeleton, stride-48 skinned mesh, and six clips in
   `Animations/Animals/Raven`;
 - the Beach US Scout and Japanese infantry pose assets, their explicit facial
-  and kit-joint animation trees, and four shared facial delta clips.
+  and kit-joint animation trees, four shared facial delta clips, and eight
+  rifle locomotion clips selected through their explicit shared tree.
 
 The Frostbite wrappers and Granny v7 structures below are **implemented** with
 bounded reads and synthetic fixtures. Field meanings are **verified** where
@@ -71,7 +72,10 @@ PC retail facial clips use it as a sparse `ske01` bone-index table:
 have 21 and 14. Each table maps to exactly the clip's transform-track name set.
 Their curves are identity/zero at time zero and encode pose-basis deltas. The
 parser bounds the count and indices, rejects duplicates/nonzero reserved
-markers, and retains the indices on the parsed animation.
+markers, and retains the indices on the parsed animation. The index table does
+not identify the complete pose used at runtime; applying these sparse
+transforms directly over `ske01` rest was visually disproved by Japanese
+infantry eye and face deformation.
 
 The PC Granny file starts with this 32-byte magic:
 
@@ -311,12 +315,23 @@ Root motion is retained.
 
 For an animation with a nonempty wrapper bone-index table, the importer first
 requires the indexed skeleton-bone names to equal the transform-track names.
-It then treats each decoded transform as an additive pose-basis delta instead
-of subtracting the rest-local matrix a second time. Actions retain
-`bc2_additive` and `bc2_additive_bone_count` metadata. They produce the authored
-facial motion when played directly over the rest pose. Layering one over a
-separate locomotion Action remains a Blender NLA composition step; the add-on
-does not invent an NLA stack.
+The verified Scout and Japanese facial trees each place their character-local,
+static `FacePose` in the misspelled `ReplacmentAnimations` array. The importer
+preserves that reference separately and creates a standalone Action using:
+
+```text
+absolute_source_local = FacePose_source_local @ delta_source_local
+blender_basis = rest_blender_local^-1 @ convert(absolute_source_local)
+```
+
+Base tracks without a sparse delta are also keyed, so each resulting facial
+Action has 46 baked tracks even though the source delta has only 4, 6, 21, or
+14. `bc2_track_count` and `bc2_additive_bone_count` retain the source counts;
+`bc2_baked_track_count`, `bc2_additive_baked`, and
+`bc2_baked_base_asset_path` identify the standalone bake. `bc2_additive` and
+`bc2_source_additive` describe the source wrapper, not an Action intended for
+additive NLA blending. Direct import fails explicitly when a sparse additive
+clip has no validated authored base pose.
 
 Rigged PC mesh import can also create related Actions by default. Discovery is
 an **implemented bounded policy**, not a general animation-set specification:
@@ -328,30 +343,43 @@ an **implemented bounded policy**, not a general animation-set specification:
    descriptors in the preferred archives and require an explicit matching
    `Meshes3p` reference;
 4. follow the matched third-person `StaticPose`, `FacialAnimations`,
-   `KitJointsAnimTree`, and `ReviveAnimTree` links, but not `Shared`;
+   `KitJointsAnimTree`, and `ReviveAnimTree` links;
 5. read only explicit `AnimationList`, `AimAnimationList`, and replacement
    arrays from those character-specific trees;
-6. require every tree and candidate clip to reference the exact skeleton;
-7. deduplicate resource paths using archive preference ordering and stop when
+6. when core gameplay import is enabled, follow `Shared` to its explicit
+   `BaseSetAnimTrees`, select only `SoldierAnimTree3pRif`, and retain the exact
+   `StandIdle`, `StandRelaxedIdle`, `CrouchIdle`, `WalkForward`,
+   `WalkBackward`, `RunForward`, `RunBackward`, and `SneakForward` entries;
+7. require every tree, base pose, and candidate clip to reference the exact
+   skeleton;
+8. deduplicate resource paths using archive preference ordering and stop when
    the combined folder/tree result exceeds 64 unique paths.
+
+The complete verified `DefaultAISoldierAnimTree3p`/`SquadAISoldierAnimTree3p`
+graph expands through 11 trees to about 644 unique clips. The rifle tree alone
+lists 202. Importing that graph wholesale is deliberately unsupported as an
+automatic policy because it would be slow and would overwhelm Blender's Action
+list. The eight-clip subset is an **implemented preview heuristic**, not a
+claim that these clips form the complete runtime state machine.
 
 The add-on warns when any candidate fails or when archives remain unindexed,
 because a lightweight catalog cannot prove that no additional related clips
-exist. The default can be disabled in Add-on Preferences or the session's
-Import Settings. For direct soldier reverse lookup, a compressed preferred
-archive with multiple candidate descriptors is materialized once in the
-fingerprint-scoped disposable cache rather than reinflated for every DBX.
+exist. Related animation import and the core-gameplay subset have separate
+default-on controls in Add-on Preferences and the session's Import Settings.
+For direct soldier reverse lookup, a compressed preferred archive with
+multiple candidate descriptors is materialized once in the fingerprint-scoped
+disposable cache rather than reinflated for every DBX.
 
 Searching the mesh folder remains required for characters such as
 `US_Scout_Mesh`: its verified `FacePose` and `Us_Scout_SkeletonPose` clips sit
 beside the mesh, while its shared `ske01` skeleton sits under
 `Characters/Skeletons`. Its soldier DBX explicitly links
 `USScoutFacialAnimTree`; Japanese infantry similarly links
-`JapInfantryFacialAnimTree` plus its kit-joint tree. Each imports six Actions:
-the two mesh-specific poses and four shared facial deltas. The Japanese
-`combat_pose` is **verified** as a static 46-track pose referenced by level and
-cutscene trees, not by the regular soldier's bounded graph, so it is not
-automatically included.
+`JapInfantryFacialAnimTree` plus its kit-joint tree. Each imports 14 Actions:
+the two mesh-specific poses, four FacePose-baked facial Actions, and eight
+core rifle locomotion Actions. The Japanese `combat_pose` is **verified** as a
+static 46-track pose referenced by level and cutscene trees, not by the regular
+soldier's bounded graph, so it is not automatically included.
 
 ## MaxScript skeleton cross-check
 
@@ -394,9 +422,9 @@ validation. See the [external MaxScript audit](../maxscript-reference-audit.md).
 | Raven duration range / sample rate | 4.7-6.67 s / 60 Hz |
 | Raven related Actions after save/reopen | 6 |
 | Scout skeleton / mesh subsets | 147 bones / 11 |
-| Scout bounded related Actions | 6: 46/147-track local poses plus 4/6/21/14-track additive facial clips |
+| Scout bounded related Actions | 14: 46/147-track local poses, four 46-track FacePose-baked facial Actions, and eight 39-track rifle locomotion Actions |
 | Japanese infantry skeleton / mesh subsets | 147 bones / 8 |
-| Japanese infantry bounded related Actions | 6; `DeltaBlink` peak validation delta about 0.1575 |
+| Japanese infantry bounded related Actions | 14; `dead_pose2_Delta` maximum/p99/mean FacePose-relative vertex displacement about 0.00905/0.00344/0.000160 |
 
 `US_01_SkeletonPose` has 64 transform tracks. Most evaluated controls agree
 with the skeleton local transforms to floating-point or quantization
