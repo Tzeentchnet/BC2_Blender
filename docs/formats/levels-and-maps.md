@@ -93,10 +93,25 @@ summed across duplicate metadata names. A single occurrence does not trigger
 object- or collection-level hiding by name. A collection can still be hidden
 by an independently decoded damage or alternate state.
 
-Selecting a high-level entity `.dbx` invokes these assembly paths. Selecting a
-component mesh set remains a focused component import. Other DBX documents
-still open as XML Text datablocks. This avoids ambiguous reverse-reference
-selection when one body or vehicle component is shared by multiple entities.
+Selecting a high-level entity `.dbx` invokes these assembly paths. By default,
+selecting a vehicle `CompositeMeshSet` whose virtual path ends in `_Mesh.res`
+also tries one deterministic candidate: the same-folder path with `_Mesh.res`
+replaced by `.dbx`. The importer promotes the selection to a complete vehicle
+assembly only when that DBX resolves as `VehicleEntityData` and its primary
+vehicle component references the exact selected mesh path. Missing,
+nonvehicle, or nonmatching candidates leave the selection as a focused mesh
+import. Malformed matching DBX data fails explicitly rather than silently
+falling back.
+
+This implemented rule is naming- and structure-based, not an arbitrary
+reverse-reference search. It is verified on PC retail `T90_Mesh.res`, whose
+promotion imports both `TrackComponentData` instances. Selecting
+`T90Tracks_Mesh.res` remains focused because `T90Tracks.dbx` is absent.
+**Import linked vehicle assembly** defaults on in both session settings and
+Add-on Preferences; disabling it restores focused direct
+`CompositeMeshSet` behavior. Other DBX documents still open as XML Text
+datablocks. Character mesh sets remain focused because a body mesh can
+participate in multiple normal or upgraded soldier entities.
 
 ## Research: PC building destruction assemblies
 

@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "bc2_frostbite_importer"
-version = "0.7.2"
+version = "0.7.3"
 name = "Bad Company 2 Frostbite Importer"
 tagline = "Import Frostbite 1 assets, assemblies, and maps from BC2 discs"
 maintainer = "BC2 Blender Contributors"

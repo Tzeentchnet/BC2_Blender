@@ -14,7 +14,7 @@ the browser is not necessarily decoded.
 | `MeshData` | Mesh | Native geometry, UV preview, and available weight groups |
 | `RigidMeshSet` | Mesh | Resolves a naming-matched LOD MeshData, preferring LOD0 |
 | `SkinnedMeshSet` | Mesh | PC: resolves MeshData, four preserved character shader-coordinate channels with nondegenerate material routing, the DBX skeleton/default surface references, source DX11 materials, and a bound armature; console: geometry-only |
-| `CompositeMeshSet` | Mesh | Resolves LOD0 MeshData and materials; rebases verified shared index streams and separates type-2 geometry into ordered source-named part collections |
+| `CompositeMeshSet` | Mesh | Resolves LOD0 MeshData and materials; rebases verified shared index streams and separates type-2 geometry into ordered source-named part collections. A vehicle `_Mesh.res` additionally imports its complete same-name entity assembly by default only after exact primary-mesh validation |
 | `TreeMeshSet` | Mesh | Resolves MeshData; no tree-specific semantics |
 | `WaterMesh` | Mesh | Native positions and triangle geometry |
 | `ITexture` | Texture | PC resource-to-DDS conversion |
@@ -41,13 +41,16 @@ type-4 tree semantics or evidence for other catalog types. See the
 [external MaxScript audit](../maxscript-reference-audit.md).
 
 High-level DBX assembly dispatch is intentionally deterministic. Selecting the
-soldier or vehicle entity imports its full linked assembly; selecting a
-`SkinnedMeshSet` or `CompositeMeshSet` imports only that component. The
-importer does not reverse-search component references because one body mesh
-can participate in both normal and upgraded soldier entities. The same rule
-applies to vehicle tracks: selecting a track `SkinnedMeshSet` imports one
-focused component, while the high-level vehicle graph supplies the repeated
-instances and placement.
+soldier or vehicle entity imports its full linked assembly. A direct
+`SkinnedMeshSet` remains focused. A direct vehicle `CompositeMeshSet` ending
+in `_Mesh.res` checks only the same-folder, same-name `.dbx`; it imports the
+complete assembly by default only if that document resolves as a vehicle and
+its primary component references the selected mesh exactly. The user can
+disable **Import linked vehicle assembly** to keep every direct composite
+selection focused. The importer does not perform an arbitrary reverse search
+because one body mesh can participate in multiple entities. Selecting a track
+`SkinnedMeshSet` also remains focused, while the validated main vehicle graph
+supplies repeated track instances and placement.
 
 The generic DBX reader and the semantic importers have different support
 boundaries. See [Terrain and DBX](terrain-and-dbx.md) for the binary grammar,

@@ -17,6 +17,7 @@ from bc2_frostbite_importer.core.assembly import (
     animation_tree_replacement_references,
     character_animation_links,
     modular_assembly,
+    vehicle_entity_path_for_mesh_set,
     vehicle_part_state,
 )
 from bc2_frostbite_importer.core.catalog import AssetCatalog
@@ -1984,6 +1985,32 @@ class DbxTests(unittest.TestCase):
         self.assertEqual(
             assembly.components[0].mesh_set_path,
             "Objects/Vehicles/Air/AH60/AH60_Mesh.res",
+        )
+
+    def test_vehicle_entity_path_uses_same_name_mesh_convention(self):
+        self.assertEqual(
+            vehicle_entity_path_for_mesh_set(
+                "Objects/Vehicles/Land/T90/T90_Mesh.res"
+            ),
+            "Objects/Vehicles/Land/T90/T90.dbx",
+        )
+        self.assertEqual(
+            vehicle_entity_path_for_mesh_set(
+                "objects/vehicles/air/zero_fighter/"
+                "zero_fighter_mesh.RES"
+            ),
+            "objects/vehicles/air/zero_fighter/zero_fighter.dbx",
+        )
+        self.assertIsNone(
+            vehicle_entity_path_for_mesh_set(
+                "Characters/US/US_Scout_Mesh.res"
+            )
+        )
+        self.assertIsNone(
+            vehicle_entity_path_for_mesh_set(
+                "Objects/Vehicles/Land/T90/"
+                "T90_Mesh_lod0_data.res"
+            )
         )
 
     def test_vehicle_modular_assembly_preserves_track_instances(self):

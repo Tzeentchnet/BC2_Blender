@@ -236,7 +236,14 @@ texture-conversion, or unresolved-subset diagnostics.
   fixed vehicle offset. The BMD3 Blender regression imports one composite body
   plus two track instances. Each track retains 1,138 vertices, 1,096
   triangles, a separate source-backed eight-bone armature, distinct component
-  GUID, exact transform metadata, and placement after save/reopen.
+  GUID, exact transform metadata, and placement after save/reopen. The same
+  regression starts from the directly selected PC retail `T90_Mesh.res`,
+  validates its deterministic `T90.dbx` primary-mesh link, and imports both
+  1,282-vertex/990-triangle track instances. Their Blender translations are
+  `(-1.629941, 0.025497, 1.023512)` and
+  `(1.612939, 0.025497, 1.023512)` after axis conversion and remain exact
+  after save/reopen. `T90Tracks_Mesh.res` is separately verified not to
+  promote to the main assembly.
 - PC MI28 assembly: 24 source parts, 44 surface fragments, and 21,032 imported
   triangles. All ten LOD0 subsets retain the byte-32 part-selector declaration
   and coordinate offsets 24/28/36/40. Main and MainMetal use their verified

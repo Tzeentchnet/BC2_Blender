@@ -125,9 +125,17 @@ visible without changing their decoded state metadata. On verified PC tracked
 vehicles, the same high-level import also follows each nested
 `TrackComponentData`: the shared skinned track mesh is instantiated once per
 source component, bound to that component's referenced track skeleton, and
-placed with its exact DBX transform. Importing the track mesh set directly
-remains a focused single-component import and therefore does not reconstruct
-the left/right vehicle instances.
+placed with its exact DBX transform. A direct vehicle `CompositeMeshSet`
+selection ending in `_Mesh.res` uses the same complete assembly path by
+default only when a same-folder, same-name `.dbx` resolves as a vehicle and
+its primary component references that exact selected mesh. This deterministic
+rule makes the normal `T90_Mesh.res` browser workflow include both source
+tracks without a broad reverse-reference search. **Import linked vehicle
+assembly** can be disabled in the session or Add-on Preferences to retain the
+previous focused mesh-set behavior. Component resources such as
+`T90Tracks_Mesh.res` remain focused because they have no validated matching
+vehicle entity.
+
 **Import related animations** defaults to enabled for direct PC
 `SkinnedMeshSet` imports and modular character `.dbx` imports. The importer
 searches the mesh's and referenced skeleton's exact parent folders. For a PC
@@ -170,12 +178,13 @@ disable automatic Action import. A second default-on checkbox controls the
 eight core gameplay Actions independently. A combined 64-clip safety limit
 prevents unexpectedly broad discovery from locking Blender.
 
-Direct `CompositeMeshSet` imports remain focused component imports. Importing
-a selected absolute `GrannyAnimation` adds one Action to the matching
-armature; if that armature is absent, the referenced skeleton is created
-automatically. Direct import of a sparse source-additive clip fails explicitly
-when its character tree is unavailable because applying it over the generic
-rest pose would be incorrect.
+Direct `CompositeMeshSet` imports remain focused when linked vehicle assembly
+import is disabled or the exact same-name validation does not succeed.
+Importing a selected absolute `GrannyAnimation` adds one Action to the
+matching armature; if that armature is absent, the referenced skeleton is
+created automatically. Direct import of a sparse source-additive clip fails
+explicitly when its character tree is unavailable because applying it over
+the generic rest pose would be incorrect.
 
 The provided Xbox example indexes 630 Frostbite archives and 251,251 active assets. The provided PC example exposes 625 extractable Frostbite archives through the installer database.
 
@@ -185,7 +194,7 @@ The provided Xbox example indexes 630 Frostbite archives and 251,251 active asse
 |---|---|
 | `MeshData` | Creates one Blender mesh object per visible subset, including UVs, materials, and available bone-weight vertex groups. PC little-endian and Xbox 360 big-endian layouts are supported. |
 | Rigid and tree mesh sets | Resolves a matching LOD `MeshData` resource when available, preferring LOD0. |
-| `CompositeMeshSet` | Resolves LOD0 geometry and source materials, corrects shared/global index streams, separates verified source part IDs into named collections, applies decoded mesh-set bind transforms, and hides decoded damaged/destroyed/blurred parts plus geometry or collections with two `Wreck` occurrences in one name by default. A single `Wreck` occurrence alone remains visible. |
+| `CompositeMeshSet` | Resolves LOD0 geometry and source materials, corrects shared/global index streams, separates verified source part IDs into named collections, applies decoded mesh-set bind transforms, and hides decoded damaged/destroyed/blurred parts plus geometry or collections with two `Wreck` occurrences in one name by default. A single `Wreck` occurrence alone remains visible. A vehicle `_Mesh.res` is promoted by default to its same-name entity assembly only when that entity's primary component references the selected mesh; the session/Add-on Preference can disable this. |
 | PC `SkinnedMeshSet` | Resolves LOD0 geometry, the DBX skeleton reference, the default surface set, and source DX11 texture bindings; preserves declaration-specific UV layers (two for verified stride-48 assets and four for stride-64 characters), creates named vertex groups and source materials, adds Armature modifiers, and imports bounded exact-folder plus character-tree Actions when enabled. Console mesh sets remain geometry-only. |
 | PC soldier entity `.dbx` | Resolves every `Meshes3p` body/head/headgear component at LOD0, applies per-component shader-set overrides, binds all modules to one verified skeleton, creates modular component collections, follows character-specific static/facial/kit/revive animation links, and optionally selects eight verified rifle locomotion clips through the explicit shared base-set link. |
 | PC vehicle entity `.dbx` | Resolves the linked composite LOD0 mesh, source-backed materials, ordered named part collections, mesh-set bind transforms, and DBX-backed default/damaged/alternate states without inventing runtime pivots or parenting. Nested `TrackComponentData` instances are preserved separately: each resolves its shared skinned mesh and explicit skeleton, receives a source-backed local armature, and uses the exact component transform. Matching shader databases are selected by source/duplicate-path/material-key provenance and cached; compatible shader variants route texture bindings to physical UV offsets. Verified AH60 and MI28 families retain dedicated arithmetic while other vehicle glass uses a semantic transmissive fallback. Unknown composite UV declarations remain an explicitly marked cross-subset topology fallback rather than a vehicle-name exception. |
@@ -595,9 +604,13 @@ blender --background --factory-startup `
 
 It verifies the repeated-track source pattern on BMD3, M1A2, and T90, then
 imports BMD3 as one composite body plus two independently transformed track
-instances. Each track retains 1,138 vertices, 1,096 triangles, its own
+instances. Each BMD3 track retains 1,138 vertices, 1,096 triangles, its own
 source-backed eight-bone rig, the shared mesh/skeleton references, distinct
-component GUID, exact lateral placement, and save/reopen persistence.
+component GUID, exact lateral placement, and save/reopen persistence. The
+same test selects `T90_Mesh.res`, validates promotion to `T90.dbx`, imports
+both separate 1,282-vertex/990-triangle track rigs, and verifies their exact
+asymmetric placement after save/reopen. Selecting `T90Tracks_Mesh.res` is
+also verified not to promote.
 
 The equivalent MI28 UV and glass integration check is:
 

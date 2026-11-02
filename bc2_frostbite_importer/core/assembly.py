@@ -366,6 +366,17 @@ def _mesh_set_path(reference: str) -> str:
     return partition + ".res"
 
 
+def vehicle_entity_path_for_mesh_set(mesh_set_path: str) -> str | None:
+    suffix = "_mesh.res"
+    folded = mesh_set_path.casefold()
+    if (
+        not folded.startswith("objects/vehicles/")
+        or not folded.endswith(suffix)
+    ):
+        return None
+    return mesh_set_path[:-len(suffix)] + ".dbx"
+
+
 def _component_role(path: str, assembly_kind: str) -> str:
     if assembly_kind == "VEHICLE":
         return "VEHICLE"

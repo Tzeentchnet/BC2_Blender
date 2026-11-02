@@ -76,6 +76,11 @@ def _test_settings_registration(context):
                 "default_import_related_animations"
             ]
         )
+        preference_vehicle_property = (
+            blender_addon.BC2AddonPreferences.bl_rna.properties[
+                "default_import_vehicle_assemblies"
+            ]
+        )
         preference_gameplay_property = (
             blender_addon.BC2AddonPreferences.bl_rna.properties[
                 "default_import_core_gameplay_animations"
@@ -86,6 +91,11 @@ def _test_settings_registration(context):
                 "import_related_animations"
             ]
         )
+        session_vehicle_property = (
+            blender_addon.BC2Settings.bl_rna.properties[
+                "import_vehicle_assemblies"
+            ]
+        )
         session_gameplay_property = (
             blender_addon.BC2Settings.bl_rna.properties[
                 "import_core_gameplay_animations"
@@ -94,11 +104,14 @@ def _test_settings_registration(context):
         if (
             preference_animation_property.default is not True
             or session_animation_property.default is not True
+            or preference_vehicle_property.default is not True
+            or session_vehicle_property.default is not True
             or preference_gameplay_property.default is not True
             or session_gameplay_property.default is not True
         ):
             raise AssertionError(
-                "Related animation import must default to enabled"
+                "Linked assemblies and related animations must default "
+                "to enabled"
             )
         size_property = blender_addon.BC2Settings.bl_rna.properties[
             "show_asset_sizes"
@@ -159,6 +172,7 @@ def _test_settings_registration(context):
             default_terrain_resolution=256,
             default_material_mode="MATERIALS_ONLY",
             default_composite_visibility="SHOW_ALL",
+            default_import_vehicle_assemblies=False,
             default_import_related_animations=False,
             default_import_core_gameplay_animations=False,
         )
@@ -175,6 +189,7 @@ def _test_settings_registration(context):
             or settings.terrain_resolution != 256
             or settings.material_mode != "MATERIALS_ONLY"
             or settings.composite_visibility != "SHOW_ALL"
+            or settings.import_vehicle_assemblies is not False
             or settings.import_related_animations is not False
             or settings.import_core_gameplay_animations is not False
         ):

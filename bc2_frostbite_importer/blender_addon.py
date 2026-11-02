@@ -39,6 +39,7 @@ from .core.assembly import (
     animation_tree_replacement_references,
     character_animation_links,
     modular_assembly,
+    vehicle_entity_path_for_mesh_set,
     vehicle_part_state,
 )
 from .core.dbx import dbx_to_xml, parse_dbx
@@ -340,6 +341,15 @@ class BC2AddonPreferences(AddonPreferences):
         items=COMPOSITE_VISIBILITY_MODES,
         default="DEFAULT_STATE",
     )
+    default_import_vehicle_assemblies: BoolProperty(
+        name="Import linked vehicle assemblies",
+        description=(
+            "When a selected vehicle CompositeMeshSet has a matching "
+            "same-name entity DBX, import the complete assembly including "
+            "separate track components"
+        ),
+        default=True,
+    )
     default_import_related_animations: BoolProperty(
         name="Import related animations",
         description=(
@@ -382,6 +392,7 @@ class BC2AddonPreferences(AddonPreferences):
         defaults.prop(self, "default_terrain_resolution")
         defaults.prop(self, "default_material_mode")
         defaults.prop(self, "default_composite_visibility")
+        defaults.prop(self, "default_import_vehicle_assemblies")
         defaults.prop(self, "default_import_related_animations")
         gameplay = defaults.row()
         gameplay.active = self.default_import_related_animations
@@ -497,6 +508,15 @@ class BC2Settings(PropertyGroup):
         items=COMPOSITE_VISIBILITY_MODES,
         default="DEFAULT_STATE",
     )
+    import_vehicle_assemblies: BoolProperty(
+        name="Import linked vehicle assembly",
+        description=(
+            "When a selected vehicle CompositeMeshSet has a matching "
+            "same-name entity DBX, import the complete assembly including "
+            "separate track components"
+        ),
+        default=True,
+    )
     import_related_animations: BoolProperty(
         name="Import related animations",
         description=(
@@ -547,6 +567,9 @@ def _apply_preference_defaults(
     settings.terrain_resolution = preferences.default_terrain_resolution
     settings.material_mode = preferences.default_material_mode
     settings.composite_visibility = preferences.default_composite_visibility
+    settings.import_vehicle_assemblies = (
+        preferences.default_import_vehicle_assemblies
+    )
     settings.import_related_animations = (
         preferences.default_import_related_animations
     )
@@ -1785,6 +1808,48 @@ def _mesh_component_assets(
         ),
     )
     return mesh_set_asset, mesh_set_raw, mesh_asset, parsed
+
+
+def _vehicle_assembly_for_mesh_resource(repository, mesh_set_asset):
+    entity_path = vehicle_entity_path_for_mesh_set(
+        str(mesh_set_asset["path"])
+    )
+    if entity_path is None:
+        return None
+    entity_asset = repository.catalog.find_asset(
+        entity_path,
+        (str(mesh_set_asset["archive_path"]),),
+    )
+    if (
+        entity_asset is None
+        or str(entity_asset["asset_type"]) != "<non-resource>"
+    ):
+        return None
+    _, raw = repository.read_asset(
+        int(entity_asset["id"]),
+        max_size=256 << 20,
+    )
+    assembly = modular_assembly(
+        parse_dbx(raw),
+        str(entity_asset["path"]),
+    )
+    if assembly is None or assembly.kind != "VEHICLE":
+        return None
+    main_component = next(
+        (
+            component
+            for component in assembly.components
+            if component.role == "VEHICLE"
+        ),
+        None,
+    )
+    if (
+        main_component is None
+        or main_component.mesh_set_path.casefold()
+        != str(mesh_set_asset["path"]).casefold()
+    ):
+        return None
+    return entity_asset, assembly
 
 
 def _create_mesh_set_import(
@@ -6604,6 +6669,55 @@ def _related_animation_warning(
     return "; ".join(warnings)
 
 
+def _import_modular_assembly_asset(
+    operator,
+    context,
+    repository,
+    assembly_asset,
+    assembly: ModularAssembly,
+    settings: BC2Settings,
+):
+    imported = _create_modular_assembly(
+        context,
+        repository,
+        assembly_asset,
+        assembly,
+        settings,
+    )
+    object_count = sum(
+        len(component.objects)
+        for component in imported.components
+    )
+    related_animations = imported.related_animations
+    related_suffix = ""
+    related_warning = ""
+    if related_animations is not None:
+        related_suffix = (
+            f" and {len(related_animations.actions)} "
+            "related animation(s)"
+            if related_animations.enabled
+            else ""
+        )
+        related_warning = _related_animation_warning(
+            related_animations
+        )
+    _report_import_result(
+        operator,
+        settings,
+        f"Imported {assembly.kind.lower()} assembly with "
+        f"{len(imported.components)} component(s) and "
+        f"{object_count} mesh object(s){related_suffix}",
+        int(
+            imported.root_collection.get(
+                "bc2_diagnostic_count",
+                0,
+            )
+        ),
+        related_warning,
+    )
+    return imported
+
+
 class BC2_UL_assets(UIList):
     def draw_item(
         self, context, layout, data, item, icon, active_data, active_property, index
@@ -7071,6 +7185,7 @@ def _draw_asset_browser(layout, settings: BC2Settings, *, rows: int, list_id: st
 def _draw_import_settings(layout, settings: BC2Settings):
     layout.prop(settings, "material_mode")
     layout.prop(settings, "composite_visibility")
+    layout.prop(settings, "import_vehicle_assemblies")
     layout.prop(settings, "import_related_animations")
     gameplay = layout.row()
     gameplay.active = settings.import_related_animations
@@ -7143,70 +7258,113 @@ class BC2_OT_import_selected(Operator):
                 "TreeMeshSet",
             }:
                 source_asset = repository.catalog.asset(selected.asset_id)
-                asset, raw = repository.read_asset(
-                    selected.asset_id, max_size=1 << 30, resolve_mesh=True
-                )
-                parsed = parse_meshdata(
-                    raw,
-                    asset["platform"],
-                    include_z_only=settings.include_z_only,
-                    retain_pc_vehicle_uv_candidates=(
-                        str(source_asset["path"]).casefold().startswith(
-                            "objects/vehicles/"
-                        )
-                    ),
-                )
-                if (
-                    asset_type == "SkinnedMeshSet"
-                    and source_asset["platform"] == "pc"
-                ):
-                    armature, objects, related_animations = _create_character(
-                        context,
+                linked_vehicle = (
+                    _vehicle_assembly_for_mesh_resource(
                         repository,
                         source_asset,
-                        parsed,
-                        asset,
-                        settings,
                     )
-                    related_suffix = (
-                        f" and {len(related_animations.actions)} "
-                        "related animation(s)"
-                        if related_animations.enabled
-                        else ""
+                    if (
+                        asset_type == "CompositeMeshSet"
+                        and settings.import_vehicle_assemblies
                     )
-                    _report_import_result(
+                    else None
+                )
+                if linked_vehicle is not None:
+                    assembly_asset, assembly = linked_vehicle
+                    _import_modular_assembly_asset(
                         self,
-                        settings,
-                        f"Imported {len(objects)} skinned mesh object(s) "
-                        f"on {len(armature.data.bones)} bones"
-                        f"{related_suffix}",
-                        int(armature.get("bc2_diagnostic_count", 0)),
-                        _related_animation_warning(related_animations),
-                    )
-                elif asset_type == "CompositeMeshSet":
-                    root_collection, objects = _create_mesh_set_import(
                         context,
                         repository,
-                        source_asset,
-                        parsed,
-                        asset,
+                        assembly_asset,
+                        assembly,
                         settings,
-                    )
-                    _report_import_result(
-                        self,
-                        settings,
-                        f"Imported {len(objects)} modular mesh object(s)",
-                        int(root_collection.get("bc2_diagnostic_count", 0)),
                     )
                 else:
-                    objects = _create_mesh_objects(
-                        context, parsed, asset, settings
+                    asset, raw = repository.read_asset(
+                        selected.asset_id,
+                        max_size=1 << 30,
+                        resolve_mesh=True,
                     )
-                    _report_import_result(
-                        self,
-                        settings,
-                        f"Imported {len(objects)} mesh object(s)",
+                    parsed = parse_meshdata(
+                        raw,
+                        asset["platform"],
+                        include_z_only=settings.include_z_only,
+                        retain_pc_vehicle_uv_candidates=(
+                            str(source_asset["path"])
+                            .casefold()
+                            .startswith("objects/vehicles/")
+                        ),
                     )
+                    if (
+                        asset_type == "SkinnedMeshSet"
+                        and source_asset["platform"] == "pc"
+                    ):
+                        (
+                            armature,
+                            objects,
+                            related_animations,
+                        ) = _create_character(
+                            context,
+                            repository,
+                            source_asset,
+                            parsed,
+                            asset,
+                            settings,
+                        )
+                        related_suffix = (
+                            f" and {len(related_animations.actions)} "
+                            "related animation(s)"
+                            if related_animations.enabled
+                            else ""
+                        )
+                        _report_import_result(
+                            self,
+                            settings,
+                            f"Imported {len(objects)} skinned mesh object(s) "
+                            f"on {len(armature.data.bones)} bones"
+                            f"{related_suffix}",
+                            int(
+                                armature.get(
+                                    "bc2_diagnostic_count",
+                                    0,
+                                )
+                            ),
+                            _related_animation_warning(
+                                related_animations
+                            ),
+                        )
+                    elif asset_type == "CompositeMeshSet":
+                        root_collection, objects = _create_mesh_set_import(
+                            context,
+                            repository,
+                            source_asset,
+                            parsed,
+                            asset,
+                            settings,
+                        )
+                        _report_import_result(
+                            self,
+                            settings,
+                            f"Imported {len(objects)} modular mesh object(s)",
+                            int(
+                                root_collection.get(
+                                    "bc2_diagnostic_count",
+                                    0,
+                                )
+                            ),
+                        )
+                    else:
+                        objects = _create_mesh_objects(
+                            context,
+                            parsed,
+                            asset,
+                            settings,
+                        )
+                        _report_import_result(
+                            self,
+                            settings,
+                            f"Imported {len(objects)} mesh object(s)",
+                        )
             elif asset_type == "GrannyModel":
                 asset, raw = repository.read_asset(
                     selected.asset_id, max_size=256 << 20
@@ -7279,43 +7437,13 @@ class BC2_OT_import_selected(Operator):
                 document = parse_dbx(raw)
                 assembly = modular_assembly(document, str(asset["path"]))
                 if assembly is not None:
-                    imported = _create_modular_assembly(
+                    _import_modular_assembly_asset(
+                        self,
                         context,
                         repository,
                         asset,
                         assembly,
                         settings,
-                    )
-                    object_count = sum(
-                        len(component.objects)
-                        for component in imported.components
-                    )
-                    related_animations = imported.related_animations
-                    related_suffix = ""
-                    related_warning = ""
-                    if related_animations is not None:
-                        related_suffix = (
-                            f" and {len(related_animations.actions)} "
-                            "related animation(s)"
-                            if related_animations.enabled
-                            else ""
-                        )
-                        related_warning = _related_animation_warning(
-                            related_animations
-                        )
-                    _report_import_result(
-                        self,
-                        settings,
-                        f"Imported {assembly.kind.lower()} assembly with "
-                        f"{len(imported.components)} component(s) and "
-                        f"{object_count} mesh object(s){related_suffix}",
-                        int(
-                            imported.root_collection.get(
-                                "bc2_diagnostic_count",
-                                0,
-                            )
-                        ),
-                        related_warning,
                     )
                 else:
                     xml = dbx_to_xml(raw)
