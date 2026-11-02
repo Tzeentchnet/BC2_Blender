@@ -164,6 +164,16 @@ remain explicit diagnostics; they no longer force every known nonmatching
 database to be parsed again. Catalog records are invalidated automatically
 when their owning archive is reindexed.
 
+The same catalog is the reusable material reference index for complete maps,
+characters, vehicles, and direct PC rigid/tree props. A prop import contributes
+no asset-specific material table: its same-name DBX descriptor supplies
+surface keys, and the shared `shader_material_keys` inventory supplies
+candidate databases. One retail survey with all non-voice archives indexed
+resolved 2,543 of 2,653 rigid/tree source surfaces through exact or unique
+complete-partition catalog matches. The 110 unmatched surfaces stay explicit
+rather than causing all 35 known shader databases to be reparsed or accepting
+a fuzzy last-name match.
+
 This optimization is separate from NumPy. The expensive path was Python DXBC
 symbolic execution over unrelated shader variants, not vertex upload. The
 bulk string reader used by shader-database indexing also replaces

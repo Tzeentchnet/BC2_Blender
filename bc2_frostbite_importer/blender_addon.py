@@ -1598,6 +1598,28 @@ def _resource_partition(path: str) -> str:
     return path
 
 
+def _mesh_set_descriptor_asset(
+    repository,
+    mesh_set_asset,
+    preferred_archives=(),
+):
+    descriptor_path = (
+        _resource_partition(str(mesh_set_asset["path"])) + ".dbx"
+    )
+    preferred = tuple(
+        dict.fromkeys(
+            (
+                str(mesh_set_asset["archive_path"]),
+                *preferred_archives,
+            )
+        )
+    )
+    return repository.catalog.find_asset(
+        descriptor_path,
+        preferred,
+    )
+
+
 def _reference_resource_path(reference: str) -> str:
     if not reference or reference.casefold() == "null" or "/" not in reference:
         raise BC2Error("DBX resource reference is missing or invalid")
@@ -1954,6 +1976,20 @@ def _create_mesh_set_import(
     root_collection["bc2_resolved_material_count"] = material_summary[
         "resolved_materials"
     ]
+    root_collection["bc2_source_surface_count"] = material_summary[
+        "source_surfaces"
+    ]
+    root_collection["bc2_source_image_count"] = material_summary[
+        "source_images"
+    ]
+    if material_summary["mesh_reference"]:
+        root_collection["bc2_mesh_reference"] = material_summary[
+            "mesh_reference"
+        ]
+    if material_summary["shader_set_reference"]:
+        root_collection["bc2_shader_set_reference"] = material_summary[
+            "shader_set_reference"
+        ]
     return root_collection, objects
 
 
@@ -5752,9 +5788,12 @@ def _resolve_mesh_subset_materials(
     diagnostic_start = 0 if created_context else len(
         material_context.diagnostics
     )
-    descriptor_path = _resource_partition(mesh_set_asset["path"]) + ".dbx"
-    descriptor_asset = repository.catalog.find_asset(
-        descriptor_path,
+    descriptor_path = (
+        _resource_partition(str(mesh_set_asset["path"])) + ".dbx"
+    )
+    descriptor_asset = _mesh_set_descriptor_asset(
+        repository,
+        mesh_set_asset,
         preferred_archives,
     )
     if descriptor_asset is None:
@@ -7339,6 +7378,18 @@ class BC2_OT_import_selected(Operator):
                 "TreeMeshSet",
             }:
                 source_asset = repository.catalog.asset(selected.asset_id)
+                source_descriptor = (
+                    _mesh_set_descriptor_asset(
+                        repository,
+                        source_asset,
+                    )
+                    if (
+                        asset_type
+                        in {"RigidMeshSet", "TreeMeshSet"}
+                        and source_asset["platform"] == "pc"
+                    )
+                    else None
+                )
                 linked_vehicle = (
                     _vehicle_assembly_for_mesh_resource(
                         repository,
@@ -7414,7 +7465,10 @@ class BC2_OT_import_selected(Operator):
                                 related_animations
                             ),
                         )
-                    elif asset_type == "CompositeMeshSet":
+                    elif (
+                        asset_type == "CompositeMeshSet"
+                        or source_descriptor is not None
+                    ):
                         root_collection, objects = _create_mesh_set_import(
                             context,
                             repository,
@@ -7426,7 +7480,15 @@ class BC2_OT_import_selected(Operator):
                         _report_import_result(
                             self,
                             settings,
-                            f"Imported {len(objects)} modular mesh object(s)",
+                            (
+                                f"Imported {len(objects)} modular mesh "
+                                "object(s)"
+                                if asset_type == "CompositeMeshSet"
+                                else (
+                                    f"Imported {len(objects)} mesh object(s) "
+                                    "with source material references"
+                                )
+                            ),
                             int(
                                 root_collection.get(
                                     "bc2_diagnostic_count",
@@ -7445,6 +7507,32 @@ class BC2_OT_import_selected(Operator):
                             self,
                             settings,
                             f"Imported {len(objects)} mesh object(s)",
+                            warning=(
+                                (
+                                    "source material resolution is currently "
+                                    "implemented for PC mesh sets only"
+                                )
+                                if (
+                                    asset_type
+                                    in {"RigidMeshSet", "TreeMeshSet"}
+                                    and _uses_source_materials(settings)
+                                    and source_asset["platform"] != "pc"
+                                )
+                                else (
+                                    "no same-name source descriptor is "
+                                    "indexed; imported neutral subset "
+                                    "materials"
+                                    if (
+                                        asset_type
+                                        in {
+                                            "RigidMeshSet",
+                                            "TreeMeshSet",
+                                        }
+                                        and _uses_source_materials(settings)
+                                    )
+                                    else ""
+                                )
+                            ),
                         )
             elif asset_type == "GrannyModel":
                 asset, raw = repository.read_asset(

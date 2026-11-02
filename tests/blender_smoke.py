@@ -583,6 +583,196 @@ def _test_import_policies(context):
     bpy.data.texts.remove(enabled)
 
 
+def _test_direct_mesh_set_dispatch(context):
+    original_settings = blender_addon._settings
+    original_selected_asset = blender_addon._selected_asset
+    original_get_repository = blender_addon._get_repository
+    original_parse_meshdata = blender_addon.parse_meshdata
+    original_create_mesh_set_import = (
+        blender_addon._create_mesh_set_import
+    )
+    original_create_mesh_objects = blender_addon._create_mesh_objects
+    original_report_import_result = (
+        blender_addon._report_import_result
+    )
+
+    class SyntheticCatalog:
+        def __init__(self, source_asset, has_descriptor):
+            self.source_asset = source_asset
+            self.has_descriptor = has_descriptor
+            self.descriptor_lookups = []
+
+        def asset(self, _asset_id):
+            return self.source_asset
+
+        def find_asset(self, path, preferred_archives=()):
+            self.descriptor_lookups.append(
+                (path, tuple(preferred_archives))
+            )
+            return {"id": 99} if self.has_descriptor else None
+
+    class SyntheticRepository:
+        def __init__(self, source_asset, has_descriptor):
+            self.catalog = SyntheticCatalog(
+                source_asset,
+                has_descriptor,
+            )
+
+        def read_asset(self, _asset_id, **_kwargs):
+            return (
+                {
+                    "path": "Objects/Test/Test_Mesh_lod0_data.res",
+                    "archive_path": "Dist/Test.fbrb",
+                    "platform": self.catalog.source_asset["platform"],
+                },
+                b"mesh",
+            )
+
+    settings = SimpleNamespace(
+        import_vehicle_assemblies=False,
+        include_z_only=False,
+        material_mode="FULL",
+    )
+    parsed = object()
+    calls = []
+    reports = []
+    try:
+        blender_addon._settings = lambda _context: settings
+        blender_addon.parse_meshdata = (
+            lambda *_args, **_kwargs: parsed
+        )
+        blender_addon._create_mesh_set_import = (
+            lambda *_args, **_kwargs: (
+                {"bc2_diagnostic_count": 0},
+                ("source",),
+            )
+        )
+        blender_addon._create_mesh_objects = (
+            lambda *_args, **_kwargs: ("plain",)
+        )
+        blender_addon._report_import_result = (
+            lambda _operator,
+            _settings,
+            message,
+            diagnostic_count=0,
+            warning="": reports.append(
+                (message, diagnostic_count, warning)
+            )
+        )
+
+        cases = (
+            ("RigidMeshSet", "pc", True, "source", ""),
+            ("TreeMeshSet", "pc", True, "source", ""),
+            ("CompositeMeshSet", "pc", False, "source", ""),
+            (
+                "RigidMeshSet",
+                "pc",
+                False,
+                "plain",
+                "no same-name source descriptor",
+            ),
+            (
+                "RigidMeshSet",
+                "xbox360",
+                True,
+                "plain",
+                "implemented for PC mesh sets only",
+            ),
+            ("MeshData", "pc", False, "plain", ""),
+        )
+        for asset_type, platform, has_descriptor, expected, warning in cases:
+            source_asset = {
+                "id": 7,
+                "path": "Objects/Test/Test_Mesh.res",
+                "archive_path": "Dist/Test.fbrb",
+                "platform": platform,
+            }
+            repository = SyntheticRepository(
+                source_asset,
+                has_descriptor,
+            )
+            blender_addon._selected_asset = (
+                lambda _settings, value=asset_type: SimpleNamespace(
+                    asset_type=value,
+                    asset_id=7,
+                )
+            )
+            blender_addon._get_repository = (
+                lambda _context, value=repository: value
+            )
+            before_reports = len(reports)
+            if expected == "source":
+                blender_addon._create_mesh_set_import = (
+                    lambda *_args,
+                    value=asset_type,
+                    **_kwargs: (
+                        calls.append(("source", value))
+                        or (
+                            {"bc2_diagnostic_count": 0},
+                            ("source",),
+                        )
+                    )
+                )
+            else:
+                blender_addon._create_mesh_objects = (
+                    lambda *_args,
+                    value=asset_type,
+                    **_kwargs: (
+                        calls.append(("plain", value))
+                        or ("plain",)
+                    )
+                )
+            operator = SimpleNamespace(report=lambda *_args: None)
+            result = blender_addon.BC2_OT_import_selected.execute(
+                operator,
+                context,
+            )
+            if result != {"FINISHED"}:
+                raise AssertionError(
+                    f"{asset_type} dispatch did not finish"
+                )
+            if calls[-1] != (expected, asset_type):
+                raise AssertionError(
+                    f"{asset_type} used {calls[-1][0]} dispatch"
+                )
+            report = reports[before_reports]
+            if warning and warning not in report[2]:
+                raise AssertionError(
+                    f"{asset_type} did not report {warning!r}"
+                )
+            if not warning and report[2]:
+                raise AssertionError(
+                    f"{asset_type} reported an unexpected warning"
+                )
+            if (
+                asset_type in {"RigidMeshSet", "TreeMeshSet"}
+                and platform == "pc"
+                and repository.catalog.descriptor_lookups
+                and repository.catalog.descriptor_lookups[0]
+                != (
+                    "Objects/Test/Test_Mesh.dbx",
+                    ("Dist/Test.fbrb",),
+                )
+            ):
+                raise AssertionError(
+                    "Direct mesh-set descriptor lookup was not deterministic"
+                )
+    finally:
+        blender_addon._settings = original_settings
+        blender_addon._selected_asset = original_selected_asset
+        blender_addon._get_repository = original_get_repository
+        blender_addon.parse_meshdata = original_parse_meshdata
+        blender_addon._create_mesh_set_import = (
+            original_create_mesh_set_import
+        )
+        blender_addon._create_mesh_objects = (
+            original_create_mesh_objects
+        )
+        blender_addon._report_import_result = (
+            original_report_import_result
+        )
+
+
 def _test_mesh(context):
     subset = MeshSubset(
         name="Accelerated",
@@ -2678,6 +2868,7 @@ def main():
         raise AssertionError("Blender NumPy is unavailable")
     _test_settings_registration(bpy.context)
     _test_import_policies(bpy.context)
+    _test_direct_mesh_set_dispatch(bpy.context)
     _test_mesh(bpy.context)
     _test_composite_parts(bpy.context)
     _test_terrain(bpy.context)

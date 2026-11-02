@@ -113,6 +113,21 @@ texture-conversion, or unresolved-subset diagnostics.
 - `MP_001` map materials: pixel-shader `RDEF` names retained for each binding;
   representative background-tree, bark, foliage, and layered-prop
   permutations checked with FXC disassembly.
+- PC direct rigid/tree material survey: 1,295 unique `RigidMeshSet` and 57
+  unique `TreeMeshSet` paths with all 623 non-voice retail archives indexed;
+  the two unindexed archives were `streaming_vo_ru-00.fbrb` and `vo-00.fbrb`.
+  All 1,175 available rigid descriptors and all 57 tree descriptors parsed.
+  Their 2,653 source surfaces produced 2,422 exact material-key matches, 121
+  unique complete-partition matches, and 110 explicit misses across 35
+  indexed shader databases. The 120 descriptorless rigid resources were
+  undergrowth.
+- PC direct prop Blender integration: BarrackInterior, Barrack Objects,
+  Barrack Tables, MedKit, Barn Door, BarbWire, and Acacia created 20 assigned
+  source materials and 30 per-sample file-backed image references, then
+  survived save/reopen. BarrackInterior resolved six of six subset materials
+  and eight images from `SP_02`; three bindings retain explicit unavailable
+  physical-route diagnostics. Acacia resolved three assigned materials from
+  five descriptor surfaces and retains five dynamic-transform diagnostics.
 - Multi-subset map meshes: one position representation selected across related
   subsets, including half-float building blocks and the float-position bridge.
 - Common stride-48 static declaration: object/repeating/selector/atlas pairs
@@ -426,6 +441,12 @@ worker results repopulate Blender's map, archive, and asset collections. Core
 coverage verifies cancellation between archives and per-archive failure
 recording for both full and targeted indexing.
 
+Direct mesh-set dispatch coverage verifies that PC rigid/tree resources with a
+same-name descriptor use the shared source-material path, direct composites
+retain their modular path, descriptorless PC rigid resources retain neutral
+geometry with a warning, console rigid resources remain geometry-only with a
+PC-support warning, and direct `MeshData` does not guess an owner.
+
 An optional real-media integration runner performs a complete import, saves the
 blend, reopens it, and checks placement count, linked mesh count, exact child
 collection counts, terrain contact and water bounds, plausible placement
@@ -449,6 +470,28 @@ blender --background --factory-startup `
   --python tests\blender_character_integration.py -- `
   --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
   --output <OUTPUT_BLEND>
+```
+
+The PC direct prop-material runner imports and reopens seven rigid/tree mesh
+sets across cutscene, building, weapon, wire, and vegetation families. It
+checks source-surface assignment, shader-database provenance, file-backed
+images, diagnostics, and persistence:
+
+```powershell
+blender --background --factory-startup `
+  --python tests\blender_prop_material_integration.py -- `
+  --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
+  --output <OUTPUT_BLEND>
+```
+
+The corresponding catalog audit fills any unscanned DX11 key inventories
+without tracing unrequested variants, resolves every indexed PC rigid/tree
+descriptor, and writes the source paths and explicit limitations to JSON:
+
+```powershell
+python tests\prop_material_catalog_audit.py `
+  --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
+  --output <OUTPUT_JSON>
 ```
 
 The PC vehicle runner imports AH60, checks its 36 named source parts, 27,388

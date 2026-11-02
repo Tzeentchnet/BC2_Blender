@@ -192,8 +192,8 @@ The provided Xbox example indexes 630 Frostbite archives and 251,251 active asse
 
 | Asset | Current behavior |
 |---|---|
-| `MeshData` | Creates one Blender mesh object per visible subset, including UVs, materials, and available bone-weight vertex groups. PC little-endian and Xbox 360 big-endian layouts are supported. |
-| Rigid and tree mesh sets | Resolves a matching LOD `MeshData` resource when available, preferring LOD0. |
+| `MeshData` | Creates one Blender mesh object per visible subset, including UVs, neutral subset materials, and available bone-weight vertex groups. PC little-endian and Xbox 360 big-endian layouts are supported. A direct `MeshData` has no deterministic owning descriptor, so the importer does not guess source material references. |
+| PC rigid and tree mesh sets | Resolves a matching LOD `MeshData` resource, preferring LOD0, then follows the same-name DBX descriptor into source surfaces and the shared persistent DX11 shader-key catalog. Direct prop imports retain material, binding, texture, UV-route, and shader-database provenance. Descriptorless undergrowth remains geometry with neutral materials and an explicit warning; console rigid/tree imports remain geometry-only. Tree wind/runtime vegetation semantics are not implemented. |
 | `CompositeMeshSet` | Resolves LOD0 geometry and source materials, corrects shared/global index streams, separates verified source part IDs into named collections, applies decoded mesh-set bind transforms, and hides decoded damaged/destroyed/blurred parts plus geometry or collections with two `Wreck` occurrences in one name by default. A single `Wreck` occurrence alone remains visible. A vehicle `_Mesh.res` is promoted by default to its same-name entity assembly only when that entity's primary component references the selected mesh; the session/Add-on Preference can disable this. |
 | PC `SkinnedMeshSet` | Resolves LOD0 geometry, the DBX skeleton reference, the default surface set, and source DX11 texture bindings; preserves declaration-specific UV layers (two for verified stride-48 assets and four for stride-64 characters), creates named vertex groups and source materials, adds Armature modifiers, and imports bounded exact-folder plus character-tree Actions when enabled. Console mesh sets remain geometry-only. |
 | PC soldier entity `.dbx` | Resolves every `Meshes3p` body/head/headgear component at LOD0, applies per-component shader-set overrides, binds all modules to one verified skeleton, creates modular component collections, follows character-specific static/facial/kit/revive animation links, and optionally selects eight verified rifle locomotion clips through the explicit shared base-set link. |
@@ -515,6 +515,35 @@ blender --background --factory-startup `
 This saves and reopens the map blend, then verifies placement, linked-mesh,
 terrain, and diagnostics counts. Images remain native file-backed DDS resources
 unless `--pack-images` is supplied.
+
+The direct PC prop-material integration check is:
+
+```powershell
+blender --background --factory-startup `
+  --python tests\blender_prop_material_integration.py -- `
+  --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
+  --output <OUTPUT_BLEND>
+```
+
+It saves and reopens seven direct mesh sets spanning Barrack interiors and
+furniture, an unrelated building prop, MedKit, textureless BarbWire, and an
+Acacia tree. The check verifies 20 assigned source materials, 30 distinct
+per-sample file-backed image references, provenance-ranked `SP_02`, `MP_001`,
+`MP_003`, and `SP_006` shader databases, explicit UV-route diagnostics, and
+the absence of named-asset material dispatch.
+
+For a catalog-wide reference report after **Index All (Slow)**:
+
+```powershell
+python tests\prop_material_catalog_audit.py `
+  --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
+  --output <OUTPUT_JSON>
+```
+
+The audit indexes any remaining DX11 material-key inventories without tracing
+unrequested shader variants, resolves every cataloged PC rigid/tree descriptor,
+and records exact, unique-partition, and missing material references. It does
+not copy game payloads into the repository.
 
 The equivalent PC character integration check is:
 

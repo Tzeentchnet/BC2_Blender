@@ -12,10 +12,10 @@ the browser is not necessarily decoded.
 | FbRB type/path | Category | Current behavior |
 |---|---|---|
 | `MeshData` | Mesh | Native geometry, UV preview, and available weight groups |
-| `RigidMeshSet` | Mesh | Resolves a naming-matched LOD MeshData, preferring LOD0 |
+| `RigidMeshSet` | Mesh | Resolves a naming-matched LOD MeshData, preferring LOD0. PC direct imports with a same-name DBX descriptor also resolve source surfaces and DX11 materials through the shared shader-key catalog; descriptorless undergrowth remains geometry with neutral materials and an explicit warning. Console imports are geometry-only |
 | `SkinnedMeshSet` | Mesh | PC: resolves MeshData, four preserved character shader-coordinate channels with nondegenerate material routing, the DBX skeleton/default surface references, source DX11 materials, and a bound armature; console: geometry-only |
 | `CompositeMeshSet` | Mesh | Resolves LOD0 MeshData and materials; rebases verified shared index streams and separates type-2 geometry into ordered source-named part collections. A vehicle `_Mesh.res` additionally imports its complete same-name entity assembly by default only after exact primary-mesh validation |
-| `TreeMeshSet` | Mesh | Resolves MeshData; no tree-specific semantics |
+| `TreeMeshSet` | Mesh | Resolves MeshData. PC direct imports also resolve same-name descriptor surfaces and DX11 materials; no tree-specific wind or runtime vegetation semantics are implemented. Console imports are geometry-only |
 | `WaterMesh` | Mesh | Native positions and triangle geometry |
 | `ITexture` | Texture | PC resource-to-DDS conversion |
 | `XenonTexture` | Texture | Xbox untile, byte correction, and DDS conversion |
@@ -51,6 +51,16 @@ selection focused. The importer does not perform an arbitrary reverse search
 because one body mesh can participate in multiple entities. Selecting a track
 `SkinnedMeshSet` also remains focused, while the validated main vehicle graph
 supplies repeated track instances and placement.
+
+Direct PC `RigidMeshSet` and `TreeMeshSet` selections use only their
+same-partition `.dbx` descriptor for source material references. A catalog
+survey found this deterministic descriptor for 1,175 of 1,295 unique rigid
+mesh sets and all 57 tree mesh sets; all 1,232 parsed successfully. The 120
+descriptorless rigid resources were undergrowth in the tested retail source
+and remain geometry-only with an explicit warning. Direct `MeshData` does not
+guess an owner through reverse lookup. See
+[Shaders and materials](../shaders-and-materials.md) for source-surface and
+shader-key coverage.
 
 The generic DBX reader and the semantic importers have different support
 boundaries. See [Terrain and DBX](terrain-and-dbx.md) for the binary grammar,

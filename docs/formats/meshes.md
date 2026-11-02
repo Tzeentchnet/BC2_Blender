@@ -387,8 +387,26 @@ Shared-stride selection yields coherent bounds for both complete resources.
 
 `RigidMeshSet`, `SkinnedMeshSet`, `CompositeMeshSet`, and `TreeMeshSet` locate
 geometry by asset naming. The catalog looks for `<base>_lod%_data.res`,
-prefers LOD0, and prefers a resource in the same FbRB. Composite payloads are also scanned for ordered `lod0|PartName` records and
-their 18-float bounds/bind-transform payloads used by the type-2 split path.
+prefers LOD0, and prefers a resource in the same FbRB. Composite payloads are
+also scanned for ordered `lod0|PartName` records and their 18-float
+bounds/bind-transform payloads used by the type-2 split path.
+
+For a direct PC rigid or tree mesh-set import, the implemented material path
+looks up only the same-partition DBX descriptor:
+
+```text
+Objects/Example/Prop_Mesh.res
+Objects/Example/Prop_Mesh.dbx
+```
+
+The descriptor's primary mesh instance and `MeshShaderSetAsset` references
+supply source surfaces; the persistent shader-key catalog supplies candidate
+DX11 databases. This does not decode material assignments from the mesh-set
+binary itself. Direct `MeshData` has no deterministic owning descriptor and
+therefore remains a geometry import rather than reverse-searching an arbitrary
+owner. In the tested PC retail catalog, 120 descriptorless rigid mesh sets
+were undergrowth; they preserve neutral subset materials and report the
+limitation. Console rigid/tree mesh sets remain geometry-only.
 
 For robust multi-LOD or export support, continue decoding the mesh-set resource
 and retain its explicit references, runtime pivots, skeleton linkage, and

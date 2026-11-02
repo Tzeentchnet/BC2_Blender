@@ -12,12 +12,13 @@ database entries determine:
 - tangent-space reconstruction;
 - how detail normals are combined with the base normal.
 
-The PC complete-map importer now performs mesh-to-shader-database association
-for resolved static surfaces. It preserves every recovered binding, reflects
-pixel-shader resource names, and builds source-driven Blender graphs. This is
-not equivalent to recovering arbitrary shader arithmetic: the MedKit
-`plastic` surface below remains the only path whose complete detail-normal
-calculation has been reproduced exactly.
+The PC material importer performs mesh-to-shader-database association for
+resolved complete-map, character, vehicle, and direct rigid/tree surfaces. It
+preserves every recovered binding, reflects pixel-shader resource names, and
+builds source-driven Blender graphs. This is not equivalent to recovering
+arbitrary shader arithmetic: the MedKit `plastic` surface below remains the
+only path whose complete detail-normal calculation has been reproduced
+exactly.
 
 ## Import material modes
 
@@ -129,15 +130,83 @@ This form is verified across the `MP_001` static mesh set, not just inferred
 from a texture filename. See
 [`shaderdb.py`](../bc2_frostbite_importer/core/shaderdb.py).
 
+## Direct prop material resolution
+
+**Implemented for PC `RigidMeshSet` and `TreeMeshSet` resources with an
+indexed same-name DBX descriptor.** Direct prop import now uses the same
+data-driven chain as complete-map and vehicle materials:
+
+1. resolve `<mesh-set partition>.dbx` deterministically;
+2. follow its `MeshShaderSetAsset` and `SurfaceShader` references;
+3. construct the complete requested material key and shader partition;
+4. query the persistent shader-key catalog and provenance-ranked databases;
+5. parse only the requested variants and retain binding, route, and database
+   provenance on the Blender material.
+
+There is no Barrack, building, furniture, weapon, or vegetation material table
+and no asset-name dispatch. The persistent `shader_databases` and
+`shader_material_keys` catalog tables are the reusable reference index.
+Reindexing their owning archives invalidates stale rows through foreign keys.
+Per-import Blender material/image caches then reuse already resolved shader
+keys and source texture paths.
+
+A survey of one PC retail catalog produced this evidence. All 623 non-voice
+archives were indexed; `streaming_vo_ru-00.fbrb` and `vo-00.fbrb` were the
+only unindexed archives:
+
+| Resource type | Unique mesh sets | Same-name descriptors resolved | Resolved source surfaces | Exact catalog keys | Unique full-partition matches | No catalog match |
+|---|---:|---:|---:|---:|---:|---:|
+| `RigidMeshSet` | 1,295 | 1,175 | 2,449 | 2,223 | 117 | 109 |
+| `TreeMeshSet` | 57 | 57 | 204 | 199 | 4 | 1 |
+
+All 1,232 available descriptors parsed and resolved without an exception.
+Five rigid descriptors exposed no surface table and retained explicit resolver
+diagnostics. The 110 unmatched rigid/tree surfaces remain diagnostic
+materials; the importer does not invent a fuzzy material-key alias for them.
+
+The 120 rigid mesh sets without a same-name descriptor are undergrowth
+resources in the tested catalog. Direct import preserves their previous
+geometry and neutral subset materials and reports that no owning descriptor
+was found. It does not reverse-search an arbitrary map or terrain owner.
+Direct `MeshData` has the same ownership ambiguity and remains a geometry
+operation. Console rigid/tree mesh sets remain geometry-only because this
+source-material path is verified only for PC DX11 databases.
+
+The save/reopen integration set spans cutscene props, layered Barrack objects,
+building pieces, a weapon pickup, textureless geometry, and vegetation:
+
+| PC retail sample | Assigned subset materials | File-backed images | Selected shader database |
+|---|---:|---:|---|
+| `BarrackInterior_Mesh.res` | 6 of 6 | 8 | `SP_02` |
+| Barrack `Objects_Mesh.res` | 4 of 4 | 3 | `SP_02` |
+| Barrack `Tables_Mesh.res` | 3 of 3 | 2 | `SP_02` |
+| `MedKit_Mesh.res` | 1 of 1 | 2 | `MP_001` |
+| `Barn_Door_Mesh.res` | 2 of 2 | 9 | `MP_003` |
+| `BarbWire_Mesh.res` | 1 of 1 | 0 | `SP_02` |
+| `Acacia_01_Mesh.res` (`TreeMeshSet`) | 3 of 3 | 6 | `SP_006` |
+
+BarrackInterior resolves `Floor`, `Glass`, `Roof`, `WoodPlanks_NoSoot`,
+`Metal_NoSoot`, and `TnTShader12`. Its `Wood_C`, `Door`, and `Wallpaper_C`
+bindings have compiled shader routes to physical byte offsets that the
+current mesh declaration did not expose. They use the existing semantic UV
+fallback and retain `shader_uv_route_unavailable` diagnostics. Acacia retains
+the physical source channels for five bindings with dynamic transforms, but
+uses the existing transform fallback and records
+`shader_uv_transform_unsupported`. These are preview-import limitations, not
+exporter-safe shader specifications. The catalog evidence is reproducible with
+[`prop_material_catalog_audit.py`](../tests/prop_material_catalog_audit.py);
+the Blender save/reopen evidence uses
+[`blender_prop_material_integration.py`](../tests/blender_prop_material_integration.py).
+
 ## MedKit material resolution
 
 The mesh metadata document is:
 
 ```text
-Objects/Weapons/Handheld/MedKit/MedKit_Mesh.dbx
+Objects/Weapons/Projectiles/MedKit/MedKit_Mesh.dbx
 ```
 
-It names a `plastic` surface referencing:
+It names a `plastic` surface whose shader partition references:
 
 ```text
 Objects/Weapons/Handheld/MedKit/Shaders/plastic
@@ -152,11 +221,12 @@ Levels/mp_001/shaders/Dx11_Single.res
 The observed database material key is:
 
 ```text
-Objects/Weapons/Handheld/MedKit/MedKit_Mesh/
+Objects/Weapons/Projectiles/MedKit/MedKit_Mesh/
 Objects/Weapons/Handheld/MedKit/Shaders/plastic
 ```
 
-This key is recovered automatically during whole-map import.
+This key is recovered automatically during whole-map and direct rigid-prop
+import.
 
 ## Verified DX11 bindings
 
