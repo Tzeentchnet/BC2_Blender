@@ -344,8 +344,11 @@ def _pc_stride_48_uv_offsets(
 ) -> tuple[int, ...]:
     if stride != 48:
         return ()
-    if mesh_type == 2 and part_index_offset == 36:
-        return 24, 28, 32, 40
+    if mesh_type == 2:
+        if part_index_offset == 32:
+            return 24, 28, 36, 40
+        if part_index_offset == 36:
+            return 24, 28, 32, 40
     # The static declaration exposes object and repeating UVs through the
     # .zw halves at byte 28 and 36. The .xy halves are atlas selectors.
     return 28, 36, 32, 24
@@ -494,6 +497,7 @@ def parse_meshdata(
         for header in active_headers
     }
     composite_part_data = {}
+    composite_layout_offsets: dict[int, set[int]] = {}
     if mesh_type == 2:
         for header in active_headers:
             index_base = layouts[header]
@@ -519,6 +523,11 @@ def parse_meshdata(
                 header.palette,
             )
             composite_part_data[header] = part_data
+            if part_data[1] is not None:
+                composite_layout_offsets.setdefault(
+                    header.stride,
+                    set(),
+                ).add(part_data[1])
     position_formats = {}
     for stride in {header.stride for header in active_headers}:
         position_formats[stride] = _position_format(
@@ -567,6 +576,18 @@ def parse_meshdata(
             )
             for vertex in range(header.vertex_count)
         )
+        part_indices, part_index_offset = composite_part_data.get(
+            header,
+            ((), None),
+        )
+        declaration_part_offset = part_index_offset
+        if declaration_part_offset is None:
+            related_offsets = composite_layout_offsets.get(
+                header.stride,
+                set(),
+            )
+            if len(related_offsets) == 1:
+                declaration_part_offset = next(iter(related_offsets))
         explicit_uv_offsets = (
             _pc_skinned_uv_offsets(
                 mesh_type,
@@ -580,7 +601,7 @@ def parse_meshdata(
             explicit_uv_offsets = _pc_stride_48_uv_offsets(
                 mesh_type,
                 header.stride,
-                composite_part_data.get(header, ((), None))[1],
+                declaration_part_offset,
             )
         decoded_channels = ()
         if explicit_uv_offsets:
@@ -667,10 +688,6 @@ def parse_meshdata(
                     f"MeshData index exceeds vertex count in {header.name}"
                 )
             faces.append(triangle)
-        part_indices, part_index_offset = composite_part_data.get(
-            header,
-            ((), None),
-        )
         influences = _read_influences(
             data,
             subset_vertex_start,

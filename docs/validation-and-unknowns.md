@@ -225,6 +225,12 @@ texture-conversion, or unresolved-subset diagnostics.
   dark diffuse scales, and Minigun Main uses `Symbols_Us` for color while
   `MiniGun_C` green controls specular. Save/reopen retains every transform,
   visibility state, and material graph and introduces no fabricated armature.
+- PC MI28 assembly: 24 source parts, 44 surface fragments, and 21,032 imported
+  triangles. All ten LOD0 subsets retain the byte-32 part-selector declaration
+  and coordinate offsets 24/28/36/40. Main and MainMetal use their verified
+  normal, color, symbol, dirt, detail, and 10x mask routes. The 36-vertex,
+  20-triangle `lod0_Windshields_Glass` surface uses transmissive view-angle
+  opacity and retains its graph after save/reopen.
 - PC `ske01`: local transforms composed against every transposed stored
   inverse-world matrix with a maximum identity residual below `7.5e-7`.
 - PC rifle third-person `StandIdle` and `RunForward`: 39 named transform
@@ -264,8 +270,13 @@ Current tests cover:
   collections;
 - the declared four-channel little-endian stride-48 composite layout when the
   verified part-ID field is at byte 36;
+- the declared four-channel little-endian stride-48 MI28 composite layout when
+  the verified part-ID field is at byte 32, including propagation to
+  one-part subsets;
 - verified AH60 Main/glass/interior/cockpit/minigun texture roles, UV channels,
   shader constants, and Blender graph construction;
+- verified MI28 Main/MainMetal coordinate routes and color constants plus its
+  textureless transmissive glass graph;
 - the declared four-channel little-endian stride-64 skinned coordinate layout
   including constant declared channels, plus nondegenerate routing for
   LegStandard, MOLLE, and pouches;
@@ -358,6 +369,18 @@ validates save/reopen persistence:
 ```powershell
 blender --background --factory-startup `
   --python tests\blender_vehicle_integration.py -- `
+  --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
+  --output <OUTPUT_BLEND>
+```
+
+The PC MI28 runner checks the distinct byte-32 composite declaration,
+24/28/36/40 UV layers across all ten LOD0 subsets, 24 parts, 44 surface
+fragments, 21,032 imported triangles, Main/MainMetal material routes, and the
+transmissive windshield before and after save/reopen:
+
+```powershell
+blender --background --factory-startup `
+  --python tests\blender_mi28_integration.py -- `
   --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
   --output <OUTPUT_BLEND>
 ```

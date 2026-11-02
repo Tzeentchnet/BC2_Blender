@@ -1456,6 +1456,155 @@ def _test_verified_vehicle_material_graphs():
     ):
         raise AssertionError("AH60 Main source color relationship is missing")
 
+    mi28_main_surface = SurfaceShader(
+        "Main",
+        (
+            "objects/vehicles/air/mi28/shaders/main/"
+            "63828a0f-3a58-410d-9a88-bc44018637eb"
+        ),
+        (
+            "Objects/Vehicles/Air/Mi28/Mi28_Mesh/"
+            "Objects/Vehicles/Air/Mi28/Shaders/Main"
+        ),
+    )
+    mi28_main_bindings = (
+        ShaderTextureBinding(
+            1,
+            "Textures/Vehicles/Mi28/Mi28Havoc_N",
+            ("texture_Texture",),
+        ),
+        ShaderTextureBinding(
+            2,
+            "Textures/Vehicles/Mi28/Mi28Havoc_C",
+            ("texture_Texture7",),
+        ),
+        ShaderTextureBinding(
+            3,
+            "Textures/Vehicles/RussianSymbols/Symbols_Rus",
+            ("texture_Texture4",),
+        ),
+        ShaderTextureBinding(
+            4,
+            "Textures/Vehicles/Dirt/DirtMaskRGB",
+            ("texture_Texture2",),
+        ),
+        ShaderTextureBinding(
+            5,
+            "Textures/Vehicles/Mi28/Mi28Havoc_D",
+            ("texture_Texture3",),
+        ),
+        ShaderTextureBinding(
+            6,
+            "Textures/_MASK/Msk_Generic",
+            ("texture_Texture6",),
+        ),
+    )
+    mi28_roles = blender_addon._surface_binding_roles(
+        mi28_main_surface,
+        mi28_main_bindings,
+    )
+    if mi28_roles != (
+        "NORMAL",
+        "COLOR",
+        "COLOR",
+        "MASK",
+        "DETAIL",
+        "MASK",
+    ):
+        raise AssertionError("Verified MI28 Main roles are incorrect")
+    mi28_uv_maps = tuple(
+        blender_addon._surface_binding_uv_map(
+            mi28_main_surface,
+            binding,
+            role,
+        )
+        for binding, role in zip(mi28_main_bindings, mi28_roles)
+    )
+    if mi28_uv_maps != (
+        "UVMap",
+        "UV1",
+        "UV2",
+        "UV3",
+        "UVMap",
+        "UV1",
+    ):
+        raise AssertionError("Verified MI28 Main UV routing is incorrect")
+    if blender_addon._surface_binding_uv_scale(
+        mi28_main_surface,
+        mi28_main_bindings[5],
+    ) != (10.0, 10.0):
+        raise AssertionError("MI28 Main generic mask is not repeated by 10")
+
+    material = bpy.data.materials.new("BC2 Verified MI28 Main")
+    nodes, links, shader = blender_addon._material_nodes(material)
+    texture_nodes = []
+    for binding, role in zip(mi28_main_bindings, mi28_roles):
+        node = nodes.new("ShaderNodeTexImage")
+        node.name = f"t{binding.index}"
+        texture_nodes.append((binding, role, node))
+    if not blender_addon._configure_verified_surface_material(
+        material,
+        mi28_main_surface,
+        nodes,
+        links,
+        shader,
+        texture_nodes,
+    ):
+        raise AssertionError("Verified MI28 Main graph was not created")
+    if (
+        shader.inputs["Base Color"].links[0].from_node.name
+        != "BC2 MI28 main detail modulation"
+        or material.get("bc2_material_family") != "MI28 main"
+    ):
+        raise AssertionError("MI28 Main source color relationship is missing")
+
+    mi28_metal_surface = SurfaceShader(
+        "MainMetal",
+        (
+            "objects/vehicles/air/mi28/shaders/mainmetal/"
+            "2b16b6b2-602f-4eb8-942a-06465d70f59b"
+        ),
+        (
+            "Objects/Vehicles/Air/Mi28/Mi28_Mesh/"
+            "Objects/Vehicles/Air/Mi28/Shaders/MainMetal"
+        ),
+    )
+    mi28_metal_bindings = tuple(
+        ShaderTextureBinding(
+            binding.index + 1,
+            binding.path,
+            binding.parameters,
+        )
+        for binding in mi28_main_bindings
+    )
+    mi28_metal_roles = blender_addon._surface_binding_roles(
+        mi28_metal_surface,
+        mi28_metal_bindings,
+    )
+    mi28_metal_uv_maps = tuple(
+        blender_addon._surface_binding_uv_map(
+            mi28_metal_surface,
+            binding,
+            role,
+        )
+        for binding, role in zip(
+            mi28_metal_bindings,
+            mi28_metal_roles,
+        )
+    )
+    if (
+        mi28_metal_roles != mi28_roles
+        or mi28_metal_uv_maps != mi28_uv_maps
+        or blender_addon._surface_binding_uv_scale(
+            mi28_metal_surface,
+            mi28_metal_bindings[5],
+        )
+        != (10.0, 10.0)
+    ):
+        raise AssertionError(
+            "Verified MI28 MainMetal routing is incorrect"
+        )
+
     minigun_surface = SurfaceShader(
         "Minigun_Main",
         (
@@ -1612,6 +1761,36 @@ def _test_verified_vehicle_material_graphs():
         raise AssertionError("Verified glass graph has no opacity input")
     if shader.inputs["Transmission Weight"].default_value != 1.0:
         raise AssertionError("Verified glass graph is not transmissive")
+
+    mi28_glass_surface = SurfaceShader(
+        "Glass",
+        (
+            "objects/vehicles/air/mi28/shaders/glass/"
+            "1e88c644-f51a-42eb-a179-6d66d5893d9b"
+        ),
+        (
+            "Objects/Vehicles/Air/Mi28/Mi28_Mesh/"
+            "Objects/Vehicles/Air/Mi28/Shaders/Glass"
+        ),
+    )
+    material = bpy.data.materials.new("BC2 Verified MI28 Glass")
+    nodes, links, shader = blender_addon._material_nodes(material)
+    if not blender_addon._configure_verified_surface_material(
+        material,
+        mi28_glass_surface,
+        nodes,
+        links,
+        shader,
+        (),
+    ):
+        raise AssertionError("Verified MI28 glass graph was not created")
+    if (
+        material.get("bc2_material_family") != "MI28 glass"
+        or not shader.inputs["Alpha"].is_linked
+        or shader.inputs["Transmission Weight"].default_value != 1.0
+        or material.surface_render_method != "DITHERED"
+    ):
+        raise AssertionError("Verified MI28 glass graph is incomplete")
 
 
 def _test_character_material_graph():

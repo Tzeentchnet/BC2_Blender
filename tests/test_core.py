@@ -878,6 +878,103 @@ class MeshTests(unittest.TestCase):
         self.assertEqual(split[31].uv_offsets, (24, 28, 32, 40))
         self.assertEqual(len(split[31].additional_uvs), 2)
 
+    def test_pc_composite_stride_48_offset_32_layout_propagates(self):
+        metadata = bytearray(struct.pack("<IHB", 2, 0, 2))
+        definitions = (
+            ("multi_part", 0, 0, (31, 32)),
+            ("single_part", 3, 3 * 48, (12,)),
+        )
+        for name, index_offset, vertex_offset, palette in definitions:
+            metadata.extend(name.encode("ascii") + b"\0")
+            metadata.extend(
+                struct.pack(
+                    "<IIIIBBBBH",
+                    1,
+                    3,
+                    index_offset,
+                    vertex_offset,
+                    48,
+                    3,
+                    0,
+                    len(palette),
+                    len(palette),
+                )
+            )
+            metadata.extend(
+                struct.pack(f"<{len(palette)}H", *palette)
+            )
+
+        vertices = bytearray()
+        positions = (
+            (0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+        )
+        for subset_index, (_name, _indices, _vertices, palette) in enumerate(
+            definitions
+        ):
+            for index, position in enumerate(positions):
+                vertex = bytearray(48)
+                struct.pack_into("<eee", vertex, 0, *position)
+                struct.pack_into(
+                    "<ee",
+                    vertex,
+                    24,
+                    index / 2.0,
+                    subset_index / 2.0,
+                )
+                struct.pack_into(
+                    "<ee",
+                    vertex,
+                    28,
+                    index / 3.0,
+                    1.0 - index / 3.0,
+                )
+                part_index = (
+                    palette[index % len(palette)]
+                    if len(palette) > 1
+                    else palette[0]
+                )
+                vertex[32:36] = bytes((part_index,)) * 4
+                struct.pack_into(
+                    "<ee",
+                    vertex,
+                    36,
+                    0.25 + index / 4.0,
+                    0.5,
+                )
+                struct.pack_into(
+                    "<ee",
+                    vertex,
+                    40,
+                    0.75,
+                    index / 4.0,
+                )
+                vertices.extend(vertex)
+        indices = struct.pack("<6H", 0, 1, 2, 0, 1, 2)
+        metadata.extend(
+            struct.pack("<III", len(vertices), len(indices), 0)
+        )
+
+        multi_part, single_part = parse_meshdata(
+            bytes(metadata + vertices + indices),
+            "pc",
+            position_format="HALF",
+        ).subsets
+
+        self.assertEqual(multi_part.part_index_offset, 32)
+        self.assertEqual(multi_part.part_indices, (31, 32, 31))
+        self.assertEqual(multi_part.uv_offsets, (24, 28, 36, 40))
+        self.assertEqual(single_part.part_index_offset, None)
+        self.assertEqual(single_part.part_indices, (12, 12, 12))
+        self.assertEqual(single_part.uv_offsets, (24, 28, 36, 40))
+        self.assertAlmostEqual(single_part.uvs[2][0], 1.0, places=3)
+        self.assertAlmostEqual(
+            single_part.additional_uvs[1][2][1],
+            0.5,
+            places=3,
+        )
+
     def test_stride_48_uses_declared_uv_channels(self):
         metadata = bytearray(struct.pack("<IHB", 1, 0, 1))
         metadata.extend(b"surface\0")

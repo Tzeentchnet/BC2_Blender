@@ -113,6 +113,22 @@ usable Blender preview:
   offset cannot be inferred independently. Padding at byte 44 is not exposed
   as a coordinate layer. Which layer is a color UV remains shader-specific;
   for AH60 Main, byte 28 is the nondegenerate base-color channel.
+- The retail PC MI28 uses a distinct stride-48 composite declaration. Its
+  repeated part-ID field is at byte 32, between two packed coordinate inputs:
+
+  | Vertex input | Byte offset | Blender layer |
+  |---|---:|---|
+  | `v3.xy` | 24 | `UVMap` |
+  | `v3.zw` | 28 | `UV1` |
+  | `v5.xy` | 36 | `UV2` |
+  | `v5.zw` | 40 | `UV3` |
+
+  This layout is **verified on PC retail MI28 LOD0**. The importer propagates
+  the declaration identified by multi-part subsets to related one-part
+  subsets with the same stride, including `lod0_Windshields_Glass`, where a
+  repeated field cannot independently identify byte 32. The stored part
+  metadata remains unset for those one-part subsets; only declaration
+  selection is inherited.
 - The implemented little-endian type-1, palette-backed stride-48 skinned
   declaration exposes two half-float coordinate pairs:
 

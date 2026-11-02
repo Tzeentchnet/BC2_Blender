@@ -3499,6 +3499,11 @@ def _verified_surface_family(surface: SurfaceShader) -> str | None:
         "objects/vehicles/air/ah60/shaders/cockpitinterior": (
             "AH60_COCKPIT_INTERIOR"
         ),
+        "objects/vehicles/air/mi28/shaders/main": "MI28_MAIN",
+        "objects/vehicles/air/mi28/shaders/mainmetal": (
+            "MI28_MAIN_METAL"
+        ),
+        "objects/vehicles/air/mi28/shaders/glass": "MI28_GLASS",
         "objects/weapons/stationary/minigun/shaders/main": "MINIGUN_MAIN",
     }.get(partition)
 
@@ -3513,6 +3518,18 @@ def _surface_binding_roles(surface: SurfaceShader, bindings):
             3: "MASK",
             4: "DETAIL",
             5: "MASK",
+        }
+        for index, binding in enumerate(bindings):
+            roles[index] = verified_roles.get(binding.index, roles[index])
+    elif family in {"MI28_MAIN", "MI28_MAIN_METAL"}:
+        first_index = 1 if family == "MI28_MAIN" else 2
+        verified_roles = {
+            first_index: "NORMAL",
+            first_index + 1: "COLOR",
+            first_index + 2: "COLOR",
+            first_index + 3: "MASK",
+            first_index + 4: "DETAIL",
+            first_index + 5: "MASK",
         }
         for index, binding in enumerate(bindings):
             roles[index] = verified_roles.get(binding.index, roles[index])
@@ -3541,6 +3558,18 @@ def _surface_binding_uv_map(
             3: "UV3",
             4: "UVMap",
             5: "UV1",
+        }
+        if binding.index in verified_uv_maps:
+            return verified_uv_maps[binding.index]
+    if family in {"MI28_MAIN", "MI28_MAIN_METAL"}:
+        first_index = 1 if family == "MI28_MAIN" else 2
+        verified_uv_maps = {
+            first_index: "UVMap",
+            first_index + 1: "UV1",
+            first_index + 2: "UV2",
+            first_index + 3: "UV3",
+            first_index + 4: "UVMap",
+            first_index + 5: "UV1",
         }
         if binding.index in verified_uv_maps:
             return verified_uv_maps[binding.index]
@@ -3582,6 +3611,13 @@ def _surface_binding_uv_scale(
     family = _verified_surface_family(surface)
     if family == "AH60_MAIN" and binding.index == 5:
         return (15.0, 15.0)
+    if (
+        family == "MI28_MAIN"
+        and binding.index == 6
+        or family == "MI28_MAIN_METAL"
+        and binding.index == 7
+    ):
+        return (10.0, 10.0)
     if family == "MINIGUN_MAIN" and binding.index == 3:
         return (13.0, 13.0)
     return _verified_detail_repeat(binding)
@@ -4196,6 +4232,120 @@ def _binding_texture_node(texture_nodes, binding_index: int):
     )
 
 
+def _configure_verified_vehicle_main(
+    material,
+    nodes,
+    links,
+    shader,
+    texture_nodes,
+    *,
+    node_prefix: str,
+    family_label: str,
+    primary_index: int,
+    symbols_index: int,
+    dirt_index: int,
+    detail_index: int,
+    dirt_channel: str,
+    dirt_scale: float,
+    dirt_bias: float,
+    detail_factor: float,
+    detail_label: str,
+    lighting_repeat: float,
+    color_model: str,
+    evidence: str,
+) -> bool:
+    primary = _binding_texture_node(texture_nodes, primary_index)
+    if primary is None:
+        return False
+    color_output = primary.outputs["Color"]
+
+    symbols = _binding_texture_node(texture_nodes, symbols_index)
+    if symbols is not None:
+        symbols_mix = nodes.new("ShaderNodeMixRGB")
+        symbols_mix.name = f"BC2 {node_prefix} symbols"
+        symbols_mix.label = "Main color to symbols by alpha"
+        symbols_mix.blend_type = "MIX"
+        symbols_mix.location = (-20, 180)
+        links.new(symbols.outputs["Alpha"], symbols_mix.inputs["Fac"])
+        links.new(color_output, symbols_mix.inputs["Color1"])
+        links.new(symbols.outputs["Color"], symbols_mix.inputs["Color2"])
+        color_output = symbols_mix.outputs["Color"]
+
+    dirt = _binding_texture_node(texture_nodes, dirt_index)
+    if dirt is not None:
+        channels = nodes.new("ShaderNodeSeparateColor")
+        channels.name = f"BC2 {node_prefix} dirt channels"
+        channels.label = f"DirtMaskRGB {dirt_channel.casefold()}"
+        channels.location = (-220, -80)
+        links.new(dirt.outputs["Color"], channels.inputs["Color"])
+        dirt_scale_node = nodes.new("ShaderNodeMath")
+        dirt_scale_node.name = f"BC2 {node_prefix} dirt scale"
+        dirt_scale_node.label = (
+            f"Dirt {dirt_channel.casefold()} x {dirt_scale:g}"
+        )
+        dirt_scale_node.operation = "MULTIPLY"
+        dirt_scale_node.inputs[1].default_value = dirt_scale
+        links.new(
+            channels.outputs[dirt_channel],
+            dirt_scale_node.inputs[0],
+        )
+        dirt_bias_node = nodes.new("ShaderNodeMath")
+        dirt_bias_node.name = f"BC2 {node_prefix} dirt bias"
+        dirt_bias_node.label = f"Dirt term + {dirt_bias:g}"
+        dirt_bias_node.operation = "ADD"
+        dirt_bias_node.inputs[1].default_value = dirt_bias
+        links.new(dirt_scale_node.outputs[0], dirt_bias_node.inputs[0])
+        dirt_add = nodes.new("ShaderNodeMixRGB")
+        dirt_add.name = f"BC2 {node_prefix} dirt"
+        dirt_add.label = "Add source dirt term"
+        dirt_add.blend_type = "ADD"
+        dirt_add.inputs["Fac"].default_value = 1.0
+        links.new(color_output, dirt_add.inputs["Color1"])
+        links.new(dirt_bias_node.outputs[0], dirt_add.inputs["Color2"])
+        color_output = dirt_add.outputs["Color"]
+
+    detail = _binding_texture_node(texture_nodes, detail_index)
+    if detail is not None:
+        detail_double = nodes.new("ShaderNodeMixRGB")
+        detail_double.name = f"BC2 {node_prefix} detail double"
+        detail_double.label = detail_label
+        detail_double.blend_type = "MULTIPLY"
+        detail_double.inputs["Fac"].default_value = 1.0
+        detail_double.inputs["Color2"].default_value = (
+            2.0,
+            2.0,
+            2.0,
+            1.0,
+        )
+        links.new(detail.outputs["Color"], detail_double.inputs["Color1"])
+        detail_mix = nodes.new("ShaderNodeMixRGB")
+        detail_mix.name = f"BC2 {node_prefix} detail modulation"
+        detail_mix.label = (
+            f"Main x lerp(1, detail x 2, {detail_factor:g})"
+        )
+        detail_mix.blend_type = "MULTIPLY"
+        detail_mix.inputs["Fac"].default_value = detail_factor
+        links.new(color_output, detail_mix.inputs["Color1"])
+        links.new(
+            detail_double.outputs["Color"],
+            detail_mix.inputs["Color2"],
+        )
+        color_output = detail_mix.outputs["Color"]
+
+    links.new(color_output, shader.inputs["Base Color"])
+    material["bc2_material_family"] = family_label
+    material["bc2_color_model"] = color_model
+    material["bc2_lighting_mask_model"] = (
+        f"Msk_Generic retained at source UV x{lighting_repeat:g} for the "
+        "outdoor-light term, which remains Blender-native"
+    )
+    material["bc2_material_evidence"] = evidence
+    material["bc2_material_status"] = (
+        f"resolved verified {family_label} graph"
+    )
+    return True
+
+
 def _configure_verified_surface_material(
     material,
     surface: SurfaceShader,
@@ -4206,101 +4356,72 @@ def _configure_verified_surface_material(
 ) -> bool:
     family = _verified_surface_family(surface)
     if family == "AH60_MAIN":
-        primary = _binding_texture_node(texture_nodes, 1)
-        if primary is None:
-            return False
-        color_output = primary.outputs["Color"]
-
-        symbols = _binding_texture_node(texture_nodes, 2)
-        if symbols is not None:
-            symbols_mix = nodes.new("ShaderNodeMixRGB")
-            symbols_mix.name = "BC2 AH60 main symbols"
-            symbols_mix.label = "Main color to Symbols_Us by alpha"
-            symbols_mix.blend_type = "MIX"
-            symbols_mix.location = (-20, 180)
-            links.new(symbols.outputs["Alpha"], symbols_mix.inputs["Fac"])
-            links.new(color_output, symbols_mix.inputs["Color1"])
-            links.new(symbols.outputs["Color"], symbols_mix.inputs["Color2"])
-            color_output = symbols_mix.outputs["Color"]
-
-        dirt = _binding_texture_node(texture_nodes, 3)
-        if dirt is not None:
-            channels = nodes.new("ShaderNodeSeparateColor")
-            channels.name = "BC2 AH60 main dirt channels"
-            channels.label = "DirtMaskRGB blue"
-            channels.location = (-220, -80)
-            links.new(dirt.outputs["Color"], channels.inputs["Color"])
-            dirt_scale = nodes.new("ShaderNodeMath")
-            dirt_scale.name = "BC2 AH60 main dirt scale"
-            dirt_scale.label = "Dirt blue x 0.1"
-            dirt_scale.operation = "MULTIPLY"
-            dirt_scale.inputs[1].default_value = 0.1
-            links.new(channels.outputs["Blue"], dirt_scale.inputs[0])
-            dirt_bias = nodes.new("ShaderNodeMath")
-            dirt_bias.name = "BC2 AH60 main dirt bias"
-            dirt_bias.label = "Dirt term + 0.045"
-            dirt_bias.operation = "ADD"
-            dirt_bias.inputs[1].default_value = 0.045
-            links.new(dirt_scale.outputs[0], dirt_bias.inputs[0])
-            dirt_add = nodes.new("ShaderNodeMixRGB")
-            dirt_add.name = "BC2 AH60 main dirt"
-            dirt_add.label = "Add source dirt term"
-            dirt_add.blend_type = "ADD"
-            dirt_add.inputs["Fac"].default_value = 1.0
-            links.new(color_output, dirt_add.inputs["Color1"])
-            links.new(dirt_bias.outputs[0], dirt_add.inputs["Color2"])
-            color_output = dirt_add.outputs["Color"]
-
-        detail = _binding_texture_node(texture_nodes, 4)
-        if detail is not None:
-            detail_double = nodes.new("ShaderNodeMixRGB")
-            detail_double.name = "BC2 AH60 main detail double"
-            detail_double.label = "Ah60Blackhawk_D x 2"
-            detail_double.blend_type = "MULTIPLY"
-            detail_double.inputs["Fac"].default_value = 1.0
-            detail_double.inputs["Color2"].default_value = (
-                2.0,
-                2.0,
-                2.0,
-                1.0,
-            )
-            links.new(
-                detail.outputs["Color"],
-                detail_double.inputs["Color1"],
-            )
-            detail_mix = nodes.new("ShaderNodeMixRGB")
-            detail_mix.name = "BC2 AH60 main detail modulation"
-            detail_mix.label = "Main x lerp(1, detail x 2, 0.482)"
-            detail_mix.blend_type = "MULTIPLY"
-            detail_mix.inputs["Fac"].default_value = 0.482
-            links.new(color_output, detail_mix.inputs["Color1"])
-            links.new(
-                detail_double.outputs["Color"],
-                detail_mix.inputs["Color2"],
-            )
-            color_output = detail_mix.outputs["Color"]
-
-        links.new(color_output, shader.inputs["Base Color"])
-        material["bc2_material_family"] = "AH60 main"
-        material["bc2_color_model"] = (
-            "Ah60Blackhawk_C blended to Symbols_Us by alpha, "
-            "DirtMaskRGB blue x0.1 + 0.045, then Ah60Blackhawk_D "
-            "detail modulation x0.482"
+        return _configure_verified_vehicle_main(
+            material,
+            nodes,
+            links,
+            shader,
+            texture_nodes,
+            node_prefix="AH60 main",
+            family_label="AH60 main",
+            primary_index=1,
+            symbols_index=2,
+            dirt_index=3,
+            detail_index=4,
+            dirt_channel="Blue",
+            dirt_scale=0.1,
+            dirt_bias=0.045,
+            detail_factor=0.482,
+            detail_label="Ah60Blackhawk_D x 2",
+            lighting_repeat=15.0,
+            color_model=(
+                "Ah60Blackhawk_C blended to Symbols_Us by alpha, "
+                "DirtMaskRGB blue x0.1 + 0.045, then Ah60Blackhawk_D "
+                "detail modulation x0.482"
+            ),
+            evidence=(
+                "MP_004 vertex shaders 428/554/748/1310 and "
+                "pixel shaders 1229/1792"
+            ),
         )
-        material["bc2_lighting_mask_model"] = (
-            "Msk_Generic retained at source UV x15 for the outdoor-light "
-            "term, which remains Blender-native"
-        )
-        material["bc2_material_evidence"] = (
-            "MP_004 vertex shaders 428/554/748/1310 and "
-            "pixel shaders 1229/1792"
-        )
-        material["bc2_material_status"] = (
-            "resolved verified AH60 main graph"
-        )
-        return True
 
-    if family == "AH60_GLASS":
+    if family in {"MI28_MAIN", "MI28_MAIN_METAL"}:
+        main_metal = family == "MI28_MAIN_METAL"
+        first_index = 2 if main_metal else 1
+        family_label = "MI28 main metal" if main_metal else "MI28 main"
+        evidence = (
+            "MP_005 vertex shaders 17/91/406/1417 and "
+            "pixel shaders 513/762"
+            if main_metal
+            else "MP_005 vertex shaders 751/1049 and pixel shaders 3/1454"
+        )
+        return _configure_verified_vehicle_main(
+            material,
+            nodes,
+            links,
+            shader,
+            texture_nodes,
+            node_prefix=family_label,
+            family_label=family_label,
+            primary_index=first_index + 1,
+            symbols_index=first_index + 2,
+            dirt_index=first_index + 3,
+            detail_index=first_index + 4,
+            dirt_channel="Red",
+            dirt_scale=0.3,
+            dirt_bias=0.045,
+            detail_factor=0.725,
+            detail_label="Mi28Havoc_D x 2",
+            lighting_repeat=10.0,
+            color_model=(
+                "Mi28Havoc_C blended to Symbols_Rus by alpha, "
+                "DirtMaskRGB red x0.3 + 0.045, then Mi28Havoc_D "
+                "detail modulation x0.725"
+            ),
+            evidence=evidence,
+        )
+
+    if family in {"AH60_GLASS", "MI28_GLASS"}:
         material.diffuse_color = (0.06, 0.08, 0.10, 0.2)
         shader.inputs["Base Color"].default_value = (
             0.06,
@@ -4340,17 +4461,29 @@ def _configure_verified_surface_material(
             opacity = add.outputs[0]
         links.new(opacity, shader.inputs["Alpha"])
         material.surface_render_method = "DITHERED"
-        material["bc2_material_family"] = "AH60 glass"
-        material["bc2_color_model"] = (
-            "transparent reflective glass with Fresnel plus "
-            "DirtMaskRGB red opacity"
-        )
-        material["bc2_material_evidence"] = (
-            "MP_004 pixel shaders 978, 1135, and 2110"
-        )
-        material["bc2_material_status"] = (
-            "resolved verified AH60 glass graph"
-        )
+        if family == "MI28_GLASS":
+            material["bc2_material_family"] = "MI28 glass"
+            material["bc2_color_model"] = (
+                "transparent reflective glass with view-angle opacity"
+            )
+            material["bc2_material_evidence"] = (
+                "MP_005 pixel shaders 1221, 1346, and 1655"
+            )
+            material["bc2_material_status"] = (
+                "resolved verified MI28 glass graph"
+            )
+        else:
+            material["bc2_material_family"] = "AH60 glass"
+            material["bc2_color_model"] = (
+                "transparent reflective glass with Fresnel plus "
+                "DirtMaskRGB red opacity"
+            )
+            material["bc2_material_evidence"] = (
+                "MP_004 pixel shaders 978, 1135, and 2110"
+            )
+            material["bc2_material_status"] = (
+                "resolved verified AH60 glass graph"
+            )
         return True
 
     if family in {"AH60_INTERIOR", "AH60_COCKPIT_INTERIOR"}:

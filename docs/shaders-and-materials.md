@@ -453,6 +453,38 @@ opacity. These graphs preserve the exact source texture roles, UV channels,
 repeat factor, and immediate constants; Frostbite's outdoor-light buffers and
 reflection environment remain Blender-native approximations.
 
+### Verified MI28 Main, MainMetal, and glass graphs
+
+The PC retail MI28 in `MP_005` uses the byte-32 part-selector declaration
+documented in the mesh notes. Main vertex shaders `751` and `1049` forward the
+packed byte-24/28 input to pixel `v8` and byte-36/40 input to pixel `v9`.
+Pixel shader `3` samples:
+
+| Binding | Texture | Coordinate |
+|---:|---|---|
+| `t1` | `Mi28Havoc_N` | byte-24 `UVMap` |
+| `t2` | `Mi28Havoc_C` | byte-28 `UV1` |
+| `t3` | `Symbols_Rus` | byte-36 `UV2` |
+| `t4` | `DirtMaskRGB` | byte-40 `UV3` |
+| `t5` | `Mi28Havoc_D` | byte-24 `UVMap` |
+| `t6` | `Msk_Generic` | byte-28 `UV1` repeated 10x |
+
+MainMetal pixel shaders `513` and `762` use the same effective routes with
+bindings shifted to `t2` through `t7`. **Implemented from verified shader
+evidence**, the Blender graph blends the base color to Russian symbols by
+symbol alpha, adds dirt red times `0.3` plus `0.045`, then applies
+`Mi28Havoc_D` modulation with factor `0.725`. The generic mask remains at its
+verified coordinate and scale while its outdoor-light interaction remains
+Blender-native.
+
+MI28 Glass has no material texture binding. Pixel shader `1221` computes a
+cubic view-angle opacity; lit permutations `1346` and `1655` multiply the
+same opacity into reflected-light output. The Blender graph therefore uses
+Principled transmission and Fresnel-driven alpha without inventing a color
+texture. This is a recoverable appearance approximation: Frostbite's
+distance-fade factor, reflection environment, and exact cubic response are not
+reconstructed.
+
 ### Verified representative map families
 
 FXC disassembly of retail `MP_001` permutations established these patterns:

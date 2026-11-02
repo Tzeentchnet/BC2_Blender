@@ -255,7 +255,9 @@ content are no longer mirrored. Sparse shader-set overrides are merged over
 mesh defaults; this restores the complete default SmallFactory surface set
 while retaining its intended metal substitutions. The distinct retail PC
 stride-48 composite declaration used by AH60 retains four shader-coordinate
-pairs at offsets 24, 28, 32, and 40.
+pairs at offsets 24, 28, 32, and 40. The MI28 uses another stride-48
+composite declaration: its repeated part selector is at byte 32 and its four
+shader-coordinate pairs are at 24, 28, 36, and 40.
 
 The `MP_001` physical-material map is decoded to a file-backed L8 image and
 drives source grass, dirt, tarmac, gravel, stone, seabed, and default-ground
@@ -311,6 +313,16 @@ Dedicated graphs also drive transmissive dirty glass, the dark
 interior/cockpit diffuse scales, and the minigun's symbol color, repeated
 generic mask, and green-channel specular control. No vehicle rig, runtime
 pivot, or parent hierarchy is fabricated.
+
+The validated MI28 vehicle assembly creates 24 source-part collections and 44
+surface fragments totaling 21,032 imported triangles. Its LOD0 MeshData uses
+the byte-32 composite part selector and exposes byte 24/28/36/40 as
+`UVMap`/`UV1`/`UV2`/`UV3`. Retail `MP_005` shader disassembly routes the main
+normal/detail through `UVMap`, color and the 10x generic mask through `UV1`,
+Russian symbols through `UV2`, and dirt through `UV3`. Main and MainMetal
+receive their recovered color graphs. The textureless
+`06_lod0_Windshields_Glass` surface receives a transmissive view-angle glass
+graph rather than an opaque fallback.
 
 ## Cache behavior
 
@@ -544,3 +556,17 @@ translations, authored WingLeft LOD0 topology, its four declared coordinate
 layers, verified Main/glass/interior/minigun graphs, source-backed materials
 and images, assembly metadata, and save/reopen persistence without introducing
 an unverified vehicle armature.
+
+The equivalent MI28 UV and glass integration check is:
+
+```powershell
+blender --background --factory-startup `
+  --python tests\blender_mi28_integration.py -- `
+  --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
+  --output <OUTPUT_BLEND>
+```
+
+It verifies 24 source parts, 44 surface fragments, 21,032 imported triangles,
+the byte-32 part selector and 24/28/36/40 coordinate layout across all ten
+LOD0 subsets, shader-verified Main/MainMetal texture routing, the 36-vertex
+transmissive windshield, and save/reopen persistence.
