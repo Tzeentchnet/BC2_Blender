@@ -28,17 +28,18 @@ the browser is not necessarily decoded.
 | `GrannyModel` | Animation | PC little-endian skeleton converted to a native armature |
 | `GrannyAnimation` | Animation | PC transform tracks converted to a Blender 5.2 Action on the matching armature |
 
-The texture dispatcher also recognizes `Ps3Texture`, but PS3 disc media and
-texture variants were not part of this validation effort. It must not be
-advertised as verified support.
+Several parsers contain PS3-oriented recognition paths: big-endian MeshData,
+composite-part, WaterMesh, TerrainHeightfield, TerrainMaterialMap, and texture
+header handling, plus the `Ps3Texture` type. PS3 disc access, storage variants,
+and end-to-end Blender imports have not been validated because the maintainer
+does not own the PS3 release. Recognition must not be advertised as verified
+PS3 support.
 
-Later BF3/BF4 MaxScripts use object type 1 for skinned meshes and add a
-separate object-type-2 vehicle-part path. BC2 retail investigation now
-independently verifies this high-level separation, but not the later scripts'
-numeric offsets or layouts. BC2 part IDs, shared index rebasing, and ordered
-LOD names are documented in [Meshes](meshes.md). The scripts provide no
-type-4 tree semantics or evidence for other catalog types. See the
-[external MaxScript audit](../maxscript-reference-audit.md).
+BC2 retail investigation independently verifies the high-level separation
+between type-1 skinning and type-2 vehicle-part membership. BC2 part IDs,
+shared-index rebasing, ordered LOD names, and the remaining declaration
+boundaries are documented in [Meshes](meshes.md). Type-4 tree runtime
+semantics and most other catalog types remain unverified.
 
 High-level DBX assembly dispatch is intentionally deterministic. Selecting the
 soldier or vehicle entity imports its full linked assembly. A direct

@@ -108,13 +108,7 @@ reference graph.
 
 See [`catalog.py`](../../bc2_frostbite_importer/core/catalog.py).
 
-## External-reference coverage
-
-The audited BF3/BF4 MaxScripts start from already extracted `.mesh`, `.chunk`,
-or text-dump files. They contain no FbRB signature, metadata, compression,
-entry, deletion, or string-table handling. They neither confirm nor conflict
-with this archive implementation. See the
-[external MaxScript audit](../maxscript-reference-audit.md).
+## Cross-tool evidence
 
 The separately audited Frostbite 1 packer does write FbRB archives.
 **Verified (synthetic)** output was readable in both raw- and gzip-payload
@@ -128,7 +122,7 @@ One **Verified (PC retail)** `MP_001` archive also used metadata word `2`,
 flag `0x10000` for every active entry, equal size fields, contiguous active
 ranges, and zero-byte deleted records. That agreement is sample-specific and
 does not establish other archives, builds, or Xbox 360 output. See the
-[external writer audit](../external-writer-reference-audit.md).
+[FbRB rebuilding evidence](../import-export-design.md#fbrb-rebuilding-evidence).
 
 ## Writer requirements
 

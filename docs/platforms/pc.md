@@ -119,15 +119,6 @@ Observed conventions, not universal guarantees:
 - PC and Xbox versions of the tested MedKit geometry matched after byte-order
   handling.
 
-## External-reference coverage
-
-The audited BF3/BF4 MaxScripts use little-endian loose `.mesh`/`.chunk` files
-or text dumps. They do not read ISO9660, Windows Installer tables, cabinets, or
-FbRB archives and therefore add no evidence to the PC container chain. Their
-different BF3/BF4 mesh offsets are a warning against transferring later-engine
-layouts to BC2. See the
-[external MaxScript audit](../maxscript-reference-audit.md).
-
 ## Export implications
 
 Replacing a PC resource in place is not just an FbRB write:

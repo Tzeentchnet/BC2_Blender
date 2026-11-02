@@ -224,17 +224,18 @@ the complete `MP_001` foundation in about 5.5 seconds on the tested machine.
 Cold cabinet extraction, payload materialization, and texture conversion add
 source- and hardware-dependent time.
 
-## External script comparison
+## DCC conversion performance boundary
 
-The audited BF3/BF4 MaxScripts repeatedly seek to each declared field for each
-vertex and then assign mesh, UV, weight, and material data through per-element
-3ds Max calls. That code is useful for understanding declaration semantics,
-but it is not a performance model for Blender.
+Declaration-driven decoding does not require repeated seeks for every field of
+every vertex or per-element DCC API calls. A bounded implementation should:
 
-A declaration-driven BC2 decoder should still resolve each field offset once,
-validate the complete buffer, and decode contiguous arrays in bounded batches.
-The existing NumPy/RNA bulk boundary remains appropriate. See the
-[external MaxScript audit](maxscript-reference-audit.md).
+1. resolve each declaration field offset once;
+2. validate the complete vertex/index buffer before decoding;
+3. decode contiguous arrays in bounded batches;
+4. cross the Blender RNA boundary with bulk transfers where possible.
+
+The existing NumPy/RNA boundary follows these principles while retaining a
+pure-Python path for exact comparison.
 
 ## Remaining candidates
 

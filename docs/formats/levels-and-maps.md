@@ -17,12 +17,9 @@ visual foundation:
 Dynamic game logic, effects, weather, collision, AI, destruction state, audio,
 and runtime culling are not reconstructed as Blender scene behavior.
 
-The external BF3/BF4 MaxScripts do not parse a level DBX graph, placement
-matrix, compact group, blueprint, or instance record. Their optional
-object-type-2 mesh detachment does not establish BC2 placement or instancing
-semantics. Composite membership is now independently verified from BC2 retail
-data, but it remains mesh-local. See the
-[external MaxScript audit](../maxscript-reference-audit.md).
+Composite membership is independently verified from BC2 retail data, but it
+remains mesh-local. It does not establish a level placement matrix, compact
+group, blueprint, instance record, runtime parent, or pivot.
 
 ## Modular entity assembly versus map placement
 

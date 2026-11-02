@@ -396,22 +396,21 @@ core rifle locomotion Actions. The Japanese `combat_pose` is **verified** as a
 static 46-track pose referenced by level and cutscene trees, not by the regular
 soldier's bounded graph, so it is not automatically included.
 
-## MaxScript skeleton cross-check
+## Skeleton and DCC interoperability principles
 
-The three audited character bone-maker scripts consume pre-generated text
-arrays named `Hierarchy`, `BoneNames`, and `ModelPose`. They corroborate the
-general model of indexed parents, named bones, a root sentinel, and linear
-transforms containing right/up/forward basis vectors plus translation.
+A portable skeleton representation preserves named bones, indexed parent
+relationships, a root sentinel, source order, and complete linear transforms
+with basis vectors and translation. DCC conversion must not replace those
+records with aimed helper bones, hard-code a bone count, apply an empirical
+scale or rotation, or discard inverse binds and scale/shear.
 
-They are not Granny decoders. Bone counts are hard-coded, full matrices and
-scale/shear are not assigned, inverse binds are ignored, and an empirical
-scale of 39 is used. The BF4 variant also rotates a scene `Reference` object
-90 degrees around X. The two vehicle readers are byte-identical and create
-unnamed, unparented helpers from linear transforms. None reads animation
-sections, relocations, curve codecs, key times, or root motion.
+Translation-only helper transforms are not evidence of a vehicle hierarchy,
+pivot model, or animation rig. Likewise, a model-pose text view is not a
+Granny decoder and provides no section, relocation, curve-codec, timing, root
+motion, or animated scale/shear information.
 
 The retail inverse-bind and pose-matrix invariants remain the authoritative BC2
-validation. See the [external MaxScript audit](../maxscript-reference-audit.md).
+validation.
 
 ## Validation sample
 

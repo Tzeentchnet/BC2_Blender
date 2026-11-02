@@ -9,6 +9,11 @@ behavior implemented in this repository. Frostbite 1 games and builds can
 differ. Do not assume that an observed field is universal without testing more
 samples.
 
+Using the Blender extension? Start with the
+[detailed usage and validation guide](user-guide.md) for the full workflow,
+settings, support matrix, cache behavior, limitations, and contributor
+commands.
+
 ## Confidence labels
 
 The documents use these terms deliberately:
@@ -34,10 +39,8 @@ The documents use these terms deliberately:
 | TerrainHeightfield, TerrainMaterialMap, binary DBX grammar, and semantic support boundaries | [Terrain and DBX](formats/terrain-and-dbx.md) |
 | Level graphs, transforms, instancing, and building destruction research | [Levels and complete maps](formats/levels-and-maps.md) |
 | Shader database findings and normal decoding | [Shaders and materials](shaders-and-materials.md) |
-| BF3/BF4 MaxScript evidence and applicability limits | [External MaxScript reference audit](maxscript-reference-audit.md) |
-| BC2-oriented external writers and export constraints | [External writer reference audit](external-writer-reference-audit.md) |
 | NumPy acceleration and native Blender image loading | [Import performance](import-performance.md) |
-| Safe importer/exporter architecture | [Import and export design](import-export-design.md) |
+| Import/export architecture, external writer evidence, and round-trip constraints | [Import and export design](import-export-design.md) |
 | Evidence, test coverage, and open questions | [Validation and unknowns](validation-and-unknowns.md) |
 
 ## Data path
@@ -90,9 +93,10 @@ resources, and converted DDS files are disposable derivatives.
    retail sample.
 7. Never commit disc images, extracted game assets, shader bytecode, or other
    copyrighted payloads to this repository.
-8. Treat later-Frostbite tools as corroborating references only. Record which
+8. Treat cross-version tools as corroborating references only. Record which
    principles transfer, which findings are heuristic, and which versioned
    offsets or DCC choices are unsafe for BC2. Treat BC2-oriented external
-   writers the same way until no-edit and in-game validation succeeds. See the
-   [MaxScript audit](maxscript-reference-audit.md) and
-   [writer audit](external-writer-reference-audit.md).
+   writers the same way until no-edit and in-game validation succeeds. See
+   [Meshes](formats/meshes.md#declaration-and-dcc-interoperability-principles)
+   and the
+   [import/export design](import-export-design.md#external-writer-evidence).

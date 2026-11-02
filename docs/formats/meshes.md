@@ -349,41 +349,32 @@ composite coordinate fields are topology-resolved as described above, but
 that preview heuristic is not a complete vertex-layout specification and is
 not exporter-safe.
 
-### MaxScript cross-check
+### Declaration and DCC interoperability principles
 
-The BF3 and BF4 MaxScript importers in the supplied external reference set are
-for later Frostbite revisions, so their numeric layout identifiers are not
-copied into the Frostbite 1 parser. BF3 and BF4 use different header offsets
-and submesh record sizes, directly demonstrating that those values are
-version-specific. They nevertheless confirm useful format rules:
+Cross-version import research supports several implementation-agnostic rules,
+but it does not supply BC2 numeric identifiers or offsets:
 
-- vertex-element offsets come from the mesh declaration, not from stride-only
-  guesses;
-- `Vert_Diffuse_UV` (`1570`) and `Vert_Normals_UV` (`1569`) are distinct
-  half-float-pair semantics, while tangents, binormals, and unknown fields
-  have separate identifiers;
-- both recognized UV channels receive an explicit V flip when converted to
-  the DCC coordinate convention.
-- tangents and binormals are separate declared half-float vectors;
-- type-1 vertices carry four local byte indices and four byte weights divided
-  by 255, while a submesh palette maps local slots to global skeleton bones;
-- the BF3 v4.1 revision gates skinning on object type 1, matching the current
-  parser's need to isolate type-1 declarations from other palette-bearing
-  meshes.
+- locate vertex fields through a decoded declaration whenever one is
+  available instead of inferring them from stride alone;
+- preserve full- and half-float position encodings explicitly;
+- retain each declared coordinate channel independently and apply a
+  DirectX-to-DCC V conversion exactly once;
+- keep tangent-frame and unknown fields separate from texture coordinates;
+- for skinned type-1 subsets, treat four byte indices as local palette slots,
+  map those slots to global skeleton bones, and normalize four byte weights by
+  255;
+- do not infer skinning merely because a palette-like field exists; rigid
+  type-2 part membership is a separate model.
 
-BF3 v4.1 also groups object-type-2 vertices by their four-byte index tuple and
-offers to detach them as vehicle parts. That remains non-authoritative for
-BC2, but the independently verified retail rules above now corroborate its
-high-level distinction between type-1 skinning and type-2 part membership.
-The later script still does not provide BC2 offsets, global index rebasing,
-ordered part names, hierarchy, bind-transform records, or pivots.
+These principles are format-design guidance, not proof that declarations,
+offsets, or object-type meanings transfer between Frostbite revisions. The
+BC2 retail samples, shader input declarations, shared-index rebasing, ordered
+part names, and bind records documented above remain authoritative.
 
-The scripts build simple `_d`, `_s`, and `_n` standard materials and do not
-decode Frostbite 1 shader-database layer arithmetic. Their scale of 39 and the
-BF4-only 90-degree X rotation are DCC choices, not BC2 unit or axis evidence.
-They support semantic-driven decoding but are not authoritative for BC2
-layouts, character materials, or transforms. See the complete
-[external MaxScript audit](../maxscript-reference-audit.md).
+DCC scale and axis changes are conversion policy, not source-format facts.
+They must be derived from BC2 placement, terrain, skeleton, and animation
+invariants. Filename-based standard materials likewise cannot replace the
+source shader and material graph.
 
 Retail shader declarations correct the earlier offset-24 interpretation for
 `Objects/Objects/GasSilo/GasSilo` and
@@ -577,7 +568,7 @@ destruction systems. See [Levels and complete maps](levels-and-maps.md).
 ## Native writer cross-check
 
 The supplied BC2-oriented C++ tool includes a PC-style FBX-to-MeshData and
-mesh-set writer. Unlike the later-engine MaxScripts, it corroborates several
+mesh-set writer. Unlike later-engine import-only references, it corroborates several
 Frostbite 1 structures directly:
 
 - four count-prefixed byte arrays between subset metadata and geometry sizes;
@@ -604,7 +595,7 @@ forces tangent/default signs, and replaces composite rotations with identity.
 It also maps FBX control points to output vertices while selecting UVs and
 normals from one polygon corner, so loop-specific seams require a separate
 vertex-expansion pass. See the
-[external writer audit](../external-writer-reference-audit.md).
+[PC mesh writer evidence](../import-export-design.md#pc-mesh-writer-evidence).
 
 ## Writer requirements
 

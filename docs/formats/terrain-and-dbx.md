@@ -462,19 +462,12 @@ vehicle, animation-tree, mesh-descriptor, and level DBX documents; the terrain
 decal inventory also includes Xbox evidence. This is broad semantic evidence,
 not full DBX type coverage or a cross-game binary specification.
 
-## External-reference coverage
-
-The audited MaxScripts contain no TerrainHeightfield, TerrainMaterialMap, or
-binary DBX parser. Their bone tools consume an already generated text dump and
-search for labels such as `LinearTransform`; that confirms only human-readable
-field naming in the dump, not DBX byte layout, numeric-array encoding, or level
-graph semantics. No terrain or DBX behavior changed from this evidence. See
-the [external MaxScript audit](../maxscript-reference-audit.md).
+## Cross-tool evidence
 
 The external DBX converter understands similar string-table, LEB128, and
 numeric-array concepts, but rebuilds scalar types and strings heuristically.
 Its failures and the raw-preserving adaptation requirements are recorded in
-the [external writer audit](../external-writer-reference-audit.md).
+the [DBX writing evidence](../import-export-design.md#dbx-writing-evidence).
 
 See [`dbx.py`](../../bc2_frostbite_importer/core/dbx.py) and
 [Levels and complete maps](levels-and-maps.md).

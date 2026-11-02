@@ -1,9 +1,27 @@
 # Validation and unknowns
 
+## Audit status
+
+This document was audited on 2026-11-02 against the current implementation,
+the complete test inventory, and the named integration-runner assertions.
+
+- `python -m compileall -q bc2_frostbite_importer` completed successfully.
+- All 66 dependency-free tests in `tests/test_core.py` passed.
+- The Blender smoke test and optional retail-media integrations were reviewed
+  but not rerun during this documentation audit. Their results below remain
+  recorded evidence from the named Blender 5.2/5.2.2 runs, not results inferred
+  from the unit suite.
+
+Synthetic regression coverage, Blender-hosted validation, recorded retail-media
+observations, implemented preview policy, heuristics, and unknowns are kept
+separate below. Passing a parser test does not upgrade a preview heuristic into
+an exporter-safe format claim.
+
 ## Real-media observations
 
-The implementation has been exercised against supplied PC and Xbox 360 retail
-images.
+The implementation has been exercised read-only against supplied PC and Xbox
+360 retail images. The measurements in this section are recorded outputs from
+those bounded runs; the dependency-free unit suite does not recreate them.
 
 ### Xbox catalog
 
@@ -376,10 +394,12 @@ silently assigned an unrelated default texture.
   `2.5e-7` Blender units and maximum sampled source-to-Blender pose-matrix
   error below `3.8e-6`.
 
-The earlier individual-asset examples were reopened without extraction caches
-in Blender 5.2.2 LTS, confirming that their required images were packed and
-those scenes were self-contained. The complete-map workflow intentionally
-keeps its much larger DDS set file-backed for performance.
+A separate manual Blender 5.2.2 LTS check packed the images used by the earlier
+individual-asset examples, removed their extraction caches, and reopened the
+scenes successfully. The current integration runners verify save/reopen with
+file-backed images; they do not repeat that cache-removal check. The
+complete-map workflow intentionally keeps its much larger DDS set file-backed
+for performance unless `--pack-images` is requested.
 
 ## Automated regression coverage
 
@@ -389,6 +409,9 @@ Run:
 python -m compileall -q bc2_frostbite_importer
 python -m unittest discover -s tests -v
 ```
+
+The 2026-11-02 audit ran both commands successfully; `unittest` reported 66
+passing tests.
 
 Current tests cover:
 
@@ -401,6 +424,11 @@ Current tests cover:
   transforms, and compact lossless per-part splitting;
 - character `Meshes3p` and vehicle composite-mesh DBX assembly resolution,
   including health-state and low-/high-RPM model classification;
+- explicit character animation-tree clip lists, separation of
+  character-specific and shared trees, and the bounded shared rifle base-set
+  selection;
+- deterministic same-name vehicle-entity promotion and preservation of
+  repeated `TrackComponentData` instances with distinct transforms;
 - object-level default hiding for geometry with at least two `Wreck`
   occurrences in one name while preserving single-`Wreck` geometry and
   collections;
@@ -432,11 +460,13 @@ Current tests cover:
 - source-fingerprinted shader material-key indexing, foreign-key invalidation,
   exact/cheap/unique-full-partition matching, and declaration-aware material
   cache separation;
+- selective shader parsing and exclusion of already indexed nonmatching
+  databases;
 - the declared four-channel little-endian stride-64 skinned coordinate layout
   including constant declared channels, plus nondegenerate routing for
   LegStandard, MOLLE, and pouches;
-- bounded PC Granny wrapper, section, relocation, skeleton, constant-curve,
-  and degree-3 `D3I1K32fC32f` fixtures;
+- bounded PC Granny wrapper, section, relocation, skeleton, additive bone-index,
+  constant-curve, quadratic-boundary, and degree-3 `D3I1K32fC32f` fixtures;
 - PC L8-to-DDS conversion;
 - generated L8 DDS output for decoded material-index images;
 - Xbox tiled L8 conversion;
@@ -452,10 +482,16 @@ Current tests cover:
 - Frostbite placement translation and basis conversion;
 - case-insensitive virtual-path deduplication for heightfields indexed from
   more than one archive copy;
+- complete PC level-pair discovery and targeted map-object archive selection
+  without terrain;
 - compact-group spawn/Havok enumeration validation;
 - synthetic DX11 shader material, texture binding, and `RDEF` resource-name
   parsing;
 - exact case-insensitive catalog lookup and path-based reads;
+- combined content-group, resource-type, and text filtering, duplicate-path
+  collapsing, and LOD-variant hiding before pagination;
+- full and targeted archive indexing, per-archive failure recording, and
+  cancellation between archives;
 - one-time materialization and direct reuse of compressed FbRB payloads;
 - synthetic XDVDFS -> FbRB -> MeshData end-to-end import.
 
@@ -500,6 +536,11 @@ retain their modular path, descriptorless PC rigid resources retain neutral
 geometry with a warning, console rigid resources remain geometry-only with a
 PC-support warning, and direct `MeshData` does not guess an owner.
 
+Related-animation smoke coverage verifies exact-folder discovery, explicit
+animation-tree clip lists, additive-base composition metadata, deduplication,
+the separate shared-gameplay option, and warnings when unindexed archives make
+discovery incomplete.
+
 An optional real-media integration runner performs a complete import, saves the
 blend, reopens it, and checks placement count, linked mesh count, exact child
 collection counts, terrain contact and water bounds, plausible placement
@@ -541,6 +582,41 @@ blender --background --factory-startup `
   --output <OUTPUT_BLEND>
 ```
 
+The Raven runner targets `sp_common` and `sp_003_B`, imports the 17-bone
+Raven, verifies its two retained UV layers, checks all six exact-skeleton
+Actions and authored scale metadata, and reopens the saved scene:
+
+```powershell
+blender --background --factory-startup `
+  --python tests\blender_raven_integration.py -- `
+  --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
+  --output <OUTPUT_BLEND>
+```
+
+The Scout runner verifies the 147-bone `ske01` armature, all 11 skinned
+subsets, two exact-folder Actions, four facial deltas baked over the authored
+`FacePose`, eight explicitly selected shared rifle Actions, and persistence of
+all 14 Actions:
+
+```powershell
+blender --background --factory-startup `
+  --python tests\blender_scout_integration.py -- `
+  --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
+  --output <OUTPUT_BLEND>
+```
+
+The Japanese infantry runner verifies the equivalent 14-Action explicit graph,
+eight skinned subsets, additive facial composition against the Japanese
+`FacePose`, eye/lid displacement bounds, the corrected `WalkBackward`
+quadratic endpoint, and save/reopen persistence:
+
+```powershell
+blender --background --factory-startup `
+  --python tests\blender_jap_infantry_integration.py -- `
+  --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
+  --output <OUTPUT_BLEND>
+```
+
 The PC direct prop-material runner imports and reopens seven rigid/tree mesh
 sets across cutscene, building, weapon, wire, and vegetation families. It
 checks source-surface assignment, shader-database provenance, file-backed
@@ -574,6 +650,18 @@ validates save/reopen persistence:
 ```powershell
 blender --background --factory-startup `
   --python tests\blender_vehicle_integration.py -- `
+  --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
+  --output <OUTPUT_BLEND>
+```
+
+The tracked-vehicle runner verifies repeated source components on BMD3, M1A2,
+and T90; imports and reopens independently transformed BMD3 and T90 track
+instances with source-backed local armatures; checks direct `T90_Mesh.res`
+promotion; and confirms that `T90Tracks_Mesh.res` remains focused:
+
+```powershell
+blender --background --factory-startup `
+  --python tests\blender_vehicle_track_integration.py -- `
   --iso <PC_ISO> --cache <CACHE_DIRECTORY> `
   --output <OUTPUT_BLEND>
 ```
@@ -618,24 +706,31 @@ blender --background --factory-startup `
   --output <OUTPUT_JSON>
 ```
 
-## External-reference validation
+## Cross-version evidence boundary
 
-All eight supplied BF3/BF4 MaxScripts were reviewed against every current
-import path. They corroborate declaration-driven mesh attributes, separate UV
-semantics and tangent-frame fields, explicit V conversion, subset-local skin
-palettes, and four byte indices/weights. The BF3 v4.1 change that limits
-skinning to object type 1 also supports the importer's type-1 gate.
+Import-only references from later Frostbite revisions corroborate general
+principles: declaration-driven attributes, independent coordinate and
+tangent-frame fields, one explicit V conversion, subset-local skin palettes,
+and four byte indices/weights. These are secondary design constraints, not BC2
+numeric-layout evidence.
 
-These findings are secondary evidence only. The scripts provide no BC2 retail
-fixture, binary round trip, or coverage for discs, FbRB, Xbox texture storage,
-terrain, DBX level graphs, shader arithmetic, Granny animation, or export.
-Their type-2 vehicle-part detachment supplied a research lead only; subsequent
-BC2 retail correlation independently verified global part IDs, shared index
-rebasing, and ordered LOD0 names. The MaxScripts did not validate BC2 offsets,
-bind transforms, pivots, or hierarchy. Separate BC2 mesh-set research has now
-decoded the 18-float LOD0 bounds/bind-transform record. The full source
-inventory, hashes, and applicability matrix are in the
-[external MaxScript audit](maxscript-reference-audit.md).
+They provide no BC2 retail fixture, binary round trip, or validation for disc
+containers, FbRB, Xbox texture storage, terrain, binary DBX level graphs,
+shader arithmetic, Granny animation, or export. BC2 retail correlation
+independently established global type-2 part IDs, shared-index rebasing,
+ordered LOD0 names, and the 18-float bounds/bind-transform record. It still
+does not establish runtime pivots, hierarchy, or state animation.
+
+The reusable cross-version principles are recorded with their owning topics in
+[Meshes](formats/meshes.md#declaration-and-dcc-interoperability-principles),
+[Granny characters and animation](formats/granny-animation.md#skeleton-and-dcc-interoperability-principles),
+[Shaders and materials](shaders-and-materials.md#material-interoperability-boundary),
+and [Import performance](import-performance.md#dcc-conversion-performance-boundary).
+
+The separate Frostbite 1 archive, DBX, and PC mesh writer review produced
+synthetic no-edit failure evidence and preservation requirements, not supported
+export behavior. Those findings now live with the phased writer design in
+[Import and export design](import-export-design.md#external-writer-evidence).
 
 ## Known heuristics
 
@@ -652,6 +747,10 @@ These behaviors are useful but need broader format research:
   Raven v7 samples.
 - PC additive animation wrapper semantics outside the four verified
   `ske01` facial-delta samples.
+- Related-animation discovery outside exact folders and explicitly linked
+  character/shared trees. The current bounded selection and 64-clip safety
+  limit are implemented preview policy, not reconstruction of the runtime
+  state machine.
 - Mesh-set-to-MeshData resolution by path.
 - Composite runtime pivots, general parent hierarchy, automatic state
   switching, and animation. Type-2 membership, ordered LOD0 names, bounds, and
@@ -682,9 +781,18 @@ naive alternative choose incorrectly.
   semantics for topology-resolved composite coordinate layouts.
 - Complete shader arithmetic, constants, swizzles, UV sources, and all texture
   semantics.
+- Xbox whole-map assembly and source-backed console mesh-set materials,
+  skeletons, and Actions. Current console rigid, tree, and skinned mesh-set
+  imports are geometry-only.
+- PS3 disc/source support and texture validation. Recognizing the
+  `Ps3Texture` type name is not verified native support.
 - Xbox 360/PS3 Granny skeleton/model and animation conversion.
-- Granny vector tracks, time-varying or nondecomposable scale/shear, and
-  unimplemented curve codecs.
+- Granny arrays, objects, track groups, or transform tracks outside section 0;
+  vector tracks; time-varying or nondecomposable scale/shear; and unimplemented
+  curve codecs.
+- Complete animation state-machine semantics, runtime clip phase/rate control,
+  and automatic import of the hundreds of clips reachable from shared human
+  graphs.
 - Full DBX type coverage and lossless round trip.
 - Nonstatic level systems such as effects, game logic, lights, sound,
   animation, destruction states, and collision.

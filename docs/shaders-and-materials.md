@@ -1,5 +1,22 @@
 # Shaders and materials
 
+## Audit status
+
+This document was audited on 2026-11-02 against the current shader parser,
+catalog/repository lookup, Blender material construction, unit tests, smoke
+assertions, and named retail-media audit scripts.
+
+- `python -m compileall -q bc2_frostbite_importer` completed successfully.
+- All 66 dependency-free tests in `tests/test_core.py` passed.
+- Blender-hosted and retail-media integrations were reviewed but not rerun
+  during this documentation audit. Numeric retail results remain recorded
+  evidence from the named Blender 5.2/5.2.2 runs.
+
+The terms **verified**, **implemented**, **heuristic**, and **unknown** follow
+the [documentation confidence labels](README.md#confidence-labels). The full
+validation inventory and current unsupported boundaries are in
+[Validation and unknowns](validation-and-unknowns.md).
+
 ## Why shader inspection is required
 
 Texture format is not material meaning. Frostbite material metadata and shader
@@ -37,10 +54,12 @@ the parser's interpretation of source material records:
   resolution and creates neutral materials. Geometry, UVs, source part
   metadata, and transforms are unchanged.
 
-Direct import of an `ITexture`, `XenonTexture`, or `Ps3Texture` remains an
-explicit image operation and is not disabled by the mesh/map material mode.
-Only **Materials and Textures** should be used when validating the shader and
-texture behavior documented below.
+Direct import of an `ITexture` or `XenonTexture` remains an explicit image
+operation and is not disabled by the mesh/map material mode. `Ps3Texture`
+uses the same dispatch entry, but PS3 media, storage variants, and converted
+output have not been validated; recognizing that type name is not verified
+native support. Only **Materials and Textures** should be used when validating
+the shader and texture behavior documented below.
 
 ## PC DX11 shader database
 
@@ -99,6 +118,11 @@ ranked by:
 3. the persistent exact material-key index;
 4. deterministic remaining `Dx11_Single.res` discovery.
 
+This is the generic standalone prop/vehicle path. PC shared-character import
+separately indexes the known `MP_001` duplicate of the common character
+permutations; that bounded retail rule is documented below and is not a
+fallback applied to unrelated standalone assets.
+
 An exact key remains preferred. If a mesh-set key is absent because the retail
 database compiled the same referenced shader beneath a component mesh prefix,
 the importer may use a **unique match of the complete shader-partition
@@ -107,11 +131,12 @@ matches remain unresolved.
 
 The source-fingerprint catalog records each scanned shader-database asset and
 its case-insensitive material keys. Reindexing an archive deletes dependent
-rows through foreign keys. Parsed databases are cached by asset ID for the
-repository session. The selected archive/resource pair is preserved on each
-Blender material as `bc2_shader_database_source`; differing definitions found
-while multiple candidate databases are loaded produce a diagnostic rather
-than silently replacing the higher-ranked source.
+rows through foreign keys. Selectively parsed databases are cached for the
+repository session by asset ID, normalized requested material keys, and
+normalized shader partitions. The selected archive/resource pair is preserved
+on each Blender material as `bc2_shader_database_source`; differing
+definitions found while multiple candidate databases are loaded produce a
+diagnostic rather than silently replacing the higher-ranked source.
 
 Three tested Barrack DBX surfaces use `cheap_Wood`, `cheap_WoodPlanks`, and
 `cheap_MetalStairs` partition names while the same mesh's shader database keys
@@ -325,8 +350,9 @@ The importer caches one material per shader key plus decoded physical
 declaration and one native DDS image per asset path. Each material stores its
 shader key, selected variant/database source, surface reference, binding
 indices, reflected parameter names, source paths, inferred roles, physical
-routes/transforms, color model, and normal model as custom properties. All
-bindings receive image nodes even when their meaning remains unclassified.
+routes/transforms, color model, and normal model as custom properties. In
+**Materials and Textures** mode, all resolved bindings receive image nodes
+even when their meaning remains unclassified.
 
 Role resolution combines two independent evidence sources:
 
@@ -435,12 +461,11 @@ head's eyelash subset verifies this distinction: zero span is valid for an
 explicit stride-64 channel and must not trigger the generic heuristic's
 "nonvarying UV" rejection.
 
-The supplied external BF3/BF4 MaxScript references reinforce this decision
-boundary: their mesh readers use explicit `Vert_Diffuse_UV` and
-`Vert_Normals_UV` semantics and offsets, keep tangent/binormal fields
-separate, and V-flip each recognized UV channel. Their standard `_d`/`_s`/`_n`
-material setup does not reproduce BC2's layered shaders. See the
-[external MaxScript audit](maxscript-reference-audit.md).
+This correction also illustrates a general interoperability boundary:
+declaration semantics must keep coordinate and tangent-frame fields separate,
+and each recognized UV channel should receive a DCC V conversion exactly once.
+A standard material assembled only from `_d`, `_s`, and `_n` filenames cannot
+reproduce BC2's layered shader graph.
 
 ### Normal packing and layer arithmetic
 
@@ -661,6 +686,50 @@ shader-specific opacity curves remain unreconstructed. The AH60 and MI28
 verified families reuse the shared graph builder while retaining their
 family-specific metadata and evidence.
 
+### PC retail vehicle material audit
+
+**Verified sample scope:** one indexed PC retail catalog, all 62 unique vehicle
+LOD0 MeshData resources, and all 35 indexed `Dx11_Single.res` databases. This
+is a structural declaration/material audit, not 62 saved and visually compared
+Blender scenes.
+
+| Measurement | Result |
+|---|---:|
+| Vehicle LOD0 resources | 62 |
+| Mesh types | 21 type-0, 9 type-1, 32 type-2 |
+| Subsets/surfaces inspected | 240 |
+| Shader databases checked | 35 |
+| Implementation failures | 0 |
+| Explicit source-limit records | 18 |
+| Opaque constant/control-style surfaces without texture color | 8 |
+| Binding records without one provable physical route | 76 |
+
+Every standard shader layout encountered used an implemented field width,
+including the eight-byte two-component code `258`. No route derived from a
+compatible shader variant pointed to a physical coordinate absent from the
+retained subset declaration.
+
+The zero implementation-failure count does not mean every retail source has a
+complete material. Fifteen referenced keys or complete shader partitions were
+absent from every indexed database, while other source descriptors omitted a
+local shader set or shader reference. The audit retains these as source
+limitations instead of substituting an unrelated same-name material.
+
+The 76 bindings without one provable physical route include alternate-pass
+duplicates whose texture has another routed binding, semantic glass masks,
+animated rotor/track variants, and HUD/control shaders. They remain explicit
+fallbacks, not exporter-safe declaration evidence. Saved/reopened
+full-material validation covers AH60, MI28, Zero Fighter, Corsair, and UAV;
+the tracked-vehicle placement runner uses placeholder materials and therefore
+does not extend shader validation to BMD3 or T90 tracks.
+
+The reproducible catalog report is generated by
+[`blender_vehicle_catalog_audit.py`](../tests/blender_vehicle_catalog_audit.py).
+Representative saved-scene checks use
+[`blender_vehicle_integration.py`](../tests/blender_vehicle_integration.py),
+[`blender_mi28_integration.py`](../tests/blender_mi28_integration.py), and
+[`blender_vehicle_family_integration.py`](../tests/blender_vehicle_family_integration.py).
+
 ### Verified representative map families
 
 FXC disassembly of retail `MP_001` permutations established these patterns:
@@ -792,6 +861,9 @@ DXBC arithmetic. In particular, `semantic_fallback` and
 `unavailable_offset` remain preview-import boundaries and are not safe vertex
 declaration evidence for an exporter.
 
+The reproducible report is generated by
+[`blender_map_material_catalog_audit.py`](../tests/blender_map_material_catalog_audit.py).
+
 ## Sparse shader-set overrides
 
 `MeshShaderSet` overrides are not always complete surface tables. The tested
@@ -842,19 +914,22 @@ remain unresolved. These terrain decals are also separate from the
 mesh-material `Decal_Atlas_001` binding discussed above. None of this preview
 selection is an exporter-safe terrain-material specification.
 
-## MaxScript material boundary
+## Material interoperability boundary
 
-The audited BF3 mesh scripts create a standard material by looking for PNG
-files with `_d`, `_s`, and `_n` suffixes. The BF4 script performs similar DDS
-filename matching in the mesh directory or a `textures` child directory.
-None parses `MeshShaderSet`, DBX texture references, shader-database records,
-DXBC reflection, constants, color space, packed channels, or layered shader
-arithmetic.
+Filename suffixes such as `_d`, `_s`, and `_n` are at most a last-resort
+research hint. They do not identify a complete Frostbite material and cannot
+replace:
 
-Those scripts therefore provide no material behavior that supersedes the
-retail BC2 shader evidence documented here. Their naming convention can be a
-last-resort research hint only; it must not replace exact resource bindings.
-See the [external MaxScript audit](maxscript-reference-audit.md).
+- `MeshShaderSet` and DBX texture references;
+- shader-database material keys and variants;
+- DXBC reflection, constants, and coordinate routes;
+- color-space state, channel swizzles, and packed normal formats;
+- camouflage, dirt, occlusion, detail repeats, cutout thresholds, or layered
+  arithmetic.
+
+Converted PNG or DDS filenames are cache or interchange artifacts, not source
+material provenance. Exact resource bindings and shader evidence remain
+authoritative.
 
 ## Generalization work still needed
 
@@ -862,8 +937,15 @@ Do not globally classify every DXT5 resource as DXT5nm. A general material
 resolver needs to:
 
 - recover exact UV sources, constants, and swizzles per shader permutation;
+- decode nonstandard block-5 layouts and dynamic/non-affine coordinate
+  transforms instead of retaining semantic fallbacks;
 - distinguish every color, masks, specular, terrain, and normal role;
 - reproduce alpha-test thresholds and two-sided behavior from shader evidence;
+- reconstruct cube/environment sampling instead of preserving it as metadata
+  beside a Blender-native approximation;
+- add source-backed console material lookup; current Xbox rigid, tree, and
+  skinned mesh-set imports remain geometry-only, and PS3 material behavior is
+  unvalidated;
 - retain variant-specific behavior instead of applying one universal graph.
 
 Shader bytecode and extracted game resources should remain local research
