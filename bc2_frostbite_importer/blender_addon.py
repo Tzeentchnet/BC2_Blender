@@ -55,10 +55,11 @@ from .core.io import safe_cache_name
 from .core.level import (
     LevelResolver,
     MeshDefinition,
+    SUPPORTED_MAP_SOURCE_KINDS,
     SurfaceShader,
-    discover_pc_levels,
-    index_pc_level_archives,
-    pc_level_archive_paths,
+    discover_levels,
+    index_level_archives,
+    level_archive_paths,
 )
 from .core.mesh import (
     CompositePart,
@@ -73,7 +74,6 @@ from .core.repository import AssetRepository
 from .core.shaderdb import (
     ShaderDatabase,
     ShaderTextureBinding,
-    parse_shader_database,
 )
 from .core.terrain import (
     TerrainMaterialMap,
@@ -275,7 +275,7 @@ def _repository_preference_updated(self, context):
     if settings is None:
         return
     settings.source_kind = ""
-    settings.status = "Source or cache changed; scan the disc"
+    settings.status = "Source or cache changed; scan the source"
     settings.archives.clear()
     settings.assets.clear()
     settings.total_results = 0
@@ -286,8 +286,11 @@ class BC2AddonPreferences(AddonPreferences):
     bl_idname = ADDON_ID
 
     source_path: StringProperty(
-        name="Last disc image",
-        description="Battlefield: Bad Company 2 PC or Xbox 360 ISO",
+        name="Last source file",
+        description=(
+            "Battlefield: Bad Company 2 PC/Xbox 360 ISO or "
+            "Battlefield 1943 Xbox LIVE package, directly or in a ZIP"
+        ),
         subtype="FILE_PATH",
         update=_repository_preference_updated,
     )
@@ -426,7 +429,7 @@ class BC2MapListItem(PropertyGroup):
 
 class BC2Settings(PropertyGroup):
     source_kind: StringProperty(name="Detected source")
-    status: StringProperty(name="Status", default="Select a disc image, then scan")
+    status: StringProperty(name="Status", default="Select a source file, then scan")
     defaults_initialized: BoolProperty(default=False, options={"HIDDEN"})
     diagnostic_count: IntProperty(default=0, min=0, options={"HIDDEN"})
     scan_in_progress: BoolProperty(default=False, options={"HIDDEN"})
@@ -536,7 +539,7 @@ class BC2Settings(PropertyGroup):
     map_name: StringProperty(
         name="Level name",
         description=(
-            "Retail PC level discovered from the archive catalog or entered manually"
+            "Level discovered from the source archive catalog or entered manually"
         ),
         default="MP_001",
     )
@@ -630,7 +633,7 @@ def _get_repository(context, require_scan: bool = True) -> AssetRepository:
     preferences = _preferences(context)
     source_path = bpy.path.abspath(preferences.source_path)
     if not source_path:
-        raise BC2Error("Select a PC or Xbox 360 disc image first")
+        raise BC2Error("Select a supported PC or Xbox 360 source file first")
     cache_path = bpy.path.abspath(preferences.cache_directory)
     key = (str(Path(source_path).resolve()), str(Path(cache_path).resolve()))
     if _repository is None or _repository_key != key:
@@ -638,7 +641,7 @@ def _get_repository(context, require_scan: bool = True) -> AssetRepository:
         _repository = AssetRepository(key[0], key[1])
         _repository_key = key
     if require_scan and _repository.needs_scan():
-        raise BC2Error("The selected disc has not been scanned yet")
+        raise BC2Error("The selected source has not been scanned yet")
     settings.source_kind = _repository.kind
     return _repository
 
@@ -676,7 +679,7 @@ def _load_archives(context):
     )
     all_archives = repository.catalog.archives(limit=10000)
     settings.available_maps.clear()
-    for level_name in discover_pc_levels(
+    for level_name in discover_levels(
         str(row["path"]) for row in all_archives
     ):
         settings.available_maps.add().name = level_name
@@ -739,7 +742,23 @@ def _scan_source_worker(
         "Background indexing ended unexpectedly; see the system console",
     )
     try:
-        repository = AssetRepository(source_path, cache_path)
+        def source_progress(current, total, label):
+            events.put(
+                (
+                    "progress",
+                    "Preparing ZIP source",
+                    current,
+                    total,
+                    label,
+                )
+            )
+
+        repository = AssetRepository(
+            source_path,
+            cache_path,
+            source_progress=source_progress,
+            cancelled=cancel_event.is_set,
+        )
 
         def scan_progress(current, total, label):
             events.put(
@@ -761,15 +780,18 @@ def _scan_source_worker(
 
         should_index_pending = not target_archives and (
             (repository.kind == "PC_ISO" and index_all_pc)
-            or (repository.kind == "XBOX360_ISO" and not scanned)
+            or (repository.indexes_archives_during_scan and not scanned)
         )
         processed_archives = 0
         if (
             not cancel_event.is_set()
             and target_archives
-            and repository.kind != "PC_ISO"
+            and repository.kind not in SUPPORTED_MAP_SOURCE_KINDS
         ):
-            raise BC2Error("Map object indexing requires a PC retail ISO")
+            raise BC2Error(
+                "Map object indexing requires a PC retail ISO or "
+                "Battlefield 1943 Xbox LIVE package"
+            )
         if not cancel_event.is_set() and (target_archives or should_index_pending):
             def index_progress(current, total, label):
                 nonlocal processed_archives
@@ -819,7 +841,11 @@ def _scan_source_worker(
         else:
             terminal = ("complete", result)
     except (BC2Error, OSError, RuntimeError, ValueError) as exc:
-        terminal = ("error", str(exc))
+        terminal = (
+            ("aborted", "Source scan cancelled")
+            if repository is None and cancel_event.is_set()
+            else ("error", str(exc))
+        )
     finally:
         if repository is not None:
             repository.close()
@@ -849,7 +875,7 @@ def _apply_scan_result(context, operator, result, *, cancelled: bool):
         f"{repository.catalog.archive_count():,} archives, "
         f"{settings.indexed_asset_count:,} indexed assets"
     )
-    if result["kind"] == "PC_ISO":
+    if result["kind"] in SUPPORTED_MAP_SOURCE_KINDS:
         summary += f", {len(settings.available_maps):,} discovered maps"
     if not result["scanned"]:
         summary += "; existing catalog preserved"
@@ -3552,10 +3578,15 @@ def _texture_role(
     parameters: tuple[str, ...] = (),
     dimension: int | None = None,
 ) -> str:
+    normalized_path = path.replace("\\", "/").casefold().lstrip("/")
     stem = PurePosixPath(path).name.casefold()
     if stem.endswith(".res"):
         stem = stem[:-4]
-    if dimension in {9, 10}:
+    if (
+        dimension in {9, 10}
+        or normalized_path.startswith("textures/sky/")
+        or "/textures/sky/" in normalized_path
+    ):
         return "ENVIRONMENT"
     if stem.startswith("envmap_") or "environmentmap" in stem:
         return "ENVIRONMENT"
@@ -3570,21 +3601,29 @@ def _texture_role(
     if (
         stem.startswith("msk_")
         or "mask" in stem
+        or stem.endswith("_gm")
+        or "colorpick" in stem
     ):
         return "MASK"
-    if "decal" in stem or stem.startswith("symbols_"):
+    if (
+        "decal" in stem
+        or stem.startswith("symbols_")
+        or stem.startswith("wake")
+    ):
         return "DECAL"
     if any(
         value in stem
         for value in (
             "ambientocclusion",
             "occlusion",
+            "combinedao",
+            "_ao_",
             "_oc_",
             "_ocrgb",
             "_oc_rbg",
             "skyoc",
         )
-    ) or stem.endswith("_oc"):
+    ) or stem.endswith(("_oc", "_ao")):
         return "OCCLUSION"
     if stem.startswith("dt_") or stem.endswith("_dt") or "detail" in stem:
         return "DETAIL"
@@ -3597,6 +3636,7 @@ def _texture_role(
     if stem.startswith("rgb_") or stem.endswith(
         (
             "_d",
+            "_df",
             "_diff",
             "_diffuse",
             "_albedo",
@@ -3604,7 +3644,7 @@ def _texture_role(
             "_c",
             "_cm",
         )
-    ):
+    ) or stem.startswith("sky_"):
         return "COLOR"
     reflected = " ".join(parameters).casefold()
     if "normal" in reflected:
@@ -3702,6 +3742,12 @@ def _binding_roles(bindings):
 
 def _verified_surface_family(surface: SurfaceShader) -> str | None:
     partition = surface.reference.rsplit("/", 1)[0].casefold()
+    if partition.startswith(
+        "objects/vehicles/beach/aircraftcarrier/shaders/"
+    ):
+        return "BF1943_AIRCRAFT_CARRIER"
+    if partition == "objects/beach_objects/wakes/shaders/iwo_scroll":
+        return "BF1943_SHORELINE_WAKE"
     return {
         "objects/vehicles/air/ah60/shaders/main": "AH60_MAIN",
         "objects/vehicles/air/ah60/shaders/glass": "AH60_GLASS",
@@ -3714,6 +3760,9 @@ def _verified_surface_family(surface: SurfaceShader) -> str | None:
             "MI28_MAIN_METAL"
         ),
         "objects/vehicles/air/mi28/shaders/glass": "MI28_GLASS",
+        "objects/vehicles/beach/us_corsair/shaders/corsair_main": (
+            "CORSAIR_MAIN"
+        ),
         "objects/weapons/stationary/minigun/shaders/main": "MINIGUN_MAIN",
     }.get(partition)
 
@@ -3736,6 +3785,10 @@ def _is_vehicle_glass_surface(surface: SurfaceShader) -> bool:
 def _surface_binding_roles(surface: SurfaceShader, bindings):
     roles = list(_binding_roles(bindings))
     family = _verified_surface_family(surface)
+    for index, binding in enumerate(bindings):
+        normalized_path = binding.path.replace("\\", "/").casefold()
+        if binding.index >= 256 or "/textures/sky/" in normalized_path:
+            roles[index] = "ENVIRONMENT"
     if _is_vehicle_glass_surface(surface):
         for index, binding in enumerate(bindings):
             normalized_path = binding.path.replace("\\", "/").casefold()
@@ -3771,6 +3824,28 @@ def _surface_binding_roles(surface: SurfaceShader, bindings):
                 roles[index] = "MASK"
             elif binding.index == 4:
                 roles[index] = "SPECULAR"
+    elif family == "CORSAIR_MAIN":
+        verified_roles = {
+            1: "NORMAL",
+            2: "NORMAL",
+            3: "DECAL",
+            4: "COLOR",
+            6: "MASK",
+        }
+        for index, binding in enumerate(bindings):
+            roles[index] = verified_roles.get(binding.index, roles[index])
+    elif family == "BF1943_AIRCRAFT_CARRIER":
+        for index, binding in enumerate(bindings):
+            if "colorpick" in _texture_stem(binding.path):
+                roles[index] = "PALETTE"
+    elif family == "BF1943_SHORELINE_WAKE":
+        verified_roles = {
+            0: "COLOR",
+            1: "NOISE",
+            2: "MASK",
+        }
+        for index, binding in enumerate(bindings):
+            roles[index] = verified_roles.get(binding.index, roles[index])
     return tuple(roles)
 
 
@@ -3808,6 +3883,17 @@ def _surface_binding_uv_map(
             return "UV1"
         if binding.index in {3, 4}:
             return "UVMap"
+    if family == "CORSAIR_MAIN":
+        return "UV1" if binding.index == 3 else "UVMap"
+    if family == "BF1943_AIRCRAFT_CARRIER":
+        stem = _texture_stem(binding.path)
+        if role == "OCCLUSION":
+            return "UV1"
+        if role == "PALETTE":
+            return "UV2"
+        return "UVMap"
+    if family == "BF1943_SHORELINE_WAKE":
+        return "UVMap" if binding.index == 2 else "UV1"
     if role == "DETAIL" and _verified_detail_repeat(binding) != (1.0, 1.0):
         return "UV1"
     parameters = {value.casefold() for value in binding.parameters}
@@ -3945,6 +4031,8 @@ def _surface_binding_uv_scale(
         return (10.0, 10.0)
     if family == "MINIGUN_MAIN" and binding.index == 3:
         return (13.0, 13.0)
+    if family == "CORSAIR_MAIN" and binding.index == 2:
+        return (128.0, 64.0)
     return _verified_detail_repeat(binding)
 
 
@@ -3971,7 +4059,14 @@ def _character_binding_roles(
     roles = []
     for binding in bindings:
         stem = _texture_stem(binding.path)
-        if "occlusion" in stem or "ambientocclusion" in stem:
+        normalized_path = binding.path.replace("\\", "/").casefold()
+        if binding.index >= 256 or "/textures/sky/" in normalized_path:
+            role = "ENVIRONMENT"
+        elif (
+            "occlusion" in stem
+            or "ambientocclusion" in stem
+            or stem.endswith("_ao")
+        ):
             role = "OCCLUSION"
         elif "dirtmap" in stem:
             if stem.endswith(("_nm", "_n", "_normal")):
@@ -4123,11 +4218,46 @@ def _unique_role_nodes(texture_nodes, role: str):
     return result
 
 
-def _layered_color_output(nodes, links, texture_nodes):
+def _bf1943_carrier_occlusion_channel(
+    surface: SurfaceShader | None,
+    stem: str,
+) -> str | None:
+    if (
+        surface is None
+        or _verified_surface_family(surface)
+        != "BF1943_AIRCRAFT_CARRIER"
+    ):
+        return None
+    name = _normalized_surface_name(surface.name)
+    if "japversionao" in _normalized_surface_name(stem):
+        return "Color"
+    return {
+        "japa": "Blue",
+        "japd": "Blue",
+        "jape": "Green",
+        "japf": "Green",
+        "japg": "Green",
+        "usa": "Alpha",
+        "usb": "Alpha",
+        "usc": "Alpha",
+        "usd": "Alpha",
+        "use": "Red",
+        "usf": "Red",
+        "usg": "Red",
+    }.get(name)
+
+
+def _layered_color_output(
+    nodes,
+    links,
+    texture_nodes,
+    surface: SurfaceShader | None = None,
+):
     colors = _unique_role_nodes(texture_nodes, "COLOR")
     details = _unique_role_nodes(texture_nodes, "DETAIL")
     decals = _unique_role_nodes(texture_nodes, "DECAL")
     occlusion = _unique_role_nodes(texture_nodes, "OCCLUSION")
+    palettes = _unique_role_nodes(texture_nodes, "PALETTE")
     if colors:
         color_output = colors[0][1].outputs["Color"]
         color_node = colors[0][1]
@@ -4175,12 +4305,47 @@ def _layered_color_output(nodes, links, texture_nodes):
             color_output = mix.outputs["Color"]
         model = "OcRGB-controlled reflected detail layers"
 
+    if palettes:
+        palette_multiply = nodes.new("ShaderNodeMixRGB")
+        palette_multiply.name = "BC2 color x source palette"
+        palette_multiply.label = "Color x source palette"
+        palette_multiply.blend_type = "MULTIPLY"
+        palette_multiply.location = (240, 300)
+        palette_multiply.inputs["Fac"].default_value = 1.0
+        links.new(color_output, palette_multiply.inputs["Color1"])
+        links.new(
+            palettes[0][1].outputs["Color"],
+            palette_multiply.inputs["Color2"],
+        )
+        color_output = palette_multiply.outputs["Color"]
+        model += " with source palette"
+
     if occlusion:
         occlusion_binding, occlusion_node = occlusion[0]
         stem = PurePosixPath(
             occlusion_binding.path
         ).name.casefold()
-        if "ocrgb" in stem or "oc_rgb" in stem or "_oc_" in stem:
+        carrier_channel = _bf1943_carrier_occlusion_channel(
+            surface,
+            stem,
+        )
+        if carrier_channel is not None:
+            occlusion_node["bc2_occlusion_channel"] = carrier_channel
+            if carrier_channel == "Alpha":
+                occlusion_output = occlusion_node.outputs["Alpha"]
+            elif carrier_channel == "Color":
+                occlusion_output = occlusion_node.outputs["Color"]
+            else:
+                separate = nodes.new("ShaderNodeSeparateColor")
+                separate.name = f"BC2 carrier AO {carrier_channel}"
+                separate.label = f"Carrier AO {carrier_channel}"
+                separate.location = (180, 80)
+                links.new(
+                    occlusion_node.outputs["Color"],
+                    separate.inputs["Color"],
+                )
+                occlusion_output = separate.outputs[carrier_channel]
+        elif "ocrgb" in stem or "oc_rgb" in stem or "_oc_" in stem:
             occlusion_output = occlusion_node.outputs["Alpha"]
         else:
             separate = nodes.new("ShaderNodeSeparateColor")
@@ -4191,7 +4356,33 @@ def _layered_color_output(nodes, links, texture_nodes):
                 occlusion_node.outputs["Color"],
                 separate.inputs["Color"],
             )
-            occlusion_output = separate.outputs["Red"]
+            if "combinedao" in stem:
+                maximum_rg = nodes.new("ShaderNodeMath")
+                maximum_rg.name = "BC2 combined AO max RG"
+                maximum_rg.label = "Combined AO max(R, G)"
+                maximum_rg.operation = "MAXIMUM"
+                maximum_rg.location = (360, 20)
+                links.new(
+                    separate.outputs["Red"],
+                    maximum_rg.inputs[0],
+                )
+                links.new(
+                    separate.outputs["Green"],
+                    maximum_rg.inputs[1],
+                )
+                maximum_rgb = nodes.new("ShaderNodeMath")
+                maximum_rgb.name = "BC2 combined AO max RGB"
+                maximum_rgb.label = "Combined AO max(R, G, B)"
+                maximum_rgb.operation = "MAXIMUM"
+                maximum_rgb.location = (520, 20)
+                links.new(maximum_rg.outputs[0], maximum_rgb.inputs[0])
+                links.new(
+                    separate.outputs["Blue"],
+                    maximum_rgb.inputs[1],
+                )
+                occlusion_output = maximum_rgb.outputs[0]
+            else:
+                occlusion_output = separate.outputs["Red"]
         multiply = nodes.new("ShaderNodeMixRGB")
         multiply.name = "BC2 color x ambient occlusion"
         multiply.label = "Color x ambient occlusion"
@@ -4764,6 +4955,66 @@ def _configure_verified_surface_material(
     texture_nodes,
 ) -> bool:
     family = _verified_surface_family(surface)
+    if family == "BF1943_SHORELINE_WAKE":
+        seabed = _binding_texture_node(texture_nodes, 0)
+        wake = _binding_texture_node(texture_nodes, 2)
+        if seabed is None or wake is None:
+            return False
+        channels = nodes.new("ShaderNodeSeparateColor")
+        channels.name = "BC2 shoreline wake control"
+        channels.label = "Wake red control"
+        channels.location = (-120, -160)
+        links.new(wake.outputs["Color"], channels.inputs["Color"])
+
+        invert = nodes.new("ShaderNodeMath")
+        invert.name = "BC2 shoreline wake inverse"
+        invert.label = "0.75 - wake red"
+        invert.operation = "SUBTRACT"
+        invert.use_clamp = True
+        invert.inputs[0].default_value = 0.75
+        invert.location = (60, -160)
+        links.new(channels.outputs["Red"], invert.inputs[1])
+
+        opacity = nodes.new("ShaderNodeMath")
+        opacity.name = "BC2 shoreline wake opacity"
+        opacity.label = "Inverted wake x 4"
+        opacity.operation = "MULTIPLY"
+        opacity.use_clamp = True
+        opacity.inputs[1].default_value = 4.0
+        opacity.location = (240, -160)
+        links.new(invert.outputs[0], opacity.inputs[0])
+
+        color = nodes.new("ShaderNodeMixRGB")
+        color.name = "BC2 shoreline wake color"
+        color.label = "Seabed to white by wake control"
+        color.blend_type = "MIX"
+        color.inputs["Color2"].default_value = (1.0, 1.0, 1.0, 1.0)
+        color.location = (300, 120)
+        links.new(opacity.outputs[0], color.inputs["Fac"])
+        links.new(seabed.outputs["Color"], color.inputs["Color1"])
+        links.new(color.outputs["Color"], shader.inputs["Base Color"])
+        links.new(opacity.outputs[0], shader.inputs["Alpha"])
+
+        shader.inputs["Roughness"].default_value = 0.45
+        material.name = "BC2 Shoreline Wake"
+        material.diffuse_color = (0.8, 0.8, 0.8, 1.0)
+        material.surface_render_method = "DITHERED"
+        material["bc2_material_family"] = "BF1943 shoreline wake"
+        material["bc2_color_model"] = (
+            "repeated source seabed to white through inverted wake-red mask"
+        )
+        material["bc2_alpha_mode"] = (
+            "inverted source wake red, threshold 0.75, scale 4"
+        )
+        material["bc2_material_evidence"] = (
+            "BF1943 Coral Sea wake_1/wake_2 byte-24 atlas, byte-28 repeat, "
+            "opaque grayscale wake control, and source binding order"
+        )
+        material["bc2_material_status"] = (
+            "resolved heuristic BF1943 shoreline wake graph"
+        )
+        return True
+
     if family == "AH60_MAIN":
         return _configure_verified_vehicle_main(
             material,
@@ -5024,6 +5275,7 @@ def _surface_uses_alpha(surface: SurfaceShader) -> bool:
             "background_tree",
             "treeline",
             "barbwire",
+            "/wakes/",
         )
     )
 
@@ -5153,7 +5405,7 @@ def _surface_material(
             {
                 "code": "missing_shader_key",
                 "reference": surface.database_key,
-                "message": "DX11 shader database has no matching material key",
+                "message": "Shader database has no matching material key",
             }
         )
         return material
@@ -5498,6 +5750,7 @@ def _surface_material(
         nodes,
         links,
         texture_nodes,
+        surface,
     )
     material["bc2_color_model"] = color_model
     if color_output is not None:
@@ -5506,7 +5759,7 @@ def _surface_material(
             links.new(color_node.outputs["Alpha"], shader.inputs["Alpha"])
             material.surface_render_method = "DITHERED"
             material["bc2_alpha_mode"] = (
-                "source color alpha for reflected foliage/cutout family"
+                "source color alpha for reflected cutout/transparent family"
             )
 
     if normal_node is not None:
@@ -5540,11 +5793,26 @@ def _surface_material(
             material["bc2_normal_model"] = "heuristic RGB tangent normal"
         links.new(normal_output, shader.inputs["Normal"])
 
-    material["bc2_material_status"] = (
-        "resolved material graph"
-        if color_output is not None
-        else "resolved bindings without color graph"
-    )
+    if (
+        _verified_surface_family(surface)
+        == "BF1943_AIRCRAFT_CARRIER"
+        and color_output is not None
+    ):
+        material["bc2_material_family"] = "BF1943 aircraft carrier"
+        material["bc2_material_evidence"] = (
+            "carrier DBX subset-to-shader references, stride-36 Xbox "
+            "layout UV offsets 24/28/32, Xenos texture-fetch swizzles, "
+            "and source Japanese/US deck markings"
+        )
+        material["bc2_material_status"] = (
+            "resolved verified BF1943 carrier graph"
+        )
+    else:
+        material["bc2_material_status"] = (
+            "resolved material graph"
+            if color_output is not None
+            else "resolved bindings without color graph"
+        )
     return material
 
 
@@ -5737,7 +6005,7 @@ def _ensure_source_shader_materials(
     shader_keys = tuple(dict.fromkeys(shader_keys))
     shader_partitions = tuple(dict.fromkeys(shader_partitions))
     if (
-        repository.kind != "PC_ISO"
+        repository.kind not in {"PC_ISO", "XBOX360_STFS"}
         or not material_context.import_textures
         or not shader_keys
     ):
@@ -6441,12 +6709,18 @@ def _create_level_scene(
     if load_source_textures and level_scene.shader_database_path:
         if progress:
             progress(0.01, "Reading level shader database")
-        _, raw = repository.read_asset_path(
+        shader_asset = repository.catalog.find_asset(
             level_scene.shader_database_path,
-            max_size=1 << 30,
-            preferred_archives=preferred_archives,
+            preferred_archives,
         )
-        shader_database = parse_shader_database(raw)
+        if shader_asset is None:
+            raise BC2Error(
+                "Resolved level shader database is not indexed: "
+                f"{level_scene.shader_database_path}"
+            )
+        _, shader_database = repository.read_shader_database(
+            int(shader_asset["id"]),
+        )
         if shader_database.trailing_bytes:
             diagnostics.append(
                 {
@@ -6491,7 +6765,7 @@ def _create_level_scene(
                         "objects/vehicles/"
                     )
                 ),
-                pc_declared_uv_offsets_by_stride=shader_uv_offsets.get(
+                declared_uv_offsets_by_stride=shader_uv_offsets.get(
                     geometry_key,
                 ),
             )
@@ -6528,6 +6802,7 @@ def _create_level_scene(
                 material = _simple_material(
                     f"BC2 Placeholder {subset.name}",
                     (0.8, 0.8, 0.8, 1.0),
+                    roughness=0.8,
                 )
                 material["bc2_material_status"] = "placeholder material"
                 material_cache[placeholder_key] = material
@@ -6973,14 +7248,14 @@ class BC2_UL_archives(UIList):
 
 class BC2_OT_choose_source(Operator, ImportHelper):
     bl_idname = "bc2.choose_source"
-    bl_label = "Choose Bad Company 2 Disc"
+    bl_label = "Choose Frostbite Source"
     bl_description = (
-        "Select and automatically scan a PC or Xbox 360 Battlefield: "
-        "Bad Company 2 ISO"
+        "Select and automatically scan a Bad Company 2 ISO or "
+        "Battlefield 1943 Xbox LIVE package, directly or in a ZIP"
     )
 
-    filename_ext = ".iso"
-    filter_glob: StringProperty(default="*.iso", options={"HIDDEN"})
+    filename_ext = ""
+    filter_glob: StringProperty(default="*", options={"HIDDEN"})
 
     def execute(self, context):
         settings = _settings(context)
@@ -6990,7 +7265,7 @@ class BC2_OT_choose_source(Operator, ImportHelper):
         settings.assets.clear()
         settings.total_results = 0
         settings.indexed_asset_count = 0
-        settings.status = "Disc selected; scanning"
+        settings.status = "Source selected; scanning"
         _close_repository()
         result = bpy.ops.bc2.scan_source("EXEC_DEFAULT")
         if "RUNNING_MODAL" in result:
@@ -7038,7 +7313,7 @@ class BC2_OT_reset_import_options(Operator):
 
 class BC2_OT_scan_source(Operator):
     bl_idname = "bc2.scan_source"
-    bl_label = "Scan Disc"
+    bl_label = "Scan Source"
     bl_description = (
         "Catalog Frostbite archives, or run an explicitly requested indexing job"
     )
@@ -7055,14 +7330,17 @@ class BC2_OT_scan_source(Operator):
             and _active_scan_thread.is_alive()
         ):
             settings.scan_in_progress = True
-            self.report({"WARNING"}, "A disc scan is already running")
+            self.report({"WARNING"}, "A source scan is already running")
             return {"CANCELLED"}
 
         preferences = _preferences(context)
         source_path = bpy.path.abspath(preferences.source_path)
         cache_path = bpy.path.abspath(preferences.cache_directory)
         if not source_path:
-            self.report({"ERROR"}, "Select a PC or Xbox 360 disc image first")
+            self.report(
+                {"ERROR"},
+                "Select a supported PC or Xbox 360 source file first",
+            )
             return {"CANCELLED"}
         if not cache_path:
             self.report({"ERROR"}, "Configure an asset cache directory first")
@@ -7078,7 +7356,8 @@ class BC2_OT_scan_source(Operator):
             except BC2Error as exc:
                 self.report({"ERROR"}, str(exc))
                 return {"CANCELLED"}
-            target_archives = pc_level_archive_paths(
+            target_archives = level_archive_paths(
+                settings.source_kind or "PC_ISO",
                 level_name,
                 include_terrain=False,
             )
@@ -7110,7 +7389,7 @@ class BC2_OT_scan_source(Operator):
             if self.target_level
             else f"Starting background indexing for {self.target_archive}"
             if self.target_archive
-            else "Starting background disc scan"
+            else "Starting background source scan"
         )
         context.window_manager.progress_begin(0, 1000)
         self._timer = context.window_manager.event_timer_add(
@@ -7142,7 +7421,7 @@ class BC2_OT_scan_source(Operator):
         settings = _settings(context)
         if event.type == "ESC":
             self._cancel_event.set()
-            settings.status = "Cancelling after the current archive"
+            settings.status = "Cancelling source preparation or archive indexing"
             return {"RUNNING_MODAL"}
         if event.type != "TIMER":
             return {"PASS_THROUGH"}
@@ -7170,6 +7449,10 @@ class BC2_OT_scan_source(Operator):
 
         self._finish(context)
         kind, payload = terminal
+        if kind == "aborted":
+            settings.status = payload
+            self.report({"WARNING"}, payload)
+            return {"CANCELLED"}
         if kind == "error":
             settings.status = payload
             self.report({"ERROR"}, payload)
@@ -7191,15 +7474,15 @@ class BC2_OT_scan_source(Operator):
 class BC2_OT_cancel_scan(Operator):
     bl_idname = "bc2.cancel_scan"
     bl_label = "Cancel Scan"
-    bl_description = "Stop after the archive currently being indexed"
+    bl_description = "Cancel source preparation or stop after the current archive"
 
     def execute(self, context):
         if _active_scan_cancel is None:
-            self.report({"WARNING"}, "No disc scan is running")
+            self.report({"WARNING"}, "No source scan is running")
             return {"CANCELLED"}
         _active_scan_cancel.set()
         settings = _settings(context)
-        settings.status = "Cancelling after the current archive"
+        settings.status = "Cancelling source preparation or archive indexing"
         self.report({"INFO"}, settings.status)
         return {"FINISHED"}
 
@@ -7241,10 +7524,10 @@ class BC2_OT_index_archive(Operator):
 
 class BC2_OT_import_map(Operator):
     bl_idname = "bc2.import_map"
-    bl_label = "Import Complete PC Map"
+    bl_label = "Import Complete Map"
     bl_description = (
-        "Resolve a retail PC level, shared multiplayer assets, grouped "
-        "placements, terrain, water, and DX11 shader bindings"
+        "Resolve a supported level, shared assets, grouped placements, "
+        "terrain, water, and available material metadata"
     )
     bl_options = {"REGISTER", "UNDO"}
 
@@ -7260,9 +7543,10 @@ class BC2_OT_import_map(Operator):
         window_manager.progress_begin(0, 1000)
         try:
             repository = _get_repository(context)
-            if repository.kind != "PC_ISO":
+            if repository.kind not in SUPPORTED_MAP_SOURCE_KINDS:
                 raise BC2Error(
-                    "Complete-map import currently supports PC retail ISOs"
+                    "Complete-map import currently supports PC retail ISOs "
+                    "and Battlefield 1943 Xbox LIVE packages"
                 )
             settings.map_name = level_name
             settings.status = f"Indexing archives required by {level_name}"
@@ -7275,7 +7559,7 @@ class BC2_OT_import_map(Operator):
                     f"Indexing map archive {current:,}/{total:,}: {label}"
                 )
 
-            preferred_archives = index_pc_level_archives(
+            preferred_archives = index_level_archives(
                 repository,
                 level_name,
                 index_progress,
@@ -7802,7 +8086,7 @@ class BC2_PT_tools(Panel):
                 icon="ASSET_MANAGER",
             )
         else:
-            layout.label(text="Select and scan a disc image", icon="INFO")
+            layout.label(text="Select and scan a source file", icon="INFO")
         if settings.diagnostic_count:
             layout.label(
                 text=f"Last import: {settings.diagnostic_count:,} diagnostic(s)",
@@ -7861,7 +8145,7 @@ class BC2_PT_map(Panel):
         settings = _settings(context)
         if settings.available_maps:
             layout.label(
-                text=f"{len(settings.available_maps):,} maps found in the disc catalog.",
+                text=f"{len(settings.available_maps):,} maps found in the source catalog.",
                 icon="WORLD_DATA",
             )
             layout.prop_search(

@@ -41,7 +41,7 @@ mip count, but a known platform should always be supplied.
 
 | Codes | Output | Block dimensions | Bytes per block/pixel |
 |---|---|---:|---:|
-| `0`, `18` | DXT1 / BC1 | 4 x 4 | 8 |
+| `0`, `3`, `18` | DXT1 / BC1 | 4 x 4 | 8 |
 | `1` | DXT3 / BC2 | 4 x 4 | 16 |
 | `2`, `13`, `19`, `20` | DXT5 / BC3 | 4 x 4 | 16 |
 | `9` | ARGB8888 | 1 x 1 | 4 |
@@ -49,6 +49,18 @@ mip count, but a known platform should always be supplied.
 
 The DDS writer emits a standard 128-byte little-endian header. L8 uses an
 8-bit luminance mask. ARGB8888 uses explicit channel masks.
+
+Format code `3` is an **implemented BC1 storage alias**. In the verified
+BF1943 package, all 160 code-3 resources have the same logical block size,
+Xbox allocation padding, and mip geometry as code `0`; this includes the
+2048 x 1024 terrain mask atlases. Decoding the BC1 blocks does not establish
+the atlas's terrain-layer semantics.
+
+Format code `5` remains **unknown**. Five BF1943 resources use 512 x 512,
+ten-mip allocations consistent with two bytes per pixel, but the channel
+layout and DDS masks are not verified. They are rejected rather than labeled
+as RGB565, RGBA4444, or another 16-bit format based only on allocation size or
+filename.
 
 ## Xbox 360 tiled surfaces
 
@@ -143,6 +155,10 @@ Locating an already converted PNG or DDS by filename does not validate
 Frostbite texture storage. Header fields, mip allocations, BC formats, Xbox
 tiling, console block byte order, channel packing, and color space require
 binary fixtures or decoded retail evidence.
+
+The BF1943 package-wide bounded pass converted 1,505 of 1,510 XenonTexture
+resources: 986 DXT1, 425 DXT5, 48 ARGB8888, and 46 L8. The five explicit
+format-code-5 exceptions are the only failures in that sample.
 
 ## Writer requirements
 

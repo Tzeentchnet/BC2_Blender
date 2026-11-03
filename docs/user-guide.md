@@ -9,17 +9,28 @@ limitations, export roadmap, and development validation for the **Bad Company
 ## Technical documentation
 
 The reverse-engineering notes for importer and exporter authors live in
-the [documentation index](README.md). They cover the PC and Xbox 360 disc
-layouts, MSI and cabinet indirection, FbRB archives, supported resource
+the [documentation index](README.md). They cover the PC and Xbox 360 source
+containers, MSI and cabinet indirection, FbRB archives, supported resource
 formats, shader-derived material behavior, validation evidence, round-trip
 design constraints, and cross-version evidence boundaries.
 
 ## Supported source media
 
 - **Xbox 360 ISO / XGD2**: pure-Python XDVDFS reader. A scan indexes the active entries in all Frostbite `.fbrb` archives.
+- **Battlefield 1943 Xbox LIVE package / STFS**: pure-Python, read-only LIVE/PIRS STFS reader. A direct extensionless XBLA package is indexed without extracting its files first.
 - **PC retail ISO**: ISO9660 reader plus Windows Installer metadata and Microsoft LZX cabinet extraction. A background scan catalogs archive names and discovers map folders without unpacking the entire DVD; selected archives are indexed on demand.
 
-PC retail-disc extraction currently requires Windows because the installer database and `expand.exe` are used for the original cabinets. Xbox 360 disc reading is platform-independent.
+Each supported source may instead be selected as a ZIP containing exactly one
+identifiable ISO or STFS package. The add-on materializes that member once
+into the fingerprinted asset cache, then reuses the normal random-access
+reader. The original ZIP remains read-only. Encrypted ZIP members and
+ambiguous archives with multiple source candidates are rejected explicitly;
+nested ZIPs are not followed. Allow cache space for the member's complete
+uncompressed size.
+
+PC retail-disc extraction currently requires Windows because the installer
+database and `expand.exe` are used for the original cabinets. Xbox 360 XGD2,
+STFS, and ZIP access are platform-independent.
 
 Several parsers also contain PS3-oriented resource and byte-order recognition
 paths. PS3 disc access and end-to-end imports are unverified because the
@@ -38,23 +49,27 @@ For a source checkout, install the repository root as an extension or add `bc2_f
 ## Workflow
 
 1. Open **File > Import > Bad Company 2 / Frostbite 1**, or use the **Frostbite** tab in the 3D View sidebar.
-2. Choose a PC or Xbox 360 ISO. The add-on immediately scans it in a background
-   worker. Blender remains interactive, progress appears in the status area,
-   and **Cancel After Current Archive** stops at the next safe archive
-   boundary. Xbox assets are indexed during that scan.
+2. Choose a PC/Xbox 360 ISO, the BF1943 Xbox LIVE package, or a ZIP containing
+   one source file. The add-on immediately scans it in a background worker.
+   Blender remains interactive, progress appears in the status area, and
+   **Cancel After Current Archive** stops ZIP preparation between copy chunks
+   or archive indexing at the next safe archive boundary. Xbox assets are
+   indexed during that scan.
 3. The default PC scan reads installer metadata only. It populates the archive
    list and an editable map picker from
    folders containing both `level-00.fbrb` and `terrain-00.fbrb`; it does not
    extract every cabinet member or build a bundled game-data manifest.
    **Index All (Slow)** remains an explicit action in the archive panel.
-4. To browse objects associated with a PC map, choose a discovered level and
-   click **Index Map Objects**. Only that level's `level-00` archive and the
-   shared `mp_common` archive are indexed in the background; single-player
-   levels also include `sp_common`. To assemble the complete map instead,
-   click **Import Map**; the importer also indexes the terrain archive and
-   resolves required materials and textures. The resolver/material path passes
-   a 33-map PC retail audit; strict scene save/reopen validation remains
-   `MP_001`.
+4. To browse objects associated with a PC or BF1943 map, choose a discovered
+   level and click **Index Map Objects**. PC preparation uses the level
+   `level-00` archive and shared `mp_common`, plus `sp_common` for
+   single-player levels. BF1943 preparation uses the level
+   `reduced-level-00`, its terrain archive, and `levels-common-00`. To assemble
+   the complete map instead, click **Import Map**. The PC resolver/material
+   path passes a 33-map retail audit and strict `MP_001` save/reopen checks.
+   All five BF1943 graphs resolve; Coral Sea and Iwo Jima pass Blender
+   full-material save/reopen checks using their decoded Xbox material keys
+   and texture bindings.
 5. For any other PC bundle, select it in **PC Frostbite Archives** and click
    **Index Selected Archive**. This operation also runs in the background.
 6. For individual assets, combine the **Content group** filter
@@ -85,15 +100,17 @@ The map picker is derived locally from archive names and remains editable. It
 does not by itself prove that every discovered level is supported. On the
 validated PC retail sample, all 33 level/terrain pairs complete the structural
 and material audit; complete Blender construction and save/reopen checks
-remain verified with `MP_001`. The manual **Scan Disc** action reapplies the
-lightweight catalog scan while preserving a valid source catalog and its
-previously indexed assets instead of resetting them.
+remain verified with `MP_001`. On the verified BF1943 Xbox LIVE sample, all
+five discovered graphs resolve and two representative scenes pass
+save/reopen. Xbox BC2 maps are not enabled. The manual **Scan Source** action
+reapplies the lightweight catalog scan while preserving a valid source catalog
+and its previously indexed assets instead of resetting them.
 
 ### Preferences and session settings
 
 Add-on Preferences store machine-wide configuration:
 
-- the last selected PC or Xbox 360 ISO;
+- the last selected PC/Xbox 360 ISO, Xbox LIVE package, or source ZIP;
 - the asset cache directory and an **Open Cache Folder** action;
 - default axis conversion, UV flip, scale, Z-only, terrain-resolution,
   material, composite-visibility, and related-animation options;
@@ -198,26 +215,30 @@ created automatically. Direct import of a sparse source-additive clip fails
 explicitly when its character tree is unavailable because applying it over
 the generic rest pose would be incorrect.
 
-The provided Xbox example indexes 630 Frostbite archives and 251,251 active assets. The provided PC example exposes 625 extractable Frostbite archives through the installer database.
+The provided BC2 Xbox example indexes 630 Frostbite archives and 251,251
+active assets. The provided PC example exposes 625 extractable Frostbite
+archives through the installer database. The verified BF1943 Xbox LIVE
+package indexes 85 archives and 29,850 active assets.
 
 ## Native Blender import support
 
 | Asset | Current behavior |
 |---|---|
 | `MeshData` | Creates one Blender mesh object per visible subset, including UVs, neutral subset materials, and available bone-weight vertex groups. PC little-endian and Xbox 360 big-endian layouts are supported. A direct `MeshData` has no deterministic owning descriptor, so the importer does not guess source material references. |
-| PC rigid and tree mesh sets | Resolves a matching LOD `MeshData` resource, preferring LOD0, then follows the same-name DBX descriptor into source surfaces and the shared persistent DX11 shader-key catalog. Direct prop imports retain material, binding, texture, UV-route, and shader-database provenance. Descriptorless undergrowth remains geometry with neutral materials and an explicit warning; console rigid/tree imports remain geometry-only. Tree wind/runtime vegetation semantics are not implemented. |
+| PC or BF1943 rigid and tree mesh sets | Resolves a matching LOD `MeshData` resource, preferring LOD0, then follows the same-name DBX descriptor into source surfaces and the persistent shader-key catalog. PC uses DX11 databases; BF1943 STFS uses its indexed version-117 databases. Direct imports retain material, binding, texture, UV-route, and shader-database provenance. Descriptorless resources remain geometry with neutral materials and an explicit warning; Xbox BC2 and PS3 imports remain geometry-only. Tree wind/runtime vegetation semantics are not implemented. |
 | `CompositeMeshSet` | Resolves LOD0 geometry and source materials, corrects shared/global index streams, separates verified source part IDs into named collections, applies decoded mesh-set bind transforms, and hides decoded damaged/destroyed/blurred parts plus geometry or collections with two `Wreck` occurrences in one name by default. A single `Wreck` occurrence alone remains visible. A vehicle `_Mesh.res` is promoted by default to its same-name entity assembly only when that entity's primary component references the selected mesh; the session/Add-on Preference can disable this. |
-| PC `SkinnedMeshSet` | Resolves LOD0 geometry, the DBX skeleton reference, the default surface set, and source DX11 texture bindings; preserves declaration-specific UV layers (two for verified stride-48 assets and four for stride-64 characters), creates named vertex groups and source materials, adds Armature modifiers, and imports bounded exact-folder plus character-tree Actions when enabled. Console mesh sets remain geometry-only. |
+| PC or BF1943 `SkinnedMeshSet` | Resolves LOD0 geometry, the DBX skeleton reference, the default surface set, and source texture bindings; preserves declaration-specific UV layers, creates named vertex groups and source materials, adds Armature modifiers, and imports bounded related Actions when enabled. PC uses DX11 databases. The verified BF1943 Japanese infantry uses its version-117 database, 147-bone Xbox Granny skeleton, and topology-selected byte-32/36 coordinates. Xbox BC2 and PS3 mesh sets remain geometry-only. |
 | PC soldier entity `.dbx` | Resolves every `Meshes3p` body/head/headgear component at LOD0, applies per-component shader-set overrides, binds all modules to one verified skeleton, creates modular component collections, follows character-specific static/facial/kit/revive animation links, and optionally selects eight verified rifle locomotion clips through the explicit shared base-set link. |
 | PC vehicle entity `.dbx` | Resolves the linked composite LOD0 mesh, source-backed materials, ordered named part collections, mesh-set bind transforms, and DBX-backed default/damaged/alternate states without inventing runtime pivots or parenting. Nested `TrackComponentData` instances are preserved separately: each resolves its shared skinned mesh and explicit skeleton, receives a source-backed local armature, and uses the exact component transform. Matching shader databases are selected by source/duplicate-path/material-key provenance and cached; compatible shader variants route texture bindings to physical UV offsets. Verified AH60 and MI28 families retain dedicated arithmetic while other vehicle glass uses a semantic transmissive fallback. Unknown composite UV declarations remain an explicitly marked cross-subset topology fallback rather than a vehicle-name exception. |
-| PC `GrannyModel` | Creates a native Blender armature while preserving the complete source hierarchy, local transforms, source flags, and physics-joint metadata. |
-| PC `GrannyAnimation` | Creates a Blender 5.2 layered/slotted Action on the matching armature, sampled at the source time step with root motion, quaternion continuity, and representable bone scale. Degrees 0-3 and the documented human/Raven codecs are implemented. |
+| PC or BF1943 `GrannyModel` | Creates a native Blender armature while preserving the complete source hierarchy, local transforms, source flags, and physics-joint metadata. BF1943 uses its verified big-endian wrapper/container and Xbox-specific file-info offsets. |
+| PC or BF1943 `GrannyAnimation` | Resolves the referenced skeleton and creates a Blender 5.2 layered/slotted Action sampled at the source time step with root motion, quaternion continuity, and representable bone scale. Degrees 0-3, the documented PC codecs, and BF1943 `DaKeyframes32f` are implemented. |
 | `WaterMesh` | Creates native water geometry from every body using platform-endian 32-bit triangle indices. |
 | `ITexture` | Converts PC texture resources to DDS and creates an Image plus node material. |
-| `XenonTexture` | Untiles Xbox 360 surfaces, fixes compressed-block byte order, converts to DDS, and creates an Image plus node material. DXT1, DXT3, DXT5, ARGB8888, and L8 headers are recognized. Grouped, padded mip allocations import their base level so Blender can generate lower display mips. |
+| `XenonTexture` | Untiles Xbox 360 surfaces, fixes compressed-block byte order, converts to DDS, and creates an Image plus node material. DXT1 (including format code 3), DXT3, DXT5, ARGB8888, and L8 headers are recognized. Grouped, padded mip allocations import their base level so Blender can generate lower display mips. |
 | `TerrainHeightfield` | Creates a Blender terrain mesh with configurable sampling. The 1024-edge default preserves the complete `MP_001` playable heightfield; lower settings are explicit previews. |
 | Other binary `.dbx` | Converts the implemented Frostbite binary subset to XML in a Blender Text datablock for inspection. Arbitrary instances and fields are not converted into native Blender data, and the XML is not editable round-trip source. |
 | PC complete map | Resolves direct and compact-group placements into linked Blender objects; imports all level heightfields and water; combines mesh subsets; and applies the selected material mode. A JSON diagnostics Text datablock and diagnostic empty are created only when detailed diagnostics are enabled. |
+| BF1943 complete map | Resolves the same static placement foundation from `reduced-level-00`, terrain, and `levels-common-00`; imports heightfields and water; preserves linked mesh reuse; and uses verified version-117 Xbox material keys and texture bindings. The Coral Sea carrier has a verified three-UV base/palette/AO fetch path. Complete Xenos shader arithmetic and general physical UV routing remain unsupported, so other generated Blender roles/graphs are preview heuristics with a persistent diagnostic. |
 | Other resources | Extracts the original resource to the cache without pretending that a native import succeeded. |
 
 DBX XML visibility is not the same as native import support. The exact binary
@@ -270,11 +291,11 @@ are not synthesized.
 
 ### Complete-map organization
 
-The PC map importer creates a `BC2_<LEVEL>` collection with Direct, Forest,
-Middlegrowth, Rigid Group, Static Group, Terrain, Water, and Diagnostics child
-collections. Repeated placements share mesh datablocks. `MP_001` resolves to
-5,380 placed static objects backed by 178 unique MeshData resources and 211
-geometry/material variants.
+The PC and BF1943 map importers create a `BC2_<LEVEL>` collection with Direct,
+Forest, Middlegrowth, Rigid Group, Static Group, Terrain, Water, and
+Diagnostics child collections. Repeated placements share mesh datablocks.
+`MP_001` resolves to 5,380 placed static objects backed by 178 unique MeshData
+resources and 211 geometry/material variants.
 
 The retail-wide structural/material audit completes all 33 discovered map
 pairs: 192,022 serialized placements, 6,425 mesh/material variants, 1,194
@@ -328,6 +349,32 @@ ground-contact check measures a -1.09-unit median forest-origin offset. All 485
 visible subset slots resolve by source naming. The diagnostics Text preserves the ten distinct nonvisual-reference
 descriptions from 24 raw placements, one terrain-decal limitation, 176 dynamic
 UV transforms, and three routes blocked by verified part-selector fields.
+
+The BF1943 map picker exposes `CORAL_SEA`, `GUADAL_CANAL`, `IWO_JIMA_S`,
+`WAKE_ISLAND_S`, and `WAKE_ISLAND_TUTORIAL`. All five static graphs resolve.
+Reduced-resolution Blender runs saved and reopened Coral Sea with 2,889
+placements, 29 linked variants, 71 source materials, 91 source images, one
+terrain tile, and one water mesh, and Iwo Jima with 3,672 placements, 110
+linked variants, 263 source materials, 207 source images, 13 terrain tiles,
+and one water mesh. These checks verify construction, material identity,
+texture selection, and persistence, not Xbox renderer parity. Each scene retains an explicit `unsupported_xbox_shader_bytecode` diagnostic
+because complete compiled arithmetic and general physical UV routing remain
+unknown.
+
+The Coral Sea integration additionally verifies byte-24 `UVMap`, byte-28
+`UV1`, and byte-32 `UV2` across all 14 Japanese/US carrier materials.
+Compiled texture fetches route repeating base/normal/detail through byte 24,
+surface-specific packed AO through byte 28, and `colorpick` through byte 32.
+The verified pixel path multiplies base color by the source palette and
+applies that AO selection. This restores the Japanese continuous wood deck
+and rising-sun marking plus the US deck lettering. The integration also
+covers all 40
+shoreline-wake placements, every jetty source color, and `sky_CS` as the
+skydome color instead of the bound water-noise texture. The wake image is an
+opaque grayscale control rather than source alpha; the preview derives
+dithered foam opacity and labels those materials `BC2 Shoreline Wake`.
+Complete carrier lighting and wake scrolling/flow arithmetic remain
+unsupported and are not exporter-safe semantics.
 
 The validated PC US Assault assembly resolves 23 visible subsets across
 `US_01_Body`, `US_01_Head`, and `US_01_Headgear`, binds all three modules to
@@ -397,6 +444,7 @@ The cache location is configurable in Add-on Preferences, where **Open Cache
 Folder** opens it without deleting or rebuilding any data. It contains:
 
 - the persistent SQLite asset catalog;
+- source files materialized from ZIP members for bounded random access;
 - persistent shader-database material-key indexes used to narrow full-material
   imports;
 - the extracted PC installer database;
@@ -405,25 +453,32 @@ Folder** opens it without deleting or rebuilding any data. It contains:
 - decompressed map-archive payloads used for direct asset seeking;
 - raw resources and converted DDS textures.
 
-Cabinets and extracted archives can be large. **Index All (Slow)** may
-stage substantial data while all PC archives are inspected. Archive indexing
-runs in a background worker so Blender UI events continue to be processed.
-Cancellation takes effect between archives; an active `expand.exe` cabinet
-extraction is allowed to finish before the worker stops.
+Cached ZIP members, cabinets, and extracted archives can be large. ZIP source
+preparation requires the member's complete uncompressed size and reports
+byte progress; cancellation takes effect between 4 MiB copy chunks and
+removes the partial temporary file. **Index All (Slow)** may stage substantial
+data while all PC archives are inspected. Archive indexing runs in a
+background worker so Blender UI events continue to be processed. Cancellation
+takes effect between archives; an active `expand.exe` cabinet extraction is
+allowed to finish before the worker stops.
 Cached cabinets may be deleted when Blender is closed; the add-on recreates
 them from the ISO when needed.
+Cached ZIP source members may likewise be deleted while Blender is closed;
+the add-on recreates them from the read-only ZIP.
 Complete-map payload caches are also substantial: the three verified
 `MP_001` payloads total about 730 MB. They are reusable, source-fingerprint
 scoped derivatives and may likewise be deleted when Blender is closed.
 
 ## Current limitations
 
-- Native Granny conversion is currently limited to validated PC little-endian
-  v7 skeletons and transform animations. Xbox 360/PS3 Granny variants, vector
-  tracks, time-varying or nondecomposable scale/shear, and curve codecs outside
-  the documented set are rejected explicitly. Degree-0 `DaConstant32f`
-  scale/shear is supported when Blender location/rotation/scale channels can
-  represent it.
+- Native Granny conversion covers validated PC little-endian and BF1943 Xbox
+  big-endian v7 skeletons and transform animations. Xbox BC2 and PS3 Granny
+  variants remain unverified. Vector tracks, nondecomposable scale/shear, and
+  codecs outside the documented set are rejected explicitly. Degree-0
+  `DaConstant32f` and BF1943 sampled `DaKeyframes32f` scale/shear are supported
+  when Blender location/rotation/scale channels can represent them. The
+  runtime meaning of BF1943 wrapper ranges is unknown and preserved only as
+  metadata.
 - PC modular character materials are validated with the complete US Assault
   body/head/headgear set. Shared character bindings use `MP_001`'s duplicated
   DX11 database; standalone AH60 bindings fall back to the matching `MP_004`
@@ -439,13 +494,27 @@ scoped derivatives and may likewise be deleted when Blender is closed.
 - The PC resolver, LOD0 MeshData, assigned materials, texture references, and
   terrain material maps pass a structural audit across all 33 discovered
   map pairs. Full Blender scene construction and save/reopen validation remain
-  limited to `MP_001`. Xbox whole-map assembly is not yet implemented.
+  limited to `MP_001`. All five verified BF1943 graphs resolve, and Coral Sea
+  plus Iwo Jima pass full-material Blender save/reopen checks. Their
+  version-117 Xbox databases provide source material keys and texture
+  bindings. The Coral Sea carrier's base/palette/AO routes are verified from
+  its linked layout and compiled programs; complete Xenos arithmetic and
+  general physical UV routing remain unsupported. Xbox BC2 whole-map assembly
+  remains unverified and disabled.
 - Representative map color, alpha, normal, OcRGB, and detail bindings are
   reflected and connected, but general shader constants, exact UV sources,
   swizzles, blend arithmetic, and every permutation are not decoded.
   Unresolved bindings and subset matches are retained in diagnostics rather
   than silently guessed.
 - Console texture formats outside the listed formats are rejected explicitly.
+  Five verified BF1943 code-5, 16-bit-per-pixel textures remain raw-only
+  because their channel masks are not yet verified.
+- Xbox LIVE/PIRS STFS files must be consecutive in logical block space.
+  Fragmented STFS files and console-signed `CON ` packages are rejected
+  explicitly. Package RSA signatures and hash tables are not authenticated.
+- A ZIP must resolve to one supported source member. Encrypted members,
+  nested ZIPs, ambiguous source choices, more than 100,000 entries, and
+  members larger than 16 GiB are unsupported.
 - Terrain physical-material indices and source detail layers are imported.
   Semantic source-texture selection covers 184 of 223 audited PC terrain
   classes; unmatched classes remain explicit color fallbacks.
@@ -459,7 +528,8 @@ scoped derivatives and may likewise be deleted when Blender is closed.
   imports do not interpret the building's part graph. See the
   [PC building destruction research](formats/levels-and-maps.md#research-pc-building-destruction-assemblies).
 - Deleted Frostbite archive entries are intentionally omitted from the asset browser.
-- Writing modified resources, rebuilding `.fbrb` archives, cabinets, or disc images is not implemented.
+- Writing modified resources, rebuilding `.fbrb` archives, cabinets, disc
+  images, or STFS packages is not implemented.
 
 ## Export roadmap
 
@@ -471,7 +541,8 @@ Export is intentionally secondary to reliable import. Future work can add:
 4. Lossless `.fbrb` repacking.
 5. Optional mod-folder output compatible with existing BC2 mod loaders.
 
-Original disc images should remain read-only. Any future write support should target a separate mod workspace.
+Original source media and packages should remain read-only. Any future write
+support should target a separate mod workspace.
 
 ## References and credits
 
@@ -530,11 +601,13 @@ transforms, and vehicle state classification,
 accelerated and fallback Xbox texture paths, DDS generation, terrain sampling,
 DBX conversion, an end-to-end
 synthetic XDVDFS -> FbRB -> MeshData path, bounded Granny skeleton/animation
-fixtures including a degree-3 `D3I1K32fC32f` curve, bounded mesh/skeleton-folder
-related-clip discovery, the four-channel PC character shader declaration, degenerate
-coordinate routing regressions, character binding roles and packed-normal
-graphs, and Blender-native mesh, armature, Action, material, and image
-creation.
+fixtures including a degree-3 `D3I1K32fC32f` curve, big-endian Xbox wrappers
+with 1/2/6-component records, and `DaKeyframes32f`, bounded
+mesh/skeleton-folder related-clip discovery, the four-channel PC character
+shader declaration, degenerate coordinate routing regressions, character
+binding roles and packed-normal graphs, the BF1943 big-endian version-117
+shader graph with mixed binding fields and corruption cases, and
+Blender-native mesh, armature, Action, material, and image creation.
 
 For optional validation with legally owned PC media:
 
@@ -548,6 +621,35 @@ blender --background --factory-startup `
 This saves and reopens the map blend, then verifies placement, linked-mesh,
 terrain, and diagnostics counts. Images remain native file-backed DDS resources
 unless `--pack-images` is supplied.
+
+For optional BF1943 map and Action validation with a legally owned Xbox LIVE
+package:
+
+```powershell
+blender --background --factory-startup `
+  --python tests\blender_map_integration.py -- `
+  --source <BF1943_STFS_PACKAGE> --cache <CACHE_DIRECTORY> `
+  --output <OUTPUT_BLEND> --level CORAL_SEA `
+  --terrain-resolution 128
+
+python tests\bf1943_shader_catalog_audit.py `
+  --source <BF1943_STFS_PACKAGE> --cache <CACHE_DIRECTORY>
+
+blender --background --factory-startup `
+  --python tests\blender_bf1943_animation_integration.py -- `
+  --source <BF1943_STFS_PACKAGE> --cache <CACHE_DIRECTORY> `
+  --output <OUTPUT_BLEND>
+```
+
+The map check validates source geometry, placement instancing, decoded
+material bindings, file-backed images, terrain, water, diagnostics, and
+save/reopen, including the documented carrier layout/fetch exception. The
+shader-catalog audit parses all seven databases and verifies all-five-map key
+coverage plus every resolved texture reference. Neither check claims complete
+Xenos arithmetic or general exact UV routing. The animation check
+resolves the stationary-HMG clip's referenced skeleton, validates sampled
+source poses, and saves/reopens the armature and Action. Keep all generated
+blends and cache data outside the repository.
 
 To audit material resolution across every discovered PC map:
 

@@ -377,9 +377,14 @@ class AssetCatalog:
                 ((asset_id, key) for key in keys),
             )
 
-    def shader_database_assets(self):
+    def shader_database_assets(self, *, include_dx9: bool = False):
+        type_filter = (
+            "OR assets.asset_type = 'Dx9ShaderDatabase'"
+            if include_dx9
+            else ""
+        )
         return self.connection.execute(
-            """
+            f"""
             SELECT assets.*, archives.path AS archive_path,
                    archives.platform, archives.locator,
                    archives.size AS archive_size,
@@ -389,7 +394,10 @@ class AssetCatalog:
             JOIN archives ON archives.id = assets.archive_id
             LEFT JOIN shader_databases
                 ON shader_databases.asset_id = assets.id
-            WHERE lower(assets.path) LIKE '%/shaders/dx11_single.res'
+            WHERE (
+                lower(assets.path) LIKE '%/shaders/dx11_single.res'
+                {type_filter}
+            )
             ORDER BY archives.path COLLATE NOCASE,
                      assets.path COLLATE NOCASE,
                      assets.id

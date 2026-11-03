@@ -106,7 +106,7 @@ def _parse_headers(data: bytes, endian: str):
             raise CorruptDataError(f"MeshData palette counts disagree for {name}")
         if stride < 6 or stride > 128:
             raise CorruptDataError(f"Invalid vertex stride {stride} for {name}")
-        if primitive_type != 3:
+        if primitive_type not in {3, 5}:
             raise CorruptDataError(
                 f"Unsupported primitive type {primitive_type} for {name}"
             )
@@ -135,20 +135,29 @@ def _parse_headers(data: bytes, endian: str):
     return mesh_type, headers, position
 
 
-def _find_payload(data: bytes, endian: str, search_start: int) -> tuple[int, int, int]:
+def _find_payload(
+    data: bytes,
+    endian: str,
+    search_start: int,
+) -> tuple[int, int, int, int]:
     search_end = min(len(data) - 12, max(search_start + 8192, 1 << 20))
     search_end = min(search_end, len(data) - 12)
     for offset in range(search_start, search_end + 1):
-        vertex_size, index_size, reserved = struct.unpack_from(
+        vertex_size, index_size, index_format = struct.unpack_from(
             endian + "III", data, offset
         )
         if (
-            reserved == 0
+            index_format in {0, 1}
             and vertex_size > 0
             and index_size > 0
             and offset + 12 + vertex_size + index_size == len(data)
         ):
-            return offset + 12, vertex_size, index_size
+            index_width = 4 if index_format == 1 else 2
+            if index_size % index_width:
+                raise CorruptDataError(
+                    "MeshData index buffer is not aligned to its element width"
+                )
+            return offset + 12, vertex_size, index_size, index_width
     raise CorruptDataError("MeshData geometry payload could not be located")
 
 
@@ -239,8 +248,55 @@ def _decode_half_pair(
     return float(u), float(v)
 
 
+def _uv_non_degenerate_ratio(
+    data: bytes,
+    start: int,
+    stride: int,
+    offset: int,
+    endian: str,
+    faces: tuple[tuple[int, int, int], ...],
+) -> float | None:
+    if not faces:
+        return None
+    step = max(1, len(faces) // 256)
+    sampled = faces[::step][:256]
+    non_degenerate = 0
+    for face in sampled:
+        values = tuple(
+            _decode_half_pair(
+                data,
+                start + vertex * stride + offset,
+                endian,
+            )
+            for vertex in face
+        )
+        if any(
+            value is None
+            or abs(value[0]) > 64
+            or abs(value[1]) > 64
+            for value in values
+        ):
+            return 0.0
+        left = (
+            values[1][0] - values[0][0],
+            values[1][1] - values[0][1],
+        )
+        right = (
+            values[2][0] - values[0][0],
+            values[2][1] - values[0][1],
+        )
+        if abs(left[0] * right[1] - left[1] * right[0]) > 1e-10:
+            non_degenerate += 1
+    return non_degenerate / len(sampled)
+
+
 def _detect_uv_offset(
-    data: bytes, start: int, count: int, stride: int, endian: str
+    data: bytes,
+    start: int,
+    count: int,
+    stride: int,
+    endian: str,
+    faces: tuple[tuple[int, int, int], ...] = (),
 ) -> int | None:
     preferred_by_stride = {
         20: 16,
@@ -259,7 +315,8 @@ def _detect_uv_offset(
     }
     sample_count = min(count, 64)
     best: tuple[float, int] | None = None
-    for offset in range(16, stride - 3, 2):
+    step = 4 if faces else 2
+    for offset in range(16, stride - 3, step):
         values = []
         for index in range(sample_count):
             value = _decode_half_pair(
@@ -275,6 +332,19 @@ def _detect_uv_offset(
         v_span = max(value[1] for value in values) - min(value[1] for value in values)
         if u_span + v_span < 1e-5:
             continue
+        non_degenerate_ratio = _uv_non_degenerate_ratio(
+            data,
+            start,
+            stride,
+            offset,
+            endian,
+            faces,
+        )
+        if (
+            non_degenerate_ratio is not None
+            and non_degenerate_ratio < 0.25
+        ):
+            continue
         score = 0.0
         if u_span > 1e-4 and v_span > 1e-4:
             score += 8.0
@@ -285,6 +355,8 @@ def _detect_uv_offset(
             score += 12.0
         if offset % 4 == 0:
             score += 1.0
+        if non_degenerate_ratio is not None:
+            score += non_degenerate_ratio * 16.0
         candidate = (score, -offset)
         if best is None or candidate > (best[0], -best[1]):
             best = (score, offset)
@@ -329,6 +401,39 @@ def _decode_uv_channel(
     if require_variation and u_span + v_span < 1e-5:
         return None
     return tuple(values)
+
+
+def _subset_faces(
+    header: _SubsetHeader,
+    indices: tuple[int, ...],
+    index_base: int,
+) -> tuple[tuple[int, int, int], ...]:
+    faces = []
+    for face in range(header.primitive_count):
+        if header.primitive_type == 3:
+            offset = header.index_offset + face * 3
+            triangle = (
+                int(indices[offset]) - index_base,
+                int(indices[offset + 1]) - index_base,
+                int(indices[offset + 2]) - index_base,
+            )
+        else:
+            offset = header.index_offset + face
+            first = int(indices[offset]) - index_base
+            second = int(indices[offset + 1]) - index_base
+            third = int(indices[offset + 2]) - index_base
+            triangle = (
+                (first, second, third)
+                if face % 2 == 0
+                else (second, first, third)
+            )
+        if min(triangle) < 0 or max(triangle) >= header.vertex_count:
+            raise CorruptDataError(
+                f"MeshData index exceeds vertex count in {header.name}"
+            )
+        if len(set(triangle)) == 3:
+            faces.append(triangle)
+    return tuple(faces)
 
 
 def _pc_skinned_uv_offsets(
@@ -501,16 +606,23 @@ def _read_influences(
     bones_per_vertex: int,
     palette: tuple[int, ...],
     mesh_type: int,
+    position_encoding: str,
 ) -> tuple[tuple[tuple[int, float], ...], ...]:
     if not palette:
         return tuple(() for _ in range(vertex_count))
-    if mesh_type != 1 or bones_per_vertex <= 0 or stride < 16:
+    index_offset = 12 if position_encoding == "FLOAT" else 8
+    weight_offset = index_offset + 4
+    if (
+        mesh_type != 1
+        or bones_per_vertex <= 0
+        or stride < weight_offset + 4
+    ):
         return tuple(((palette[0], 1.0),) for _ in range(vertex_count))
     result = []
     for index in range(vertex_count):
         start = vertex_offset + index * stride
-        indices = data[start + 8 : start + 12]
-        weights = data[start + 12 : start + 16]
+        indices = data[start + index_offset : start + index_offset + 4]
+        weights = data[start + weight_offset : start + weight_offset + 4]
         if bones_per_vertex <= 1:
             palette_index = indices[0]
             if palette_index >= len(palette):
@@ -544,7 +656,12 @@ def _subset_index_base(
     header: _SubsetHeader,
     indices: tuple[int, ...],
 ) -> int:
-    index_end = header.index_offset + header.primitive_count * 3
+    index_count = (
+        header.primitive_count * 3
+        if header.primitive_type == 3
+        else header.primitive_count + 2
+    )
+    index_end = header.index_offset + index_count
     if index_end > len(indices):
         raise CorruptDataError(
             f"MeshData subset points outside the index buffer: {header.name}"
@@ -623,15 +740,39 @@ def parse_meshdata(
         tuple[int, ...],
     ]
     | None = None,
+    declared_uv_offsets_by_stride: Mapping[
+        int,
+        tuple[int, ...],
+    ]
+    | None = None,
 ) -> MeshAsset:
+    if (
+        pc_declared_uv_offsets_by_stride is not None
+        and declared_uv_offsets_by_stride is not None
+        and pc_declared_uv_offsets_by_stride
+        != declared_uv_offsets_by_stride
+    ):
+        raise ValueError(
+            "Conflicting PC and platform-independent declared UV offsets"
+        )
+    shader_declared_uv_offsets = (
+        declared_uv_offsets_by_stride
+        if declared_uv_offsets_by_stride is not None
+        else pc_declared_uv_offsets_by_stride
+    )
     endian = _detect_endian(data, platform)
     mesh_type, headers, metadata_end = _parse_headers(data, endian)
-    vertex_start, vertex_size, index_size = _find_payload(
+    vertex_start, vertex_size, index_size, index_width = _find_payload(
         data, endian, metadata_end
     )
     index_start = vertex_start + vertex_size
-    total_indices = index_size // 2
-    indices = struct.unpack_from(endian + f"{total_indices}H", data, index_start)
+    total_indices = index_size // index_width
+    index_code = "I" if index_width == 4 else "H"
+    indices = struct.unpack_from(
+        endian + f"{total_indices}{index_code}",
+        data,
+        index_start,
+    )
     active_headers = [
         header
         for header in headers
@@ -740,7 +881,12 @@ def parse_meshdata(
             header.vertex_offset
             + (index_base + header.vertex_count) * header.stride
         )
-        index_end = header.index_offset + header.primitive_count * 3
+        index_count = (
+            header.primitive_count * 3
+            if header.primitive_type == 3
+            else header.primitive_count + 2
+        )
+        index_end = header.index_offset + index_count
         if vertex_bytes_end > vertex_size or index_end > total_indices:
             raise CorruptDataError(
                 f"MeshData subset points outside geometry buffers: {header.name}"
@@ -763,6 +909,7 @@ def parse_meshdata(
             )
             for vertex in range(header.vertex_count)
         )
+        faces = _subset_faces(header, indices, index_base)
         part_indices, part_index_offset = composite_part_data.get(
             header,
             ((), None),
@@ -873,6 +1020,7 @@ def parse_meshdata(
                 header.vertex_count,
                 header.stride,
                 endian,
+                faces if endian == ">" else (),
             )
         if not explicit_uv_offsets and uv_offset is None:
             uvs = tuple((0.0, 0.0) for _ in range(header.vertex_count))
@@ -905,6 +1053,23 @@ def parse_meshdata(
                 if secondary_offset + 4 <= header.stride
                 else None
             ) or ()
+            if (
+                endian == ">"
+                and secondary_uvs
+                and (
+                    _uv_non_degenerate_ratio(
+                        data,
+                        subset_vertex_start,
+                        header.stride,
+                        secondary_offset,
+                        endian,
+                        faces,
+                    )
+                    or 0.0
+                )
+                < 0.25
+            ):
+                secondary_uvs = ()
             additional_uvs = ()
             uv_offsets = (
                 (uv_offset, secondary_offset)
@@ -913,9 +1078,8 @@ def parse_meshdata(
             )
             uv_source = "stride_heuristic"
         declared_offsets = (
-            pc_declared_uv_offsets_by_stride.get(header.stride, ())
-            if endian == "<"
-            and pc_declared_uv_offsets_by_stride is not None
+            shader_declared_uv_offsets.get(header.stride, ())
+            if shader_declared_uv_offsets is not None
             else ()
         )
         declared_channels = []
@@ -957,19 +1121,6 @@ def parse_meshdata(
                 if uv_source == "none"
                 else uv_source + "+shader_layout_candidates"
             )
-        faces = []
-        for face in range(header.primitive_count):
-            offset = header.index_offset + face * 3
-            triangle = (
-                int(indices[offset]) - index_base,
-                int(indices[offset + 1]) - index_base,
-                int(indices[offset + 2]) - index_base,
-            )
-            if min(triangle) < 0 or max(triangle) >= header.vertex_count:
-                raise CorruptDataError(
-                    f"MeshData index exceeds vertex count in {header.name}"
-                )
-            faces.append(triangle)
         influences = _read_influences(
             data,
             subset_vertex_start,
@@ -978,12 +1129,13 @@ def parse_meshdata(
             header.bones_per_vertex,
             header.palette,
             mesh_type,
+            encoding,
         )
         subsets.append(
             MeshSubset(
                 name=header.name,
                 positions=positions,
-                faces=tuple(faces),
+                faces=faces,
                 uvs=uvs,
                 influences=influences,
                 vertex_stride=header.stride,

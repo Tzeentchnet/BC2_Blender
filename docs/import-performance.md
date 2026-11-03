@@ -148,8 +148,9 @@ placement creation, terrain, and water.
 ## Selective shader-database discovery
 
 **Implemented:** direct full-material imports persist the complete material-key
-inventory of every inspected DX11 shader database in the SQLite catalog. A
-subsequent lookup considers:
+inventory of every inspected PC DX11 shader database in the SQLite catalog.
+BF1943 complete-map imports persist the same inventory for inspected
+version-117 Xbox databases. A subsequent lookup considers:
 
 - indexed databases containing an exact requested key or a unique matching
   shader-partition suffix;
@@ -158,8 +159,9 @@ subsequent lookup considers:
 
 Known indexed databases that cannot resolve any remaining surface are skipped.
 The shader database parser still validates the complete container structure,
-but it decodes texture bindings and symbolically traces DXBC coordinate routes
-only for requested material keys or shader partitions. Missing source keys
+but it decodes texture bindings and, for PC DX11 only, symbolically traces
+DXBC coordinate routes only for requested material keys or shader partitions.
+Xbox bytecode is never sent through the DXBC analyzer. Missing source keys
 remain explicit diagnostics; they no longer force every known nonmatching
 database to be parsed again. Catalog records are invalidated automatically
 when their owning archive is reindexed.

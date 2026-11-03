@@ -2,8 +2,8 @@
 
 ## Scope and confidence
 
-The native implementation is intentionally limited to the **PC retail**
-little-endian Granny resources validated here:
+The native implementation covers the **PC retail** little-endian Granny
+resources validated here:
 
 - the shared `Characters/Skeletons/ske01` human skeleton;
 - the `Characters/US/US_Models/US_01_Body` skinned body;
@@ -19,8 +19,14 @@ little-endian Granny resources validated here:
 The Frostbite wrappers and Granny v7 structures below are **implemented** with
 bounded reads and synthetic fixtures. Field meanings are **verified** where
 the skeleton inverse-bind matrices, pose clip, or Blender output provide an
-independent invariant. Xbox 360 and PS3 Granny variants are not advertised as
-native support.
+independent invariant.
+
+The same native path also covers the verified **BF1943 Xbox 360** big-endian
+variant. A package-wide audit parses all 31 cataloged `GrannyModel` records
+and all 787 `GrannyAnimation` records. A representative nine-bone stationary
+HMG skeleton and 61-sample Action also pass Blender pose, save, and reopen
+checks. This is evidence for one BF1943 Xbox LIVE package, not a claim that
+Xbox BC2 or PS3 Granny variants use the same layouts.
 
 `Objects/Soldiers/US/Assault.dbx` links these three mesh modules through
 `Meshes3p`. Modular import verifies that every component references `ske01`,
@@ -77,6 +83,33 @@ not identify the complete pose used at runtime; applying these sparse
 transforms directly over `ske01` rest was visually disproved by Japanese
 infantry eye and face deformation.
 
+### BF1943 Xbox `GrannyAnimation`
+
+The verified Xbox wrapper is big-endian and uses a variable-length record
+array instead of the PC additive-bone table:
+
+```text
+uint32_be wrapper_version       // 10
+uint32_be record_count
+repeat record_count:
+    uint32_be bone_index
+    uint32_be component_count
+    float32_be[component_count] lower_bounds
+    float32_be[component_count] upper_bounds
+uint32_be string_count
+repeat string_count:
+    uint16_be byte_length
+    byte[byte_length] latin-1 string
+padding
+Granny v7 file
+```
+
+Observed `component_count` values are 1, 2, and 6. The parser pairs each lower
+and upper value as a retained wrapper range, bounds the count, requires finite
+ordered pairs, and rejects duplicate or out-of-range bone indices. The
+runtime meaning of these ranges is **unknown**; they are not treated as PC
+additive indices, curve controls, or proven animation bounds.
+
 The PC Granny file starts with this 32-byte magic:
 
 ```text
@@ -86,6 +119,15 @@ c8 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00
 
 The importer searches only the first 64 bytes after the string table. It does
 not accept an arbitrary same-looking signature elsewhere in a resource.
+
+The verified BF1943 Xbox Granny file instead starts with:
+
+```text
+b5 95 11 0e 4b b5 a5 6a 50 28 28 eb 04 b3 78 25
+00 00 01 c8 00 00 00 00 00 00 00 00 00 00 00 00
+```
+
+This is a distinct Xbox magic, not a whole-byte reversal of the PC value.
 
 ## Granny v7 container
 
@@ -137,16 +179,23 @@ is already directly readable at the declared little-endian field locations.
 The importer bounds those tables through the file descriptor but does not
 interpret them.
 
-## PC skeleton
+BF1943 uses the same structure-relative header, 44-byte section descriptor,
+and 12-byte relocation record widths, all read big-endian. The observed
+containers are version 7 with eight uncompressed sections and 32-bit
+relocations. Compression and mixed-marshalling variants outside this sample
+remain unsupported.
 
-In the validated PC Granny model, section 0 contains:
+## Skeleton layouts
 
-| Section-0 offset | Type | Meaning |
-|---:|---|---|
-| 172 | `uint32` | bone count |
-| 176 | relocated pointer | 152-byte bone array |
+The file-info bone-array fields differ by platform:
 
-Each verified bone record is:
+| Platform | Bone-count offset | Relocated bone-array pointer |
+|---|---:|---:|
+| PC retail | 172 | 176 |
+| BF1943 Xbox 360 | 168 | 172 |
+
+Offsets are relative to section 0. Both verified variants use 152-byte bone
+records. Numeric fields use the platform byte order:
 
 | Record offset | Type | Meaning |
 |---:|---|---|
@@ -214,6 +263,7 @@ The selected clips require:
 - `D4nK8uC7u`
 - `D4Constant32f`
 - `DaK32fC32f`
+- `DaKeyframes32f`
 - `DaIdentity`
 
 The `D4n` headers contain format and degree bytes, packed quaternion
@@ -234,6 +284,7 @@ count/pointer at offsets 12/16.
 - `D3I1K16uC16u`
 - `D3K8uC8u`
 - `D3K16uC16u`
+- `DaKeyframes32f`
 - `DaIdentity`
 
 `D3Constant32f` stores three controls beginning at offset 4. The packed `D3`
@@ -252,10 +303,26 @@ little-endian `float32` control scales/offsets, byte 28 is the `uint32` scalar
 count, and byte 32 is the relocated array pointer. The array stores `n`
 `float32` knots followed by `n` `float32` scalar controls.
 
+BF1943's `DaKeyframes32f` is a uniformly sampled, platform-endian float curve:
+
+| Curve-data offset | Type | Meaning |
+|---:|---|---|
+| 0 | `uint32` | control dimension: 4 rotation, 3 translation, or 9 scale/shear |
+| 4 | `uint32` | scalar control count |
+| 8 | relocated pointer | `float32[scalar_count]` controls |
+
+The scalar count must be a nonzero multiple of the dimension. Controls are
+grouped by that dimension, assigned degree 1, and receive knots
+`sample_index * animation_time_step`. The representative stationary-HMG clip
+has 61 controls per curve, duration about `1.00017` seconds, and time step
+about `0.0166694` seconds. The package-wide audit decoded 135 occurrences of
+this codec.
+
 ### Scale/shear
 
 - `DaIdentity`
 - degree-0 `DaConstant32f`
+- BF1943 `DaKeyframes32f`
 
 `DaConstant32f` stores a `uint32` control count at object-relative byte 4 and
 a relocated pointer at byte 8. The validated scale/shear form has exactly nine
@@ -278,10 +345,10 @@ is **implemented** by a synthetic nonlinear endpoint fixture and **verified**
 against the retail `WalkBackward` loop: clamping the interval index skipped
 the final control near the boundary and produced the reported toe/body snap.
 
-Time-varying scale/shear codecs remain unsupported. Blender Actions key the
-decomposed scale for representable constant matrices and reject transforms
-with a reconstruction residual of `1e-5` or greater rather than silently
-discarding shear.
+Other time-varying scale/shear codecs remain unsupported. Blender Actions key
+the decomposed scale for representable constant or sampled matrices and reject
+transforms with a reconstruction residual of `1e-5` or greater rather than
+silently discarding shear.
 
 ## Blender conversion
 
@@ -319,6 +386,13 @@ Blender pose-bone deltas. The Blender 5.2 Action uses a slot, a keyframe layer,
 and a channel bag. Translation, quaternion, and scale F-Curves use linear
 interpolation between native samples, and quaternion signs are made continuous.
 Root motion is retained.
+
+The BF1943 stationary-HMG validation resolves the animation's DBX skeleton
+reference, creates a nine-bone armature, decodes all rotation, translation,
+and scale/shear curves as `DaKeyframes32f`, and creates a 61-sample Action.
+Three sampled poses agree with the decoded source hierarchy within
+`7.5e-9`, and both the armature and Action remain usable after saving and
+reopening the Blender file.
 
 The imported core locomotion Actions retain raw resource timing. The verified
 walk clips have a duration of about 0.9333 seconds and 29 inclusive samples at
@@ -441,6 +515,11 @@ validation.
 | Scout bounded related Actions | 14: 46/147-track local poses, four 46-track FacePose-baked facial Actions, and eight 39-track rifle locomotion Actions |
 | Japanese infantry skeleton / mesh subsets | 147 bones / 8 |
 | Japanese infantry bounded related Actions | 14; `dead_pose2_Delta` maximum/p99/mean FacePose-relative vertex displacement about 0.00905/0.00344/0.000160 |
+| BF1943 GrannyModel records | 31 of 31 parsed; 3-147 bones, 620 total decoded bones |
+| BF1943 GrannyAnimation records | 787 of 787 parsed |
+| BF1943 wrapper component counts | 1, 2, and 6 |
+| BF1943 sampled-HMG skeleton / Action | 9 bones / 9 tracks / 61 inclusive samples |
+| BF1943 sampled-HMG maximum pose-matrix error | below `7.5e-9` |
 
 `US_01_SkeletonPose` has 64 transform tracks. Most evaluated controls agree
 with the skeleton local transforms to floating-point or quantization
@@ -459,7 +538,9 @@ would still need to:
 - retain unsupported vector and scale/shear tracks;
 - verify game playback and byte-stable no-edit round trips.
 
-Xbox 360 and PS3 byte order, outer wrappers, skeleton object layouts, and
+BF1943 Xbox byte order, wrapper records, skeleton offsets, and observed curve
+codecs are implemented, but the wrapper ranges' runtime meaning remains
+unknown. Xbox BC2 and PS3 outer wrappers, skeleton layouts, codecs, and
 compression/marshalling variants need separate validation.
 
 See [`granny.py`](../../bc2_frostbite_importer/core/granny.py),

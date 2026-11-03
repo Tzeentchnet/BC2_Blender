@@ -6,6 +6,7 @@ import gzip
 import struct
 import tempfile
 import unittest
+import zipfile
 from types import SimpleNamespace
 from unittest import mock
 from pathlib import Path
@@ -27,7 +28,11 @@ from bc2_frostbite_importer.core.dbx import (
     dbx_to_xml,
     parse_dbx,
 )
-from bc2_frostbite_importer.core.errors import CorruptDataError
+from bc2_frostbite_importer.core.errors import (
+    CorruptDataError,
+    ExtractionError,
+    UnsupportedSourceError,
+)
 from bc2_frostbite_importer.core.fbrb import FbrbEntry
 from bc2_frostbite_importer.core.granny import (
     GrannyCurve,
@@ -38,8 +43,12 @@ from bc2_frostbite_importer.core.level import (
     FrostbiteTransform,
     LevelResolver,
     _unique_virtual_paths,
+    discover_levels,
     discover_pc_levels,
+    index_level_archives,
+    level_archive_paths,
     pc_level_archive_paths,
+    xbox360_level_archive_paths,
 )
 from bc2_frostbite_importer.core.mesh import (
     _position_format,
@@ -61,6 +70,7 @@ from bc2_frostbite_importer.core.shaderdb import (
     _vertex_layout,
     parse_shader_database,
 )
+from bc2_frostbite_importer.core.stfs import StfsPackage
 from bc2_frostbite_importer.core.terrain import (
     parse_heightfield,
     parse_material_map,
@@ -165,6 +175,8 @@ def make_composite_meshdata() -> bytes:
 def make_granny_container(
     section_data: list[bytes],
     section_relocations: list[list[tuple[int, int, int]]],
+    *,
+    endian: str = "<",
 ) -> bytes:
     section_count = 8
     if (
@@ -176,8 +188,15 @@ def make_granny_container(
     data_start = descriptor_start + section_count * 44
     granny = bytearray(data_start)
     magic = bytes.fromhex(
-        "29de6cc0baa4532b25f5b7a5f666e2"
-        "eec80100000000000000000000000000"
+        (
+            "29de6cc0baa4532b25f5b7a5f666e2"
+            "eec80100000000000000000000000000"
+        )
+        if endian == "<"
+        else (
+            "b595110e4bb5a56a502828eb04b37825"
+            "000001c8000000000000000000000000"
+        )
     )
     granny[:32] = magic
     data_offsets = []
@@ -188,10 +207,10 @@ def make_granny_container(
     for relocations in section_relocations:
         relocation_offsets.append(len(granny))
         for relocation in relocations:
-            granny.extend(struct.pack("<3I", *relocation))
+            granny.extend(struct.pack(endian + "3I", *relocation))
     file_size = len(granny)
     struct.pack_into(
-        "<18I",
+        endian + "18I",
         granny,
         32,
         7,
@@ -216,7 +235,7 @@ def make_granny_container(
     for index, payload in enumerate(section_data):
         size = len(payload)
         struct.pack_into(
-            "<11I",
+            endian + "11I",
             granny,
             descriptor_start + index * 44,
             0,
@@ -240,36 +259,66 @@ def granny_wrapper(
     *,
     animation: bool,
     additive_bone_indices: tuple[int, ...] = (),
+    xbox_wrapper_records: tuple[
+        tuple[int | float, ...],
+        ...,
+    ] = (),
+    endian: str = "<",
 ) -> bytes:
     if animation:
-        header = bytearray(
-            struct.pack("<II", 10, len(additive_bone_indices))
+        if additive_bone_indices and xbox_wrapper_records:
+            raise ValueError("Synthetic Granny wrapper modes are exclusive")
+        record_count = (
+            len(xbox_wrapper_records)
+            if xbox_wrapper_records
+            else len(additive_bone_indices)
         )
-        if additive_bone_indices:
+        header = bytearray(
+            struct.pack(endian + "II", 10, record_count)
+        )
+        if xbox_wrapper_records:
+            for record in xbox_wrapper_records:
+                bone_index, component_count, *values = record
+                if len(values) != int(component_count) * 2:
+                    raise ValueError(
+                        "Synthetic Xbox wrapper bounds are incomplete"
+                    )
+                header.extend(
+                    struct.pack(
+                        endian + "II" + "f" * len(values),
+                        int(bone_index),
+                        int(component_count),
+                        *values,
+                    )
+                )
+        elif additive_bone_indices:
             header.extend(
                 struct.pack(
-                    "<" + "I" * len(additive_bone_indices),
+                    endian + "I" * len(additive_bone_indices),
                     *additive_bone_indices,
                 )
             )
-            header.extend(struct.pack("<I", 0))
-        header.extend(struct.pack("<I", len(strings)))
+            header.extend(struct.pack(endian + "I", 0))
+        header.extend(struct.pack(endian + "I", len(strings)))
     else:
-        header = bytearray(struct.pack("<II", 10, len(strings)))
+        header = bytearray(struct.pack(endian + "II", 10, len(strings)))
     result = bytearray(header)
     for value in strings:
         encoded = value.encode("latin-1")
-        result.extend(struct.pack("<H", len(encoded)))
+        result.extend(struct.pack(endian + "H", len(encoded)))
         result.extend(encoded)
     result.extend(b"\0" * 4)
     result.extend(granny)
     return bytes(result)
 
 
-def make_granny_model() -> bytes:
+def make_granny_model(*, endian: str = "<") -> bytes:
     strings = ["<file>", "root", "child"]
-    section = bytearray(184 + 2 * 152)
-    struct.pack_into("<I", section, 172, 2)
+    record_start = 184 if endian == "<" else 180
+    count_offset = 172 if endian == "<" else 168
+    pointer_offset = 176 if endian == "<" else 172
+    section = bytearray(record_start + 2 * 152)
+    struct.pack_into(endian + "I", section, count_offset, 2)
     records = (
         (1, -1, (0.0, 0.0, 0.0)),
         (2, 0, (1.0, 0.0, 0.0)),
@@ -294,23 +343,40 @@ def make_granny_model() -> bytes:
         1.0,
     )
     for index, (name_index, parent, translation) in enumerate(records):
-        offset = 184 + index * 152
-        struct.pack_into("<IiI", section, offset, name_index, parent, 0)
-        struct.pack_into("<3f", section, offset + 12, *translation)
-        struct.pack_into("<4f", section, offset + 24, 0.0, 0.0, 0.0, 1.0)
-        struct.pack_into("<9f", section, offset + 40, *identity_3)
-        struct.pack_into("<16f", section, offset + 76, *identity_4)
+        offset = record_start + index * 152
+        struct.pack_into(endian + "IiI", section, offset, name_index, parent, 0)
+        struct.pack_into(endian + "3f", section, offset + 12, *translation)
+        struct.pack_into(
+            endian + "4f",
+            section,
+            offset + 24,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        )
+        struct.pack_into(endian + "9f", section, offset + 40, *identity_3)
+        struct.pack_into(endian + "16f", section, offset + 76, *identity_4)
     sections = [bytes(section)] + [b""] * 7
-    relocations = [[(176, 0, 184)]] + [[] for _ in range(7)]
+    relocations = [[(pointer_offset, 0, record_start)]] + [
+        [] for _ in range(7)
+    ]
     return granny_wrapper(
         strings,
-        make_granny_container(sections, relocations),
+        make_granny_container(sections, relocations, endian=endian),
         animation=False,
+        endian=endian,
     )
 
 
 def make_granny_animation(
     additive_bone_indices: tuple[int, ...] = (),
+    *,
+    endian: str = "<",
+    xbox_wrapper_records: tuple[
+        tuple[int | float, ...],
+        ...,
+    ] = (),
 ) -> bytes:
     strings = [
         "<file>",
@@ -321,17 +387,47 @@ def make_granny_animation(
         "CurveDataHeader_DaIdentity",
     ]
     section = bytearray(548)
-    struct.pack_into("<I", section, 76, 1)
-    struct.pack_into("<I", section, 204, 2)
-    struct.pack_into("<I", section, 216, 1)
-    struct.pack_into("<II", section, 340, 1, 0)
-    struct.pack_into("<BBH4f", section, 400, 5, 0, 0, 0.0, 0.0, 0.0, 1.0)
-    struct.pack_into("<BBH3f", section, 424, 4, 0, 0, 1.0, 2.0, 3.0)
-    struct.pack_into("<IfffI", section, 504, 0, 1.0, 1.0 / 30.0, 1.0, 1)
+    struct.pack_into(endian + "I", section, 76, 1)
+    struct.pack_into(endian + "I", section, 204, 2)
+    struct.pack_into(endian + "I", section, 216, 1)
+    struct.pack_into(endian + "II", section, 340, 1, 0)
+    struct.pack_into(
+        endian + "BBH4f",
+        section,
+        400,
+        5,
+        0,
+        0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    )
+    struct.pack_into(
+        endian + "BBH3f",
+        section,
+        424,
+        4,
+        0,
+        0,
+        1.0,
+        2.0,
+        3.0,
+    )
+    struct.pack_into(
+        endian + "IfffI",
+        section,
+        504,
+        0,
+        1.0,
+        1.0 / 30.0,
+        1.0,
+        1,
+    )
     type_section = bytearray(160)
-    struct.pack_into("<II", type_section, 0, 1, 3)
-    struct.pack_into("<II", type_section, 64, 1, 4)
-    struct.pack_into("<II", type_section, 128, 1, 5)
+    struct.pack_into(endian + "II", type_section, 0, 1, 3)
+    struct.pack_into(endian + "II", type_section, 64, 1, 4)
+    struct.pack_into(endian + "II", type_section, 128, 1, 5)
     sections = [bytes(section)] + [b""] * 5 + [bytes(type_section), b""]
     relocations = [
         [
@@ -349,9 +445,11 @@ def make_granny_animation(
     ] + [[] for _ in range(7)]
     return granny_wrapper(
         strings,
-        make_granny_container(sections, relocations),
+        make_granny_container(sections, relocations, endian=endian),
         animation=True,
         additive_bone_indices=additive_bone_indices,
+        xbox_wrapper_records=xbox_wrapper_records,
+        endian=endian,
     )
 
 
@@ -425,6 +523,107 @@ def make_cubic_granny_animation() -> bytes:
     )
 
 
+def make_sampled_granny_animation() -> bytes:
+    endian = ">"
+    strings = [
+        "<file>",
+        "root",
+        "group",
+        "CurveDataHeader_DaKeyframes32f",
+    ]
+    section = bytearray(760)
+    struct.pack_into(endian + "I", section, 76, 1)
+    struct.pack_into(endian + "I", section, 204, 2)
+    struct.pack_into(endian + "I", section, 216, 1)
+    struct.pack_into(endian + "II", section, 340, 1, 0)
+    curves = (
+        (
+            400,
+            4,
+            480,
+            (0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0),
+        ),
+        (412, 3, 512, (0.0, 0.0, 0.0, 2.0, 4.0, 6.0)),
+        (
+            424,
+            9,
+            536,
+            (
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                2.0,
+                0.0,
+                0.0,
+                0.0,
+                2.0,
+                0.0,
+                0.0,
+                0.0,
+                2.0,
+            ),
+        ),
+    )
+    for curve_offset, dimension, controls_offset, controls in curves:
+        struct.pack_into(
+            endian + "II",
+            section,
+            curve_offset,
+            dimension,
+            len(controls),
+        )
+        struct.pack_into(
+            endian + "f" * len(controls),
+            section,
+            controls_offset,
+            *controls,
+        )
+    struct.pack_into(
+        endian + "IfffI",
+        section,
+        704,
+        0,
+        1.0,
+        1.0,
+        1.0,
+        1,
+    )
+    type_section = bytearray(160)
+    for offset in (0, 64, 128):
+        struct.pack_into(endian + "II", type_section, offset, 1, 3)
+    sections = [bytes(section)] + [b""] * 5 + [bytes(type_section), b""]
+    relocations = [
+        [
+            (80, 0, 700),
+            (700, 0, 704),
+            (724, 0, 728),
+            (728, 0, 204),
+            (220, 0, 340),
+            (348, 6, 0),
+            (352, 0, 400),
+            (356, 6, 64),
+            (360, 0, 412),
+            (364, 6, 128),
+            (368, 0, 424),
+            (408, 0, 480),
+            (420, 0, 512),
+            (432, 0, 536),
+        ]
+    ] + [[] for _ in range(7)]
+    return granny_wrapper(
+        strings,
+        make_granny_container(sections, relocations, endian=endian),
+        animation=True,
+        endian=endian,
+    )
+
+
 def make_fbrb(
     path: str,
     asset_type: str,
@@ -487,6 +686,97 @@ def make_xdvdfs_image(path: Path, archive: bytes):
     image[root_offset : root_offset + sector_size] = root
     file_offset = file_sector * sector_size
     image[file_offset : file_offset + len(archive)] = archive
+    path.write_bytes(image)
+
+
+def make_stfs_package(
+    path: Path,
+    archive: bytes,
+    *,
+    consecutive: bool = True,
+):
+    block_size = 0x1000
+    data_offset = 0xB000
+    archive_start_block = 0xA9
+    archive_block_count = (len(archive) + block_size - 1) // block_size
+    total_allocated_blocks = archive_start_block + archive_block_count
+
+    def block_offset(block: int) -> int:
+        physical_block = block + (block + 0xAA) // 0xAA
+        if block > 0xAA:
+            physical_block += (block + 0x70E4) // 0x70E4
+            if block > 0x70E4:
+                physical_block += (block + 0x4AF768) // 0x4AF768
+        return data_offset + physical_block * block_size
+
+    image_size = block_offset(total_allocated_blocks - 1) + block_size
+    image = bytearray(image_size)
+    image[:4] = b"LIVE"
+    struct.pack_into(">I", image, 0x340, 0xAD0E)
+    struct.pack_into(">I", image, 0x344, 0x000D0000)
+    struct.pack_into(">I", image, 0x348, 2)
+    struct.pack_into(">Q", image, 0x34C, image_size - data_offset)
+    struct.pack_into(">I", image, 0x360, 0x5841097E)
+    descriptor = memoryview(image)[0x379 : 0x379 + 0x24]
+    descriptor[0] = 0x24
+    descriptor[2] = 1
+    struct.pack_into("<H", descriptor, 3, 1)
+    descriptor[5:8] = (0).to_bytes(3, "little")
+    struct.pack_into(">I", descriptor, 0x1C, total_allocated_blocks)
+    struct.pack_into(">I", image, 0x3A9, 0)
+
+    def file_record(
+        name: str,
+        *,
+        flags: int,
+        block_count: int,
+        start_block: int,
+        parent: int,
+        size: int,
+    ) -> bytes:
+        encoded = name.encode("ascii")
+        record = bytearray(0x40)
+        record[: len(encoded)] = encoded
+        record[0x28] = len(encoded) | flags
+        record[0x29:0x2C] = block_count.to_bytes(3, "little")
+        record[0x2C:0x2F] = block_count.to_bytes(3, "little")
+        record[0x2F:0x32] = start_block.to_bytes(3, "little")
+        struct.pack_into(">H", record, 0x32, parent)
+        struct.pack_into(">I", record, 0x34, size)
+        return bytes(record)
+
+    table = bytearray(block_size)
+    table[0x00:0x40] = file_record(
+        "dist",
+        flags=0x80,
+        block_count=0,
+        start_block=0,
+        parent=0xFFFF,
+        size=0,
+    )
+    table[0x40:0x80] = file_record(
+        "xenon",
+        flags=0x80,
+        block_count=0,
+        start_block=0,
+        parent=0,
+        size=0,
+    )
+    table[0x80:0xC0] = file_record(
+        "test.fbrb",
+        flags=0x40 if consecutive else 0,
+        block_count=archive_block_count,
+        start_block=archive_start_block,
+        parent=1,
+        size=len(archive),
+    )
+    table_offset = block_offset(0)
+    image[table_offset : table_offset + block_size] = table
+    for index in range(archive_block_count):
+        source_start = index * block_size
+        chunk = archive[source_start : source_start + block_size]
+        destination = block_offset(archive_start_block + index)
+        image[destination : destination + len(chunk)] = chunk
     path.write_bytes(image)
 
 
@@ -579,6 +869,98 @@ def make_shader_database() -> bytes:
     data.extend(material_reference)
     data.extend(struct.pack("<i", 1))
     data.extend(struct.pack("<h", 0))
+    return bytes(data)
+
+
+def make_xbox_shader_database(
+    *,
+    vertex_shader_index: int = 0,
+    key_count: int = 1,
+    trailing: bytes = b"",
+) -> bytes:
+    entry_reference = b"E" * 16
+    layout_reference = b"L" * 16
+    program_reference = b"P" * 16
+    vertex_reference = b"V" * 16
+    pixel_reference = b"X" * 16
+    material_key = "Objects/Test/Mesh/Shaders/Surface"
+    texture_name = b"Textures/Test/XboxColor"
+
+    data = bytearray(struct.pack(">IBI", 117, 0, 2))
+    data.extend(struct.pack(">I", 32))
+    data.extend(b"\0" * 20)
+    data.extend(bytes(8))
+
+    group_size = 32 + 140
+    data.extend(struct.pack(">I", group_size))
+    data.extend(b"\0" * 20)
+    data.extend(bytes((0, 0, 0, 1, 0, 0)))
+    data.extend(b"\0" * 2)
+    data.extend(struct.pack("<I", 0x104))
+    data.extend(texture_name + b"\0" * (136 - len(texture_name)))
+
+    data.extend(struct.pack(">IHH", 1, 0, 0))
+    data.extend(struct.pack(">II", 1, 0))
+
+    data.extend(struct.pack(">I", 1))
+    data.extend(vertex_reference)
+    data.extend(struct.pack(">I", 4))
+    data.extend(b"VERT")
+    data.extend(struct.pack(">3I", 0, 0, 0))
+    data.extend(struct.pack(">I", 1))
+    data.extend(b"\0" * 28)
+
+    data.extend(struct.pack(">I", 1))
+    data.extend(pixel_reference)
+    data.extend(struct.pack(">I", 4))
+    data.extend(b"PIXL")
+    data.extend(struct.pack(">3I", 1, 0, 0))
+
+    data.extend(struct.pack(">I", 1))
+    data.extend(program_reference)
+    data.extend(
+        struct.pack(
+            ">8I",
+            0,
+            0,
+            0,
+            0,
+            vertex_shader_index,
+            0,
+            0,
+            1,
+        )
+    )
+
+    data.extend(struct.pack(">I", key_count))
+    for _ in range(key_count):
+        data.extend(entry_reference)
+        data.extend(bytes(16))
+        data.extend(layout_reference)
+        data.extend(bytes(44))
+
+    data.extend(struct.pack(">I", 1))
+    layout = bytearray(89)
+    layout[:16] = layout_reference
+    struct.pack_into("<I", layout, 16, 0x103)
+    layout[20:24] = bytes((6, 0, 24, 0))
+    layout[24:28] = bytes((6, 0, 28, 0))
+    layout[28:32] = bytes((6, 0, 32, 0))
+    layout[80] = 4
+    layout[85] = 36
+    data.extend(layout)
+
+    data.extend(struct.pack(">I", 1))
+    data.extend(material_key.encode("ascii") + b"\0")
+    data.extend(entry_reference)
+    data.extend(struct.pack(">I", 0))
+    data.extend(struct.pack(">I", 1))
+    data.extend(b"Objects/Test/Mesh_lod0/Surface/Standard\0")
+    data.extend(layout_reference)
+    data.extend(struct.pack(">I", 1))
+    data.extend(entry_reference)
+    data.extend(struct.pack(">IH", 1, 0))
+    data.extend(trailing)
     return bytes(data)
 
 
@@ -696,6 +1078,129 @@ class MeshTests(unittest.TestCase):
                 self.assertEqual(len(subset.positions), 3)
                 self.assertEqual(subset.faces, ((0, 1, 2),))
                 self.assertEqual(subset.positions[1], (1.0, 0.0, 0.0))
+
+    def test_parses_uint32_index_buffer(self):
+        metadata = bytearray(struct.pack(">IHB", 0, 0, 1))
+        metadata.extend(b"edge\0")
+        metadata.extend(
+            struct.pack(
+                ">IIIIBBBBH",
+                1,
+                3,
+                0,
+                0,
+                12,
+                3,
+                0,
+                0,
+                0,
+            )
+        )
+        vertices = b"".join(
+            struct.pack(">fff", *position)
+            for position in (
+                (0.0, 0.0, 0.0),
+                (1.0, 0.0, 0.0),
+                (0.0, 1.0, 0.0),
+            )
+        )
+        indices = struct.pack(">3I", 0, 1, 2)
+        metadata.extend(
+            struct.pack(">III", len(vertices), len(indices), 1)
+        )
+        subset = parse_meshdata(
+            bytes(metadata + vertices + indices),
+            "xbox360",
+            position_format="FLOAT",
+        ).subsets[0]
+        self.assertEqual(subset.faces, ((0, 1, 2),))
+
+    def test_xbox_uv_detection_rejects_degenerate_preferred_field(self):
+        endian = ">"
+        metadata = bytearray(struct.pack(endian + "IHB", 0, 0, 1))
+        metadata.extend(b"visual\0")
+        metadata.extend(
+            struct.pack(
+                endian + "IIIIBBBBH",
+                1,
+                3,
+                0,
+                0,
+                32,
+                3,
+                0,
+                0,
+                0,
+            )
+        )
+        vertices = bytearray()
+        for position, uv, degenerate in zip(
+            (
+                (0.0, 0.0, 0.0),
+                (1.0, 0.0, 0.0),
+                (0.0, 1.0, 0.0),
+            ),
+            ((0.0, 0.0), (1.0, 0.0), (0.0, 1.0)),
+            ((0.0, 0.0), (0.001, 0.001), (0.0005, 0.0005)),
+        ):
+            vertex = bytearray(32)
+            struct.pack_into(endian + "fff", vertex, 0, *position)
+            struct.pack_into(endian + "ee", vertex, 16, *uv)
+            struct.pack_into(endian + "ee", vertex, 24, *degenerate)
+            vertices.extend(vertex)
+        indices = struct.pack(endian + "3H", 0, 1, 2)
+        metadata.extend(
+            struct.pack(endian + "III", len(vertices), len(indices), 0)
+        )
+
+        subset = parse_meshdata(
+            bytes(metadata + vertices + indices),
+            "xbox360",
+            position_format="FLOAT",
+        ).subsets[0]
+
+        self.assertEqual(subset.uv_offsets, (16,))
+        self.assertEqual(
+            subset.uvs,
+            ((0.0, 0.0), (1.0, 0.0), (0.0, 1.0)),
+        )
+
+    def test_parses_triangle_strip_and_omits_degenerates(self):
+        metadata = bytearray(struct.pack(">IHB", 0, 0, 1))
+        metadata.extend(b"strip\0")
+        metadata.extend(
+            struct.pack(
+                ">IIIIBBBBH",
+                3,
+                4,
+                0,
+                0,
+                12,
+                5,
+                0,
+                0,
+                0,
+            )
+        )
+        vertices = b"".join(
+            struct.pack(">fff", *position)
+            for position in (
+                (0.0, 0.0, 0.0),
+                (1.0, 0.0, 0.0),
+                (0.0, 1.0, 0.0),
+                (1.0, 1.0, 0.0),
+            )
+        )
+        indices = struct.pack(">5H", 0, 1, 2, 2, 3)
+        metadata.extend(
+            struct.pack(">III", len(vertices), len(indices), 0)
+        )
+        subset = parse_meshdata(
+            bytes(metadata + vertices + indices),
+            "xbox360",
+            position_format="FLOAT",
+        ).subsets[0]
+        self.assertEqual(subset.faces, ((0, 1, 2),))
 
     def test_watermesh_uses_platform_endian_uint32_indices(self):
         positions = (
@@ -837,6 +1342,45 @@ class MeshTests(unittest.TestCase):
         self.assertEqual(
             subset.influences,
             (((4, 1.0),), ((9, 1.0),), ((4, 1.0),)),
+        )
+
+    def test_full_float_vertices_shift_skin_fields_after_positions(self):
+        metadata = bytearray(struct.pack(">IHB", 1, 0, 1))
+        metadata.extend(b"rigid\0")
+        metadata.extend(
+            struct.pack(
+                ">IIIIBBBBH",
+                1,
+                3,
+                0,
+                0,
+                20,
+                3,
+                1,
+                3,
+                3,
+            )
+        )
+        metadata.extend(struct.pack(">3H", 42, 9, 89))
+        vertices = bytearray()
+        for index, position in enumerate(
+            ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0))
+        ):
+            vertex = bytearray(20)
+            struct.pack_into(">fff", vertex, 0, *position)
+            vertex[12:16] = bytes((index,)) * 4
+            vertex[16] = 255
+            vertices.extend(vertex)
+        indices = struct.pack(">3H", 0, 1, 2)
+        metadata.extend(struct.pack(">III", len(vertices), len(indices), 0))
+        subset = parse_meshdata(
+            bytes(metadata + vertices + indices),
+            "xbox360",
+            position_format="FLOAT",
+        ).subsets[0]
+        self.assertEqual(
+            subset.influences,
+            (((42, 1.0),), ((9, 1.0),), ((89, 1.0),)),
         )
 
     def test_composite_palette_does_not_select_skinned_layout(self):
@@ -1303,6 +1847,57 @@ class MeshTests(unittest.TestCase):
             places=3,
         )
 
+    def test_big_endian_mesh_retains_shader_declared_uv_channels(self):
+        metadata = bytearray(struct.pack(">IHB", 0, 0, 1))
+        metadata.extend(b"carrier\0")
+        metadata.extend(
+            struct.pack(
+                ">IIIIBBBBH",
+                1,
+                3,
+                0,
+                0,
+                36,
+                3,
+                0,
+                0,
+                0,
+            )
+        )
+        metadata.extend(b"\0" * 4)
+        vertices = bytearray()
+        values = (
+            ((0.0, 0.0, 0.0), (0.0, 0.0), (0.1, 0.2), (0.2, 0.3)),
+            ((1.0, 0.0, 0.0), (1.0, 0.0), (0.8, 0.2), (0.7, 0.3)),
+            ((0.0, 1.0, 0.0), (0.0, 1.0), (0.1, 0.9), (0.2, 0.8)),
+        )
+        for position, primary_uv, palette_uv, ao_uv in values:
+            vertex = bytearray(36)
+            struct.pack_into(">fff", vertex, 0, *position)
+            struct.pack_into(">ee", vertex, 24, *primary_uv)
+            struct.pack_into(">ee", vertex, 28, *palette_uv)
+            struct.pack_into(">ee", vertex, 32, *ao_uv)
+            vertices.extend(vertex)
+        indices = struct.pack(">3H", 0, 1, 2)
+        metadata.extend(
+            struct.pack(">III", len(vertices), len(indices), 0)
+        )
+        subset = parse_meshdata(
+            bytes(metadata + vertices + indices),
+            "xbox360",
+            declared_uv_offsets_by_stride={36: (24, 28, 32)},
+        ).subsets[0]
+        self.assertEqual(subset.uv_offsets, (24, 28, 32))
+        self.assertEqual(
+            subset.uv_source,
+            "stride_heuristic+shader_layout_candidates",
+        )
+        self.assertAlmostEqual(
+            subset.additional_uvs[0][2][1],
+            0.8,
+            places=3,
+        )
+
     def test_pc_skinned_stride_64_uses_declared_uv_channels(self):
         metadata = bytearray(struct.pack("<IHB", 1, 0, 1))
         metadata.extend(b"character\0")
@@ -1521,6 +2116,17 @@ class GrannyTests(unittest.TestCase):
         self.assertEqual(skeleton.bones[1].parent_index, 0)
         self.assertEqual(skeleton.bones[1].translation, (1.0, 0.0, 0.0))
 
+    def test_parses_xbox360_skeleton_hierarchy_and_transforms(self):
+        skeleton = parse_granny_model(
+            make_granny_model(endian=">"),
+            "xbox360",
+        )
+
+        self.assertEqual([bone.name for bone in skeleton.bones], ["root", "child"])
+        self.assertEqual(skeleton.bones[0].parent_index, -1)
+        self.assertEqual(skeleton.bones[1].parent_index, 0)
+        self.assertEqual(skeleton.bones[1].translation, (1.0, 0.0, 0.0))
+
     def test_parses_constant_animation_curves(self):
         animation = parse_granny_animation(
             make_granny_animation(), "pc", "Synthetic"
@@ -1533,6 +2139,101 @@ class GrannyTests(unittest.TestCase):
         self.assertEqual(track.rotation_at(0.5), (0.0, 0.0, 0.0, 1.0))
         self.assertEqual(
             track.translation.evaluate(0.5), (1.0, 2.0, 3.0)
+        )
+
+    def test_parses_xbox360_constant_animation_curves(self):
+        animation = parse_granny_animation(
+            make_granny_animation(
+                endian=">",
+                xbox_wrapper_records=(
+                    (1, 1, -1.0, 2.0),
+                    (2, 2, -0.5, 0.0, 0.5, 1.0),
+                    (
+                        3,
+                        6,
+                        -6.0,
+                        -5.0,
+                        -4.0,
+                        -3.0,
+                        -2.0,
+                        -1.0,
+                        1.0,
+                        2.0,
+                        3.0,
+                        4.0,
+                        5.0,
+                        6.0,
+                    ),
+                ),
+            ),
+            "xbox360",
+            "SyntheticXbox",
+        )
+
+        self.assertEqual(animation.name, "SyntheticXbox")
+        self.assertAlmostEqual(animation.duration, 1.0)
+        self.assertEqual(len(animation.tracks), 1)
+        track = animation.tracks[0]
+        self.assertEqual(track.name, "root")
+        self.assertEqual(track.rotation_at(0.5), (0.0, 0.0, 0.0, 1.0))
+        self.assertEqual(
+            track.translation.evaluate(0.5),
+            (1.0, 2.0, 3.0),
+        )
+        self.assertEqual(len(animation.wrapper_records), 3)
+        self.assertEqual(animation.wrapper_records[0].bone_index, 1)
+        self.assertEqual(animation.wrapper_records[0].component_count, 1)
+        self.assertEqual(animation.wrapper_records[0].ranges, ((-1.0, 2.0),))
+        self.assertEqual(animation.wrapper_records[1].component_count, 2)
+        self.assertEqual(
+            animation.wrapper_records[1].ranges,
+            ((-0.5, 0.5), (0.0, 1.0)),
+        )
+        self.assertEqual(animation.wrapper_records[2].component_count, 6)
+        self.assertEqual(
+            animation.wrapper_records[2].ranges,
+            (
+                (-6.0, 1.0),
+                (-5.0, 2.0),
+                (-4.0, 3.0),
+                (-3.0, 4.0),
+                (-2.0, 5.0),
+                (-1.0, 6.0),
+            ),
+        )
+
+    def test_parses_xbox360_sampled_float_animation_curves(self):
+        animation = parse_granny_animation(
+            make_sampled_granny_animation(),
+            "xbox360",
+            "SampledXbox",
+        )
+
+        track = animation.tracks[0]
+        self.assertEqual(track.rotation.codec, "DaKeyframes32f")
+        self.assertEqual(track.rotation.degree, 1)
+        self.assertEqual(track.rotation.knots, (0.0, 1.0))
+        rotation = track.rotation_at(0.5)
+        self.assertEqual(rotation[:2], (0.0, 0.0))
+        self.assertAlmostEqual(rotation[2], 2**-0.5)
+        self.assertAlmostEqual(rotation[3], 2**-0.5)
+        self.assertEqual(
+            track.translation.evaluate(0.5),
+            (1.0, 2.0, 3.0),
+        )
+        self.assertEqual(
+            track.scale_shear.evaluate(0.5),
+            (
+                1.5,
+                0.0,
+                0.0,
+                0.0,
+                1.5,
+                0.0,
+                0.0,
+                0.0,
+                1.5,
+            ),
         )
 
     def test_parses_additive_animation_bone_indices(self):
@@ -1575,6 +2276,20 @@ class GrannyTests(unittest.TestCase):
 
 
 class TextureTests(unittest.TestCase):
+    def test_xbox_format_three_uses_dxt1_storage(self):
+        header = bytearray(92)
+        struct.pack_into(">I", header, 8, 3)
+        struct.pack_into(">II", header, 16, 4, 4)
+        struct.pack_into(">I", header, 28, 1)
+        struct.pack_into(">I", header, 32, 8192)
+        converted = convert_texture(
+            bytes(header) + b"\0" * 8192,
+            "xbox360",
+        )
+        self.assertEqual(converted.format_name, "DXT1")
+        self.assertEqual(converted.dds[84:88], b"DXT1")
+        self.assertEqual(converted.dds[128:], b"\0" * 8)
+
     def test_pc_luminance_texture_to_dds(self):
         header = bytearray(92)
         struct.pack_into("<I", header, 8, 10)
@@ -1671,7 +2386,7 @@ class TerrainTests(unittest.TestCase):
     def test_heightfield_downsamples_pc_and_xbox_headers(self):
         cases = (
             ("pc", "<", "<"),
-            ("xbox360", ">", "<"),
+            ("xbox360", ">", ">"),
         )
         for platform, header_endian, sample_endian in cases:
             with self.subTest(platform=platform):
@@ -2378,6 +3093,88 @@ class ShaderDatabaseTests(unittest.TestCase):
             ((259, 0),),
         )
 
+    def test_parses_xbox_shader_material_bindings(self):
+        database = parse_shader_database(
+            make_xbox_shader_database(trailing=b"\xA5"),
+            platform="xbox360",
+            asset_type="Dx9ShaderDatabase",
+        )
+        self.assertEqual(database.trailing_bytes, 1)
+        self.assertEqual(
+            database.material_keys,
+            ("Objects/Test/Mesh/Shaders/Surface",),
+        )
+        material = database.material(
+            "objects/test/mesh/shaders/surface"
+        )
+        self.assertIsNotNone(material)
+        self.assertEqual(len(material.variants), 1)
+        self.assertEqual(material.variants[0].layout.stride, 36)
+        self.assertEqual(
+            material.variants[0].layout.uv_offsets,
+            (24, 28, 32),
+        )
+        self.assertEqual(
+            tuple(layout.uv_offsets for layout in database.layouts),
+            ((24, 28, 32),),
+        )
+        self.assertEqual(
+            tuple(
+                (
+                    texture.index,
+                    texture.slot,
+                    texture.path,
+                    texture.parameters,
+                    texture.dimension,
+                )
+                for texture in material.textures
+            ),
+            (
+                (
+                    0x104,
+                    4,
+                    "Textures/Test/XboxColor",
+                    (),
+                    None,
+                ),
+            ),
+        )
+
+    def test_rejects_unsafe_xbox_shader_count(self):
+        data = bytearray(make_xbox_shader_database())
+        struct.pack_into(">I", data, 5, 1_000_001)
+        with self.assertRaisesRegex(
+            CorruptDataError,
+            "Unsafe Xbox shader parameter-group count",
+        ):
+            parse_shader_database(
+                bytes(data),
+                platform="xbox360",
+                asset_type="Dx9ShaderDatabase",
+            )
+
+    def test_rejects_xbox_shader_program_index(self):
+        with self.assertRaisesRegex(
+            CorruptDataError,
+            "Xbox vertex shader index is out of range",
+        ):
+            parse_shader_database(
+                make_xbox_shader_database(vertex_shader_index=1),
+                platform="xbox360",
+                asset_type="Dx9ShaderDatabase",
+            )
+
+    def test_rejects_xbox_shader_program_key_count(self):
+        with self.assertRaisesRegex(
+            CorruptDataError,
+            "programs but 0 program keys",
+        ):
+            parse_shader_database(
+                make_xbox_shader_database(key_count=0),
+                platform="xbox360",
+                asset_type="Dx9ShaderDatabase",
+            )
+
     def test_selective_shader_parse_skips_unrelated_variants(self):
         raw = make_shader_database()
         with mock.patch(
@@ -2898,6 +3695,20 @@ class LevelDiscoveryTests(unittest.TestCase):
 
         self.assertEqual(levels, ("MP_001", "MP_002"))
 
+    def test_discovers_complete_pc_and_bf1943_level_archive_pairs(self):
+        levels = discover_levels(
+            (
+                "Dist/win32/levels/mp_001/level-00.fbrb",
+                "Dist/win32/levels/mp_001/terrain-00.fbrb",
+                "dist/xenon/levels/coral_sea/reduced-level-00.fbrb",
+                "dist/xenon/levels/coral_sea/terrain-00.fbrb",
+                "dist/xenon/levels/incomplete/reduced-level-00.fbrb",
+                "dist/xenon/levels/levels-common-00.fbrb",
+            )
+        )
+
+        self.assertEqual(levels, ("CORAL_SEA", "MP_001"))
+
     def test_builds_targeted_object_archive_paths_without_terrain(self):
         self.assertEqual(
             pc_level_archive_paths("MP_001", include_terrain=False),
@@ -2916,8 +3727,97 @@ class LevelDiscoveryTests(unittest.TestCase):
             ),
         )
 
+    def test_builds_bf1943_level_archive_paths(self):
+        expected = (
+            "Dist/xenon/levels/coral_sea/reduced-level-00.fbrb",
+            "Dist/xenon/levels/coral_sea/terrain-00.fbrb",
+            "Dist/xenon/levels/levels-common-00.fbrb",
+        )
+        self.assertEqual(
+            xbox360_level_archive_paths("CORAL_SEA"),
+            expected,
+        )
+        self.assertEqual(
+            level_archive_paths("XBOX360_STFS", "CORAL_SEA"),
+            expected,
+        )
+
+    def test_indexes_bf1943_level_archive_family(self):
+        catalog = mock.Mock()
+        catalog.archive_by_path.side_effect = (
+            {"indexed": 0},
+            {"indexed": 1},
+            {"indexed": 0},
+        )
+        repository = SimpleNamespace(
+            kind="XBOX360_STFS",
+            catalog=catalog,
+            index_archive_path=mock.Mock(),
+            materialize_archive_payload=mock.Mock(),
+        )
+        progress = mock.Mock()
+
+        paths = index_level_archives(repository, "CORAL_SEA", progress)
+
+        self.assertEqual(paths, xbox360_level_archive_paths("CORAL_SEA"))
+        self.assertEqual(
+            repository.index_archive_path.call_args_list,
+            [mock.call(paths[0]), mock.call(paths[2])],
+        )
+        self.assertEqual(
+            repository.materialize_archive_payload.call_args_list,
+            [mock.call(path) for path in paths],
+        )
+        self.assertEqual(
+            progress.call_args_list,
+            [
+                mock.call(index, len(paths), path)
+                for index, path in enumerate(paths, 1)
+            ],
+        )
+
 
 class CatalogTests(unittest.TestCase):
+    def test_discovers_xbox_shader_database_candidates_explicitly(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            catalog = AssetCatalog(Path(temporary) / "catalog.sqlite3")
+            try:
+                archive_id = catalog.upsert_archive(
+                    ArchiveDescriptor(
+                        "Dist/xenon/levels/test/reduced-level-00.fbrb",
+                        4096,
+                        "xbox360",
+                        {"path": "test.fbrb"},
+                    )
+                )
+                catalog.replace_archive_assets(
+                    archive_id,
+                    (
+                        FbrbEntry(
+                            "Levels/Test/Shaders/Single.res",
+                            "Dx9ShaderDatabase",
+                            0,
+                            16,
+                            16,
+                            1,
+                        ),
+                    ),
+                    payload_offset=0,
+                    payload_compressed=False,
+                    payload_size=4096,
+                )
+                self.assertEqual(catalog.shader_database_assets(), [])
+                candidates = catalog.shader_database_assets(
+                    include_dx9=True,
+                )
+                self.assertEqual(len(candidates), 1)
+                self.assertEqual(
+                    candidates[0]["asset_type"],
+                    "Dx9ShaderDatabase",
+                )
+            finally:
+                catalog.close()
+
     def test_indexes_shader_material_sources_and_invalidates_on_reindex(self):
         with tempfile.TemporaryDirectory() as temporary:
             catalog = AssetCatalog(Path(temporary) / "catalog.sqlite3")
@@ -3542,6 +4442,202 @@ class RepositoryTests(unittest.TestCase):
                 self.assertEqual(path_raw, raw)
             finally:
                 repository.close()
+
+    def test_stfs_to_fbrb_to_mesh_end_to_end(self):
+        meshdata = make_meshdata(">")
+        archive = (
+            make_fbrb(
+                "Objects/Test/Test_Mesh_lod0_data.res",
+                "MeshData",
+                meshdata,
+            )
+            + b"\xA5" * 5000
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package_path = root / "5841097E"
+            make_stfs_package(package_path, archive)
+
+            package = StfsPackage(package_path)
+            entry = package.find("DIST/XENON/TEST.FBRB")
+            self.assertIsNotNone(entry)
+            with package.open_file(entry) as stream:
+                self.assertEqual(stream.read(), archive)
+
+            repository = AssetRepository(str(package_path), root / "cache")
+            try:
+                self.assertEqual(repository.kind, "XBOX360_STFS")
+                self.assertEqual(repository.scan(), [])
+                rows = repository.catalog.search_assets("MESH", "Test", 10, 0)
+                self.assertEqual(len(rows), 1)
+                asset, raw = repository.read_asset(rows[0]["id"])
+                parsed = parse_meshdata(raw, asset["platform"])
+                self.assertEqual(parsed.subsets[0].faces, ((0, 1, 2),))
+                self.assertEqual(asset["archive_path"], "dist/xenon/test.fbrb")
+            finally:
+                repository.close()
+
+    def test_zipped_xdvdfs_to_fbrb_to_mesh_end_to_end_and_reuses_cache(self):
+        meshdata = make_meshdata(">")
+        archive = make_fbrb(
+            "Objects/Test/Test_Mesh_lod0_data.res",
+            "MeshData",
+            meshdata,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            image = root / "disc.iso"
+            make_xdvdfs_image(image, archive)
+            zip_path = root / "xbox-bc2.zip"
+            with zipfile.ZipFile(
+                zip_path,
+                "w",
+                compression=zipfile.ZIP_DEFLATED,
+            ) as source_zip:
+                source_zip.write(image, "nested/disc.iso")
+            expected_source_size = image.stat().st_size
+            image.unlink()
+
+            progress = []
+            repository = AssetRepository(
+                str(zip_path),
+                root / "cache",
+                source_progress=lambda current, total, label: progress.append(
+                    (current, total, label)
+                ),
+            )
+            try:
+                self.assertEqual(repository.kind, "XBOX360_ISO")
+                self.assertEqual(
+                    progress[0],
+                    (0, expected_source_size, "nested/disc.iso"),
+                )
+                self.assertEqual(
+                    progress[-1],
+                    (
+                        expected_source_size,
+                        expected_source_size,
+                        "nested/disc.iso",
+                    ),
+                )
+                self.assertEqual(repository.scan(), [])
+                cached_source = Path(repository.source.image_path)
+                self.assertTrue(cached_source.is_file())
+                self.assertEqual(
+                    cached_source.parent,
+                    repository.source_cache / "sources",
+                )
+                rows = repository.catalog.search_assets("MESH", "Test", 10, 0)
+                self.assertEqual(len(rows), 1)
+            finally:
+                repository.close()
+
+            with mock.patch(
+                "bc2_frostbite_importer.core.zip_source.zipfile.ZipFile.open",
+                side_effect=AssertionError(
+                    "cached ZIP source member was unexpectedly extracted again"
+                ),
+            ):
+                repository = AssetRepository(str(zip_path), root / "cache")
+                try:
+                    self.assertFalse(repository.needs_scan())
+                    asset, raw = repository.read_asset_path(
+                        "Objects/Test/Test_Mesh_lod0_data.res"
+                    )
+                    parsed = parse_meshdata(raw, asset["platform"])
+                    self.assertEqual(parsed.subsets[0].faces, ((0, 1, 2),))
+                finally:
+                    repository.close()
+
+    def test_zip_source_preparation_cancels_without_partial_cache(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            image = root / "disc.iso"
+            make_xdvdfs_image(image, b"FbRB")
+            zip_path = root / "xbox-bc2.zip"
+            with zipfile.ZipFile(
+                zip_path,
+                "w",
+                compression=zipfile.ZIP_DEFLATED,
+            ) as source_zip:
+                source_zip.write(image, "disc.iso")
+            with self.assertRaisesRegex(ExtractionError, "cancelled"):
+                AssetRepository(
+                    str(zip_path),
+                    root / "cache",
+                    cancelled=lambda: True,
+                )
+            self.assertEqual(
+                list((root / "cache").rglob("bc2-zip-*.tmp")),
+                [],
+            )
+            self.assertEqual(list((root / "cache").rglob("*.iso")), [])
+
+    def test_zipped_extensionless_stfs_to_fbrb_to_mesh_end_to_end(self):
+        meshdata = make_meshdata(">")
+        archive = make_fbrb(
+            "Objects/Test/Test_Mesh_lod0_data.res",
+            "MeshData",
+            meshdata,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package_path = root / "5841097E"
+            make_stfs_package(package_path, archive)
+            zip_path = root / "bf1943.zip"
+            with zipfile.ZipFile(
+                zip_path,
+                "w",
+                compression=zipfile.ZIP_DEFLATED,
+            ) as source_zip:
+                source_zip.write(
+                    package_path,
+                    "content/945CD965D6B2B2584A9C06CE16F38A075A6D390558",
+                )
+            package_path.unlink()
+
+            repository = AssetRepository(str(zip_path), root / "cache")
+            try:
+                self.assertEqual(repository.kind, "XBOX360_STFS")
+                self.assertEqual(repository.scan(), [])
+                asset, raw = repository.read_asset_path(
+                    "Objects/Test/Test_Mesh_lod0_data.res"
+                )
+                parsed = parse_meshdata(raw, asset["platform"])
+                self.assertEqual(parsed.subsets[0].faces, ((0, 1, 2),))
+            finally:
+                repository.close()
+
+    def test_zip_rejects_multiple_source_members(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            zip_path = root / "ambiguous.zip"
+            with zipfile.ZipFile(zip_path, "w") as source_zip:
+                source_zip.writestr("disc-one.iso", b"first")
+                source_zip.writestr("disc-two.iso", b"second")
+            with self.assertRaisesRegex(
+                UnsupportedSourceError,
+                "exactly one identifiable source member",
+            ):
+                AssetRepository(str(zip_path), root / "cache")
+
+    def test_stfs_rejects_fragmented_multiblock_file(self):
+        archive = b"FbRB" + b"\0" * 5000
+        with tempfile.TemporaryDirectory() as temporary:
+            package_path = Path(temporary) / "fragmented"
+            make_stfs_package(
+                package_path,
+                archive,
+                consecutive=False,
+            )
+            package = StfsPackage(package_path)
+            entry = package.find("dist/xenon/test.fbrb")
+            self.assertIsNotNone(entry)
+            with self.assertRaisesRegex(
+                UnsupportedSourceError,
+                "Fragmented STFS files",
+            ):
+                package.open_file(entry)
 
     def test_materialized_compressed_payload_supports_direct_reads(self):
         meshdata = make_meshdata(">")

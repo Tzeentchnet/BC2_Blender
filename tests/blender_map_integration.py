@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import collections
 import json
+import math
 import os
 import sys
 import time
@@ -22,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 from bc2_frostbite_importer import blender_addon
 from bc2_frostbite_importer.core.level import (
     LevelResolver,
-    index_pc_level_archives,
+    index_level_archives,
 )
 from bc2_frostbite_importer.core.repository import AssetRepository
 
@@ -30,7 +31,7 @@ from bc2_frostbite_importer.core.repository import AssetRepository
 def _arguments():
     arguments = sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else []
     parser = argparse.ArgumentParser()
-    parser.add_argument("--iso", required=True)
+    parser.add_argument("--source", "--iso", dest="source", required=True)
     parser.add_argument("--cache", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--level", default="MP_001")
@@ -97,6 +98,542 @@ def _validate_resolved_model(level_scene):
         failures.append("terrain material map was not resolved")
     if failures:
         raise AssertionError("MP_001 model mismatch: " + "; ".join(failures))
+
+
+def _validate_bf1943_saved_scene(
+    root_name,
+    expected,
+    *,
+    expect_source_materials,
+):
+    root = bpy.data.collections.get(root_name)
+    if root is None:
+        raise AssertionError(f"Saved map collection is missing: {root_name}")
+    placements = [
+        obj
+        for collection in root.children_recursive
+        for obj in collection.objects
+        if "bc2_mesh_key" in obj
+    ]
+    unique_meshes = {
+        obj.data.as_pointer(): obj.data
+        for obj in placements
+        if obj.type == "MESH"
+    }
+    if len(placements) != expected["placements"]:
+        raise AssertionError(
+            f"Saved placement count is {len(placements):,}, "
+            f"expected {expected['placements']:,}"
+        )
+    if len(unique_meshes) != expected["mesh_variants"]:
+        raise AssertionError(
+            f"Saved linked mesh count is {len(unique_meshes):,}, "
+            f"expected {expected['mesh_variants']:,}"
+        )
+    if len(unique_meshes) >= len(placements):
+        raise AssertionError("Map placements are not using linked mesh data")
+
+    terrain = root.children.get("Terrain")
+    water = root.children.get("Water")
+    terrain_count = len(terrain.objects) if terrain is not None else 0
+    water_count = len(water.objects) if water is not None else 0
+    if terrain_count != expected["heightfields"]:
+        raise AssertionError(
+            f"Saved terrain count is {terrain_count}, "
+            f"expected {expected['heightfields']}"
+        )
+    if water_count != expected["water_meshes"]:
+        raise AssertionError(
+            f"Saved water count is {water_count}, "
+            f"expected {expected['water_meshes']}"
+        )
+    if any(
+        obj.type != "MESH"
+        or not obj.data.vertices
+        or not obj.data.polygons
+        for obj in terrain.objects
+    ):
+        raise AssertionError("A saved terrain tile has no mesh geometry")
+    if any(
+        obj.type != "MESH"
+        or not obj.data.vertices
+        or not obj.data.polygons
+        for obj in water.objects
+    ):
+        raise AssertionError("A saved water object has no mesh geometry")
+
+    terrain_neighbor_p95 = None
+    terrain_height_span = None
+    if expected["level"] == "CORAL_SEA":
+        numpy_module = blender_addon._np
+        if numpy_module is None:
+            raise AssertionError(
+                "NumPy is required for BF1943 terrain continuity validation"
+            )
+        adjacent_differences = []
+        height_min = math.inf
+        height_max = -math.inf
+        for obj in terrain.objects:
+            vertex_count = len(obj.data.vertices)
+            side = math.isqrt(vertex_count)
+            if side * side != vertex_count:
+                raise AssertionError(
+                    "Coral Sea terrain is not a square sample grid"
+                )
+            coordinates = numpy_module.empty(
+                vertex_count * 3,
+                dtype=numpy_module.float32,
+            )
+            obj.data.vertices.foreach_get("co", coordinates)
+            heights = coordinates[2::3].reshape(side, side)
+            height_min = min(height_min, float(heights.min()))
+            height_max = max(height_max, float(heights.max()))
+            adjacent_differences.extend(
+                (
+                    numpy_module.abs(
+                        numpy_module.diff(heights, axis=0)
+                    ).reshape(-1),
+                    numpy_module.abs(
+                        numpy_module.diff(heights, axis=1)
+                    ).reshape(-1),
+                )
+            )
+        terrain_height_span = height_max - height_min
+        terrain_neighbor_p95 = float(
+            numpy_module.percentile(
+                numpy_module.concatenate(adjacent_differences),
+                95,
+            )
+        )
+        if terrain_neighbor_p95 > terrain_height_span * 0.25:
+            raise AssertionError(
+                "Coral Sea terrain has implausible adjacent height "
+                f"discontinuities: p95 {terrain_neighbor_p95:.3f} m "
+                f"across a {terrain_height_span:.3f} m height span"
+            )
+
+    diagnostics_name = root.get("bc2_diagnostics_text")
+    diagnostics_text = bpy.data.texts.get(diagnostics_name)
+    if diagnostics_text is None:
+        raise AssertionError("Saved diagnostics text is missing")
+    diagnostics = json.loads(diagnostics_text.as_string())
+    diagnostic_counts = collections.Counter(
+        issue["code"] for issue in diagnostics["issues"]
+    )
+    if diagnostic_counts["unsupported_xbox_shader_bytecode"] != 1:
+        raise AssertionError(
+            "BF1943 map import did not preserve the explicit unsupported "
+            "Xbox shader-bytecode diagnostic"
+        )
+    unexpected_codes = set(diagnostic_counts) - {
+        "missing_surface_shaders",
+        "missing_shader_key",
+        "non_visual_reference",
+        "texture_import_failed",
+        "unresolved_subset_surface",
+        "unsupported_xbox_shader_bytecode",
+        "unsupported_terrain_visual_decals",
+    }
+    if unexpected_codes:
+        raise AssertionError(
+            f"Unexpected BF1943 diagnostics: {sorted(unexpected_codes)}"
+        )
+
+    collection_counts = {
+        collection.name: len(collection.objects)
+        for collection in root.children
+    }
+    material_status = collections.Counter(
+        material.get("bc2_material_status", "<none>")
+        for material in bpy.data.materials
+    )
+    source_images = sum(
+        "bc2_asset_path" in image
+        for image in bpy.data.images
+    )
+    if expect_source_materials:
+        resolved_materials = sum(
+            count
+            for status, count in material_status.items()
+            if str(status).startswith("resolved ")
+        )
+        bound_materials = sum(
+            "bc2_texture_bindings" in material
+            for material in bpy.data.materials
+        )
+        if not resolved_materials or not bound_materials or not source_images:
+            raise AssertionError(
+                "BF1943 source materials were not persisted: "
+                f"{resolved_materials} resolved materials, "
+                f"{bound_materials} binding records, "
+                f"{source_images} source images"
+            )
+        expected_evidence = {
+            "CORAL_SEA": (71, 91),
+            "IWO_JIMA_S": (263, 207),
+        }.get(expected["level"])
+        if expected_evidence is not None:
+            observed_evidence = (
+                int(expected["materials"]),
+                source_images,
+            )
+            if observed_evidence != expected_evidence:
+                raise AssertionError(
+                    "BF1943 source-material evidence changed: "
+                    f"{observed_evidence}, expected {expected_evidence}"
+                )
+        if expected["level"] == "CORAL_SEA":
+            if material_status["resolved bindings without color graph"]:
+                raise AssertionError(
+                    "Coral Sea retained source bindings without a color "
+                    "graph"
+                )
+            placements_by_enumeration = {
+                int(obj["bc2_enumeration"]): obj
+                for obj in placements
+                if "bc2_enumeration" in obj
+            }
+
+            def binding_rows(obj):
+                return [
+                    (material, binding)
+                    for material in obj.data.materials
+                    if material is not None
+                    for binding in json.loads(
+                        material.get("bc2_texture_bindings", "[]")
+                    )
+                ]
+
+            carrier = placements_by_enumeration[2553]
+            carrier_rows = binding_rows(carrier)
+            if any(
+                material.get("bc2_material_status")
+                != "resolved verified BF1943 carrier graph"
+                for material in carrier.data.materials
+            ):
+                raise AssertionError(
+                    "Coral Sea carrier retained a fallback material"
+                )
+            if any(
+                not any(
+                    binding["role"] == "COLOR"
+                    and binding["path"].casefold().endswith(
+                        ("/hull_metal_02", "/wood")
+                    )
+                    for material, binding in carrier_rows
+                    if material == carrier_material
+                )
+                for carrier_material in carrier.data.materials
+            ):
+                raise AssertionError(
+                    "A Coral Sea carrier surface has no source color"
+                )
+            carrier_expected_roles = {
+                "colorpick": "PALETTE",
+                "combinedaos": "OCCLUSION",
+                "_ao_": "OCCLUSION",
+                "_gm": "MASK",
+            }
+            for path_fragment, role in carrier_expected_roles.items():
+                matching_roles = [
+                    binding["role"]
+                    for _, binding in carrier_rows
+                    if path_fragment in binding["path"].casefold()
+                ]
+                if not matching_roles or any(
+                    observed_role != role
+                    for observed_role in matching_roles
+                ):
+                    raise AssertionError(
+                        "Coral Sea carrier role mismatch for "
+                        f"{path_fragment}: {matching_roles}"
+                    )
+            high_binding_roles = [
+                binding["role"]
+                for _, binding in carrier_rows
+                if int(binding["index"]) >= 256
+            ]
+            if not high_binding_roles or any(
+                role != "ENVIRONMENT" for role in high_binding_roles
+            ):
+                raise AssertionError(
+                    "Coral Sea carrier high bindings are not environments: "
+                    f"{high_binding_roles}"
+                )
+            all_carrier_materials = {
+                material.as_pointer(): material
+                for obj in placements
+                for material in obj.data.materials
+                if material is not None
+                and "/aircraftcarrier/" in str(
+                    material.get("bc2_shader_key", "")
+                ).casefold()
+            }
+            if len(all_carrier_materials) != 14:
+                raise AssertionError(
+                    "Unexpected Coral Sea carrier material count: "
+                    f"{len(all_carrier_materials)}"
+                )
+            expected_carrier_ao_channels = {
+                "japa": "Blue",
+                "japb": "Color",
+                "japc": "Color",
+                "japd": "Blue",
+                "jape": "Green",
+                "japf": "Green",
+                "japg": "Green",
+                "usa": "Alpha",
+                "usb": "Alpha",
+                "usc": "Alpha",
+                "usd": "Alpha",
+                "use": "Red",
+                "usf": "Red",
+                "usg": "Red",
+            }
+            for carrier_material in all_carrier_materials.values():
+                texture_nodes = {
+                    int(node["bc2_binding_index"]): node
+                    for node in carrier_material.node_tree.nodes
+                    if node.type == "TEX_IMAGE"
+                    and "bc2_binding_index" in node
+                }
+                bindings = json.loads(
+                    carrier_material["bc2_texture_bindings"]
+                )
+                for binding in bindings:
+                    binding_index = int(binding["index"])
+                    stem = PurePosixPath(
+                        binding["path"]
+                    ).name.casefold()
+                    expected_uv_map = (
+                        "UV1"
+                        if binding["role"] == "OCCLUSION"
+                        else (
+                            "UV2"
+                            if binding["role"] == "PALETTE"
+                            else "UVMap"
+                        )
+                    )
+                    node = texture_nodes.get(binding_index)
+                    if (
+                        node is None
+                        or node.get("bc2_uv_map") != expected_uv_map
+                    ):
+                        raise AssertionError(
+                            "Coral Sea carrier binding "
+                            f"t{binding_index} did not use "
+                            f"{expected_uv_map}: "
+                            f"{carrier_material.name}"
+                        )
+                if carrier_material.node_tree.nodes.get(
+                    "BC2 color x source palette"
+                ) is None:
+                    raise AssertionError(
+                        "Coral Sea carrier omitted source palette: "
+                        f"{carrier_material.name}"
+                    )
+                surface_name = "".join(
+                    character
+                    for character in str(
+                        carrier_material["bc2_surface_name"]
+                    ).casefold()
+                    if character.isalnum()
+                )
+                expected_channel = expected_carrier_ao_channels.get(
+                    surface_name
+                )
+                occlusion_binding = next(
+                    binding
+                    for binding in bindings
+                    if binding["role"] == "OCCLUSION"
+                )
+                occlusion_node = texture_nodes[
+                    int(occlusion_binding["index"])
+                ]
+                if (
+                    expected_channel is None
+                    or occlusion_node.get("bc2_occlusion_channel")
+                    != expected_channel
+                    or carrier_material.get("bc2_material_family")
+                    != "BF1943 aircraft carrier"
+                ):
+                    raise AssertionError(
+                        "Coral Sea carrier AO channel mismatch: "
+                        f"{carrier_material.name}, expected "
+                        f"{expected_channel}"
+                    )
+                shader_variant = json.loads(
+                    carrier_material["bc2_shader_variant"]
+                )
+                if shader_variant["layout_uv_offsets"] != [24, 28, 32]:
+                    raise AssertionError(
+                        "Coral Sea carrier shader declaration changed: "
+                        f"{shader_variant}"
+                    )
+            carrier_meshes = {
+                obj.data.as_pointer(): obj.data
+                for obj in placements
+                if any(
+                    material is not None
+                    and "/aircraftcarrier/" in str(
+                        material.get("bc2_shader_key", "")
+                    ).casefold()
+                    for material in obj.data.materials
+                )
+            }
+            for carrier_mesh in carrier_meshes.values():
+                if any(
+                    tuple(offsets) != (24, 28, 32)
+                    for offsets in json.loads(
+                        carrier_mesh["bc2_uv_offsets"]
+                    )
+                ):
+                    raise AssertionError(
+                        "Coral Sea carrier did not retain byte-24/28/32 UVs"
+                    )
+
+            wake = placements_by_enumeration[2522]
+            wake_material = wake.data.materials[0]
+            wake_materials = {
+                material.as_pointer(): material
+                for obj in placements
+                for material in obj.data.materials
+                if material is not None
+                and "/wakes/" in str(
+                    material.get("bc2_shader_key", "")
+                ).casefold()
+            }
+            wake_placements = [
+                obj
+                for obj in placements
+                if any(
+                    material is not None
+                    and material.as_pointer() in wake_materials
+                    for material in obj.data.materials
+                )
+            ]
+            if (
+                len(wake_materials) != 2
+                or len(wake_placements) != 40
+                or wake_material.as_pointer() not in wake_materials
+            ):
+                raise AssertionError(
+                    "Coral Sea shoreline-wake coverage changed: "
+                    f"{len(wake_materials)} materials, "
+                    f"{len(wake_placements)} placements"
+                )
+            expected_wake_roles = {
+                0: "COLOR",
+                1: "NOISE",
+                2: "MASK",
+            }
+            for source_wake_material in wake_materials.values():
+                bindings = json.loads(
+                    source_wake_material["bc2_texture_bindings"]
+                )
+                observed_roles = {
+                    int(binding["index"]): binding["role"]
+                    for binding in bindings
+                }
+                if observed_roles != expected_wake_roles:
+                    raise AssertionError(
+                        "Coral Sea shoreline-wake roles changed: "
+                        f"{observed_roles}"
+                    )
+                texture_nodes = {
+                    int(node["bc2_binding_index"]): node
+                    for node in source_wake_material.node_tree.nodes
+                    if node.type == "TEX_IMAGE"
+                    and "bc2_binding_index" in node
+                }
+                if (
+                    not source_wake_material.name.startswith(
+                        "BC2 Shoreline Wake"
+                    )
+                    or source_wake_material.get("bc2_material_status")
+                    != "resolved heuristic BF1943 shoreline wake graph"
+                    or source_wake_material.get("bc2_material_family")
+                    != "BF1943 shoreline wake"
+                    or source_wake_material.surface_render_method
+                    != "DITHERED"
+                    or texture_nodes[0].get("bc2_uv_map") != "UV1"
+                    or texture_nodes[2].get("bc2_uv_map") != "UVMap"
+                ):
+                    raise AssertionError(
+                        "Coral Sea shoreline-wake graph or routing is "
+                        "incomplete"
+                    )
+                wake_principled = next(
+                    node
+                    for node in source_wake_material.node_tree.nodes
+                    if node.type == "BSDF_PRINCIPLED"
+                )
+                source_nodes = {
+                    link.to_socket.name: link.from_node.name
+                    for link in source_wake_material.node_tree.links
+                    if link.to_node == wake_principled
+                    and link.to_socket.name in {"Base Color", "Alpha"}
+                }
+                if source_nodes != {
+                    "Base Color": "BC2 shoreline wake color",
+                    "Alpha": "BC2 shoreline wake opacity",
+                }:
+                    raise AssertionError(
+                        "Coral Sea shoreline-wake Principled links changed: "
+                        f"{source_nodes}"
+                    )
+
+            jetty = placements_by_enumeration[3011]
+            if any(
+                material.get("bc2_material_status")
+                != "resolved material graph"
+                for material in jetty.data.materials
+            ) or any(
+                not any(
+                    binding["role"] == "COLOR"
+                    and binding["path"].casefold().endswith("_df")
+                    for material, binding in binding_rows(jetty)
+                    if material == jetty_material
+                )
+                for jetty_material in jetty.data.materials
+            ):
+                raise AssertionError(
+                    "Coral Sea jetty diffuse materials are incomplete"
+                )
+
+            skydome = placements_by_enumeration[2546]
+            skydome_material = skydome.data.materials[0]
+            principled = next(
+                node
+                for node in skydome_material.node_tree.nodes
+                if node.type == "BSDF_PRINCIPLED"
+            )
+            base_color_source = next(
+                link.from_node
+                for link in skydome_material.node_tree.links
+                if link.to_node == principled
+                and link.to_socket.name == "Base Color"
+            )
+            if not str(
+                base_color_source.get("bc2_asset_path", "")
+            ).casefold().endswith(
+                "objects/beach_objects/skydome/textures/sky_cs"
+            ):
+                raise AssertionError(
+                    "Coral Sea skydome did not select sky_CS as Base Color"
+                )
+    return {
+        "placements": len(placements),
+        "linked_meshes": len(unique_meshes),
+        "heightfields": terrain_count,
+        "water_meshes": water_count,
+        "collection_counts": collection_counts,
+        "diagnostic_counts": dict(diagnostic_counts),
+        "material_status": dict(material_status),
+        "source_images": source_images,
+        "terrain_neighbor_p95": terrain_neighbor_p95,
+        "terrain_height_span": terrain_height_span,
+    }
 
 
 def _validate_saved_scene(root_name, expected):
@@ -708,13 +1245,13 @@ def main():
     )
 
     started = time.perf_counter()
-    repository = AssetRepository(args.iso, args.cache)
+    repository = AssetRepository(args.source, args.cache)
     try:
         if repository.needs_scan():
             failures = repository.scan(_progress("SCAN"))
             if failures:
                 raise RuntimeError(f"Disc scan had {len(failures)} failure(s)")
-        archives = index_pc_level_archives(
+        archives = index_level_archives(
             repository,
             level_name,
             _progress("INDEX"),
@@ -748,7 +1285,15 @@ def main():
         repository.close()
 
     bpy.ops.wm.open_mainfile(filepath=str(output), load_ui=False)
-    saved = _validate_saved_scene(root_name, summary)
+    saved = (
+        _validate_saved_scene(root_name, summary)
+        if level_name == "MP_001"
+        else _validate_bf1943_saved_scene(
+            root_name,
+            summary,
+            expect_source_materials=not args.no_materials,
+        )
+    )
     elapsed = time.perf_counter() - started
     print(
         "PASS "

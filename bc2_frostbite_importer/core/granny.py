@@ -14,10 +14,15 @@ _PC_MAGIC = bytes.fromhex(
     "29de6cc0baa4532b25f5b7a5f666e2"
     "eec80100000000000000000000000000"
 )
+_XBOX360_MAGIC = bytes.fromhex(
+    "b595110e4bb5a56a502828eb04b37825"
+    "000001c8000000000000000000000000"
+)
 _MAX_STRINGS = 1_000_000
 _MAX_SECTIONS = 64
 _MAX_BONES = 4_096
 _MAX_TRACKS = 100_000
+_MAX_CURVE_SAMPLES = 1_000_000
 
 
 @dataclass(frozen=True)
@@ -196,18 +201,31 @@ class GrannyAnimation:
     oversampling: float
     tracks: tuple[GrannyTransformTrack, ...]
     additive_bone_indices: tuple[int, ...] = ()
+    wrapper_records: tuple[GrannyAnimationWrapperRecord, ...] = ()
+
+
+@dataclass(frozen=True)
+class GrannyAnimationWrapperRecord:
+    bone_index: int
+    ranges: tuple[tuple[float, float], ...]
+
+    @property
+    def component_count(self) -> int:
+        return len(self.ranges)
 
 
 @dataclass(frozen=True)
 class _Section:
     data: bytes
     relocations: dict[int, tuple[int, int]]
+    endian: str
 
 
 class _Reader:
-    def __init__(self, data: bytes, label: str):
+    def __init__(self, data: bytes, label: str, endian: str = "<"):
         self.data = data
         self.label = label
+        self.endian = endian
 
     def require(self, offset: int, size: int, field: str):
         if offset < 0 or size < 0 or offset + size > len(self.data):
@@ -216,6 +234,10 @@ class _Reader:
             )
 
     def unpack(self, fmt: str, offset: int, field: str):
+        if fmt and fmt[0] in "@=<>!":
+            fmt = self.endian + fmt[1:]
+        else:
+            fmt = self.endian + fmt
         size = struct.calcsize(fmt)
         self.require(offset, size, field)
         return struct.unpack_from(fmt, self.data, offset)
@@ -225,20 +247,32 @@ class _Reader:
         return self.data[offset : offset + size]
 
 
-def _require_pc(platform: str | None):
-    if platform is not None and platform.casefold() != "pc":
-        raise UnsupportedFormatError(
-            "Native Granny skeleton and animation decoding is currently "
-            "validated for PC assets only"
-        )
+def _platform_layout(
+    platform: str | None,
+) -> tuple[str, bytes, int, int]:
+    normalized = "pc" if platform is None else platform.casefold()
+    if normalized == "pc":
+        return "<", _PC_MAGIC, 172, 176
+    if normalized == "xbox360":
+        return ">", _XBOX360_MAGIC, 168, 172
+    raise UnsupportedFormatError(
+        f"Native Granny decoding is not supported for platform {platform!r}"
+    )
 
 
 def _parse_strings(
     data: bytes,
     *,
     animation: bool,
-) -> tuple[tuple[str, ...], int, tuple[int, ...]]:
-    reader = _Reader(data, "Frostbite Granny wrapper")
+    endian: str,
+    xbox360: bool,
+) -> tuple[
+    tuple[str, ...],
+    int,
+    tuple[int, ...],
+    tuple[GrannyAnimationWrapperRecord, ...],
+]:
+    reader = _Reader(data, "Frostbite Granny wrapper", endian)
     version = reader.unpack("<I", 0, "version")[0]
     if version != 10:
         raise UnsupportedFormatError(
@@ -246,25 +280,71 @@ def _parse_strings(
         )
     position = 4
     additive_bone_indices = ()
+    wrapper_records = ()
     if animation:
-        additive_count = reader.unpack(
-            "<I", position, "additive bone count"
-        )[0]
+        record_count = reader.unpack("<I", position, "wrapper record count")[0]
         position += 4
-        if additive_count > _MAX_BONES:
+        if record_count > _MAX_BONES:
             raise CorruptDataError(
-                "Unsafe Granny additive bone count: "
-                f"{additive_count:,}"
+                "Unsafe Granny wrapper record count: "
+                f"{record_count:,}"
             )
-        if additive_count:
+        if record_count and xbox360:
+            records = []
+            indices = set()
+            for index in range(record_count):
+                bone_index, component_count = reader.unpack(
+                    "<II",
+                    position,
+                    f"wrapper record {index} header",
+                )
+                position += 8
+                if not 1 <= component_count <= 16:
+                    raise CorruptDataError(
+                        "Xbox Granny wrapper component count is invalid"
+                    )
+                values = reader.unpack(
+                    "<" + "f" * (component_count * 2),
+                    position,
+                    f"wrapper record {index} bounds",
+                )
+                position += component_count * 8
+                lower_bounds = values[:component_count]
+                upper_bounds = values[component_count:]
+                if bone_index >= _MAX_BONES or bone_index in indices:
+                    raise CorruptDataError(
+                        "Xbox Granny wrapper bone indices are invalid"
+                    )
+                if (
+                    any(not math.isfinite(value) for value in values)
+                    or any(
+                        minimum > maximum
+                        for minimum, maximum in zip(
+                            lower_bounds,
+                            upper_bounds,
+                        )
+                    )
+                ):
+                    raise CorruptDataError("Xbox Granny wrapper bounds are invalid")
+                records.append(
+                    GrannyAnimationWrapperRecord(
+                        bone_index=bone_index,
+                        ranges=tuple(
+                            zip(lower_bounds, upper_bounds)
+                        ),
+                    )
+                )
+                indices.add(bone_index)
+            wrapper_records = tuple(records)
+        elif record_count:
             additive_bone_indices = reader.unpack(
-                "<" + "I" * additive_count,
+                "<" + "I" * record_count,
                 position,
                 "additive bone indices",
             )
-            position += additive_count * 4
+            position += record_count * 4
             if (
-                len(set(additive_bone_indices)) != additive_count
+                len(set(additive_bone_indices)) != record_count
                 or any(index >= _MAX_BONES for index in additive_bone_indices)
             ):
                 raise CorruptDataError(
@@ -292,15 +372,28 @@ def _parse_strings(
         raw = reader.slice(position, length, f"string {index}")
         position += length
         strings.append(raw.decode("latin-1"))
-    return tuple(strings), position, additive_bone_indices
+    return (
+        tuple(strings),
+        position,
+        additive_bone_indices,
+        wrapper_records,
+    )
 
 
-def _parse_container(data: bytes, search_start: int) -> tuple[_Section, ...]:
-    magic_position = data.find(_PC_MAGIC, search_start)
+def _parse_container(
+    data: bytes,
+    search_start: int,
+    *,
+    endian: str,
+    magic: bytes,
+) -> tuple[_Section, ...]:
+    magic_position = data.find(magic, search_start)
     if magic_position < 0 or magic_position - search_start > 64:
-        raise CorruptDataError("PC Granny v7 magic was not found after the strings")
+        raise CorruptDataError(
+            "Granny v7 magic was not found after the wrapper strings"
+        )
     granny = data[magic_position:]
-    reader = _Reader(granny, "Granny container")
+    reader = _Reader(granny, "Granny container", endian)
     header = reader.unpack("<18I", 32, "header")
     version, file_size, _, section_offset, section_count = header[:5]
     if version != 7:
@@ -392,7 +485,7 @@ def _parse_container(data: bytes, search_start: int) -> tuple[_Section, ...]:
                     f"Granny relocation target exceeds section {target_section}"
                 )
             relocations[source] = (target_section, target_offset)
-        sections.append(_Section(section_data, relocations))
+        sections.append(_Section(section_data, relocations, endian))
     return tuple(sections)
 
 
@@ -418,18 +511,30 @@ def parse_granny_model(
     data: bytes,
     platform: str | None = "pc",
 ) -> GrannySkeleton:
-    _require_pc(platform)
-    strings, strings_end, _ = _parse_strings(data, animation=False)
-    sections = _parse_container(data, strings_end)
+    endian, magic, bone_count_offset, bone_pointer_offset = _platform_layout(
+        platform
+    )
+    strings, strings_end, _, _ = _parse_strings(
+        data,
+        animation=False,
+        endian=endian,
+        xbox360=endian == ">",
+    )
+    sections = _parse_container(
+        data,
+        strings_end,
+        endian=endian,
+        magic=magic,
+    )
     if not sections:
         raise CorruptDataError("Granny model has no sections")
     section = sections[0]
-    reader = _Reader(section.data, "Granny model section 0")
-    bone_count = reader.unpack("<I", 172, "bone count")[0]
+    reader = _Reader(section.data, "Granny model section 0", endian)
+    bone_count = reader.unpack("<I", bone_count_offset, "bone count")[0]
     if not 1 <= bone_count <= _MAX_BONES:
         raise CorruptDataError(f"Unsafe Granny bone count: {bone_count}")
     bone_section, bone_offset = _target(
-        sections, 0, 176, "bone array"
+        sections, 0, bone_pointer_offset, "bone array"
     )
     if bone_section != 0:
         raise UnsupportedFormatError(
@@ -530,7 +635,11 @@ def _curve_type_names(
 ) -> dict[int, str]:
     if len(sections) <= 6:
         raise CorruptDataError("Granny animation has no type-definition section")
-    reader = _Reader(sections[6].data, "Granny type section")
+    reader = _Reader(
+        sections[6].data,
+        "Granny type section",
+        sections[6].endian,
+    )
     names = {}
     for offset in range(0, len(reader.data) - 31, 32):
         _, name_index = reader.unpack("<II", offset, "type member")
@@ -547,9 +656,12 @@ class _AnimationDecoder:
         self,
         sections: tuple[_Section, ...],
         type_names: dict[int, str],
+        time_step: float,
     ):
         self.sections = sections
         self.type_names = type_names
+        self.endian = sections[0].endian
+        self.time_step = time_step
 
     def _reference(self, type_source: int) -> tuple[str, int, int]:
         type_section, type_offset = _target(
@@ -577,6 +689,7 @@ class _AnimationDecoder:
         reader = _Reader(
             self.sections[section_index].data,
             f"Granny {codec} curve",
+            self.endian,
         )
         controls = _finite(
             reader.unpack(
@@ -598,6 +711,7 @@ class _AnimationDecoder:
         reader = _Reader(
             self.sections[section_index].data,
             f"Granny {codec} curve",
+            self.endian,
         )
         _, degree, _, _ = reader.unpack(
             "<4B", offset, "curve header"
@@ -626,10 +740,12 @@ class _AnimationDecoder:
         knot_reader = _Reader(
             self.sections[knot_section].data,
             f"Granny {codec} knots",
+            self.endian,
         )
         control_reader = _Reader(
             self.sections[control_section].data,
             f"Granny {codec} controls",
+            self.endian,
         )
         knots = _finite(
             knot_reader.unpack(
@@ -653,6 +769,65 @@ class _AnimationDecoder:
         )
         return _validated_curve(codec, degree, knots, controls)
 
+    def _sampled(
+        self,
+        codec: str,
+        section_index: int,
+        offset: int,
+        expected_dimension: int,
+    ) -> GrannyCurve:
+        reader = _Reader(
+            self.sections[section_index].data,
+            f"Granny {codec} curve",
+            self.endian,
+        )
+        dimension, scalar_count = reader.unpack(
+            "<II", offset, "sample header"
+        )
+        if dimension != expected_dimension:
+            raise CorruptDataError(
+                f"{codec} has dimension {dimension}, expected "
+                f"{expected_dimension}"
+            )
+        if (
+            scalar_count == 0
+            or scalar_count % dimension
+            or scalar_count // dimension > _MAX_CURVE_SAMPLES
+        ):
+            raise CorruptDataError(f"{codec} has an invalid sample count")
+        control_section, control_offset = _target(
+            self.sections,
+            section_index,
+            offset + 8,
+            f"{codec} controls",
+        )
+        control_reader = _Reader(
+            self.sections[control_section].data,
+            f"Granny {codec} controls",
+            self.endian,
+        )
+        control_reader.require(
+            control_offset,
+            scalar_count * 4,
+            "sample values",
+        )
+        values = _finite(
+            control_reader.unpack(
+                "<" + "f" * scalar_count,
+                control_offset,
+                "sample values",
+            ),
+            f"{codec} controls",
+        )
+        controls = tuple(
+            tuple(values[index : index + dimension])
+            for index in range(0, scalar_count, dimension)
+        )
+        knots = tuple(
+            index * self.time_step for index in range(len(controls))
+        )
+        return _validated_curve(codec, 1, knots, controls)
+
     def rotation(self, type_source: int) -> GrannyCurve:
         codec, section_index, offset = self._reference(type_source)
         if codec == "DaIdentity":
@@ -668,6 +843,8 @@ class _AnimationDecoder:
             return self._uncompressed(
                 codec, section_index, offset, 4
             )
+        if codec == "DaKeyframes32f":
+            return self._sampled(codec, section_index, offset, 4)
         if codec not in {"D4nK8uC7u", "D4nK16uC15u"}:
             raise UnsupportedFormatError(
                 f"Unsupported Granny rotation codec: {codec}"
@@ -675,6 +852,7 @@ class _AnimationDecoder:
         reader = _Reader(
             self.sections[section_index].data,
             f"Granny {codec} curve",
+            self.endian,
         )
         _, degree, scale_entries = reader.unpack(
             "<BBH", offset, "header"
@@ -698,6 +876,7 @@ class _AnimationDecoder:
         value_reader = _Reader(
             self.sections[value_section].data,
             f"Granny {codec} values",
+            self.endian,
         )
         is_16_bit = codec == "D4nK16uC15u"
         value_format = "H" if is_16_bit else "B"
@@ -766,6 +945,8 @@ class _AnimationDecoder:
             return self._uncompressed(
                 codec, section_index, offset, 3
             )
+        if codec == "DaKeyframes32f":
+            return self._sampled(codec, section_index, offset, 3)
         supported = {
             "D3I1K32fC32f",
             "D3I1K8uC8u",
@@ -780,6 +961,7 @@ class _AnimationDecoder:
         reader = _Reader(
             self.sections[section_index].data,
             f"Granny {codec} curve",
+            self.endian,
         )
         _, degree, one_over_truncated = reader.unpack(
             "<BBH", offset, "header"
@@ -809,6 +991,7 @@ class _AnimationDecoder:
         value_reader = _Reader(
             self.sections[value_section].data,
             f"Granny {codec} values",
+            self.endian,
         )
         is_float = codec == "D3I1K32fC32f"
         is_16_bit = "16u" in codec
@@ -868,6 +1051,8 @@ class _AnimationDecoder:
         )
         if codec == "DaIdentity":
             return GrannyCurve(codec, 0, (0.0,), (identity,))
+        if codec == "DaKeyframes32f":
+            return self._sampled(codec, section_index, offset, 9)
         if codec != "DaConstant32f":
             raise UnsupportedFormatError(
                 f"Unsupported Granny scale/shear codec: {codec}"
@@ -875,6 +1060,7 @@ class _AnimationDecoder:
         reader = _Reader(
             self.sections[section_index].data,
             f"Granny {codec} curve",
+            self.endian,
         )
         _, degree, _, _ = reader.unpack("<4B", offset, "curve header")
         if degree != 0:
@@ -897,6 +1083,7 @@ class _AnimationDecoder:
         control_reader = _Reader(
             self.sections[control_section].data,
             f"Granny {codec} controls",
+            self.endian,
         )
         controls = _finite(
             control_reader.unpack("<9f", control_offset, "values"),
@@ -933,13 +1120,30 @@ def parse_granny_animation(
     platform: str | None = "pc",
     name: str = "Animation",
 ) -> GrannyAnimation:
-    _require_pc(platform)
-    strings, strings_end, additive_bone_indices = _parse_strings(
-        data, animation=True
+    endian, magic, _, _ = _platform_layout(platform)
+    (
+        strings,
+        strings_end,
+        additive_bone_indices,
+        wrapper_records,
+    ) = _parse_strings(
+        data,
+        animation=True,
+        endian=endian,
+        xbox360=endian == ">",
     )
-    sections = _parse_container(data, strings_end)
+    sections = _parse_container(
+        data,
+        strings_end,
+        endian=endian,
+        magic=magic,
+    )
     section = sections[0]
-    reader = _Reader(section.data, "Granny animation section 0")
+    reader = _Reader(
+        section.data,
+        "Granny animation section 0",
+        endian,
+    )
     animation_count = reader.unpack("<I", 76, "animation count")[0]
     if animation_count != 1:
         raise UnsupportedFormatError(
@@ -987,7 +1191,9 @@ def parse_granny_animation(
         )
 
     decoder = _AnimationDecoder(
-        sections, _curve_type_names(sections, strings)
+        sections,
+        _curve_type_names(sections, strings),
+        time_step,
     )
     tracks = []
     track_names = set()
@@ -1060,4 +1266,5 @@ def parse_granny_animation(
         oversampling=oversampling,
         tracks=tuple(tracks),
         additive_bone_indices=additive_bone_indices,
+        wrapper_records=wrapper_records,
     )

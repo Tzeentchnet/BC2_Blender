@@ -7,10 +7,12 @@ catalog/repository lookup, Blender material construction, unit tests, smoke
 assertions, and named retail-media audit scripts.
 
 - `python -m compileall -q bc2_frostbite_importer` completed successfully.
-- All 66 dependency-free tests in `tests/test_core.py` passed.
-- Blender-hosted and retail-media integrations were reviewed but not rerun
-  during this documentation audit. Numeric retail results remain recorded
-  evidence from the named Blender 5.2/5.2.2 runs.
+- All 88 dependency-free tests in `tests/test_core.py` passed.
+- The Blender 5.2.2 factory-startup smoke test passed. Optional retail-media
+  integrations were not all rerun; the BF1943 package-wide mesh audit,
+  direct Japanese-infantry/Corsair material imports, and Coral Sea
+  full-material save/reopen integration were rerun. Other numeric retail
+  results remain recorded evidence from the named Blender 5.2/5.2.2 runs.
 
 The terms **verified**, **implemented**, **heuristic**, and **unknown** follow
 the [documentation confidence labels](README.md#confidence-labels). The full
@@ -29,13 +31,16 @@ database entries determine:
 - tangent-space reconstruction;
 - how detail normals are combined with the base normal.
 
-The PC material importer performs mesh-to-shader-database association for
-resolved complete-map, character, vehicle, and direct rigid/tree surfaces. It
-preserves every recovered binding, reflects pixel-shader resource names, and
-builds source-driven Blender graphs. This is not equivalent to recovering
-arbitrary shader arithmetic: the MedKit `plastic` surface below remains the
-only path whose complete detail-normal calculation has been reproduced
-exactly.
+The material importer performs mesh-to-shader-database association for
+resolved PC complete-map, character, vehicle, and direct rigid/tree surfaces;
+BF1943 complete-map surfaces; and BF1943 direct mesh sets with deterministic
+descriptor surfaces. It preserves every recovered binding and builds
+source-driven Blender graphs. PC DX11 records additionally expose reflected
+resource names, dimensions, variants, and bounded UV-route analysis. This is
+not equivalent to recovering arbitrary shader arithmetic: the MedKit
+`plastic` surface below remains the only path whose complete detail-normal
+calculation has been reproduced exactly. Xbox compiled shader arithmetic is
+not interpreted.
 
 ## Import material modes
 
@@ -43,8 +48,9 @@ The Blender adapter implements three dependency policies. They do not change
 the parser's interpretation of source material records:
 
 - **Materials and Textures** is the implemented full path described in this
-  document. It resolves source surfaces, reads applicable DX11 shader
-  databases, converts referenced texture resources, and builds Blender graphs.
+  document. It resolves source surfaces, reads the applicable PC DX11 or
+  BF1943 Xbox shader database, converts referenced texture resources, and
+  builds Blender graphs.
 - **Materials Only** resolves subset-to-surface identity and creates named
   materials with source-reference metadata, but does not read shader databases
   to resolve texture bindings and does not load or convert texture images.
@@ -60,6 +66,211 @@ uses the same dispatch entry, but PS3 media, storage variants, and converted
 output have not been validated; recognizing that type name is not verified
 native support. Only **Materials and Textures** should be used when validating
 the shader and texture behavior documented below.
+
+## BF1943 Xbox shader database
+
+**Verified and implemented for one Battlefield 1943 Xbox LIVE package.** The
+seven cataloged `Dx9ShaderDatabase` resources use a version-117 sequential
+stream. The parser is selected from the catalog's `xbox360` platform and
+resource type; it is not selected by guessing byte order from the payload.
+All seven resources consume exactly to EOF:
+
+| Resource | Bytes | Material entries | Recovered material bindings |
+|---|---:|---:|---:|
+| `systems/ui/shaders.res` | 20,709 | 11 | 1 |
+| `Scenes/UIBackground/shaders/single.res` | 68,650 | 3 | 2 |
+| `Levels/Coral_sea/Shaders/Single.res` | 2,333,734 | 299 | 1,174 |
+| `Levels/Guadal_Canal/Shaders/Single.res` | 3,871,864 | 563 | 2,663 |
+| `Levels/Iwo_Jima_s/Shaders/Single.res` | 4,358,425 | 594 | 2,752 |
+| `Levels/Wake_island_s/Shaders/Single.res` | 4,019,811 | 544 | 2,553 |
+| `Levels/Wake_island_tutorial/Shaders/Single.res` | 3,964,783 | 551 | 2,582 |
+
+The structure is:
+
+1. At file-relative offset `0x00`, a big-endian `uint32` version (`117`),
+   followed by a one-byte zero flag. The first unaligned big-endian section
+   count begins at offset `0x05`.
+2. Parameter blocks: a big-endian `uint32` count, then records whose
+   big-endian `uint32` size includes the size field. Known record-relative
+   fields are a 20-byte header, six one-byte counts, a two-byte footer,
+   140-byte texture records, 56-byte properties, and 40-byte properties.
+   Texture records contain a four-byte little-endian source binding value and
+   a 136-byte NUL-padded Latin-1 path. The low byte is the texture slot; the
+   complete value is retained because higher bytes occur in the source.
+   Remaining bytes up to the declared block size are bounded opaque metadata.
+3. Binding tables: a big-endian count; each record begins with a big-endian
+   `uint16 k` and has `4k + 2` following bytes.
+4. Register tables: a big-endian count; each record begins with a big-endian
+   `uint32 k` and has `4k` following bytes.
+5. Vertex and pixel shader sections: each record has a 16-byte reference,
+   big-endian code size, code bytes, and three big-endian section indices.
+   A vertex record additionally ends with a big-endian element count,
+   `12 * count` bytes, and 16 bytes of declaration metadata.
+6. Programs: big-endian count plus fixed 48-byte records. Record-relative
+   offsets `0x20` and `0x24` select vertex and pixel shaders; `0x28` and
+   `0x2C` select parameter blocks. A second equal count introduces 92-byte
+   Xbox program keys: entry, fragment, and layout references occupy the first
+   48 bytes and 44 permutation bytes follow.
+7. Vertex layouts: a big-endian count plus 89-byte records. Their 16-byte
+   references are validated against program keys and mesh-part names. The
+   partial reader retains the declared stride and verified code-6 UV elements
+   with physical byte offsets; all unknown elements remain opaque. The
+   internal declaration blob uses mixed/little-endian fields and is not
+   presented as a complete Xbox vertex-semantic specification.
+8. Three name maps (entry, fragment, and mesh part) contain a big-endian count
+   followed by NUL-terminated names and 16-byte references. Entry groups then
+   map each entry reference to a big-endian count and big-endian `uint16`
+   program indices.
+
+The parser checks every shader, program, parameter, table, layout, fragment,
+entry, and group reference. Every program must belong to exactly one entry
+group, and the entry named by its 92-byte key must agree. Synthetic fixtures
+cover the mixed binding value, declaration tail, 92-byte key, unsafe count,
+program-index, and key-count failures.
+
+Program offset `0x2C` is the material parameter block in every inspected
+program with textures; offset `0x28` added no texture in any of the 17,697
+program records across the seven resources. Materials merge the texture records from all programs linked to their exact
+entry. Xbox variants retain their program, shader, parameter-group, and
+partial-layout links. Binding parameter names and dimensions are not
+fabricated, and the Xenos bytecode is not passed to the PC DXBC analyzer.
+
+### BF1943 map material coverage
+
+The production all-map audit resolves the source DBX key
+`mesh Name + "/" + shader partition` against each level database:
+
+| Level | Unique surface keys | Exact | Unique full-partition suffix | Missing/ambiguous | Resolved binding instances |
+|---|---:|---:|---:|---:|---:|
+| `CORAL_SEA` | 79 | 78 | 0 | 1 | 352 |
+| `GUADAL_CANAL` | 257 | 253 | 0 | 4 | 1,307 |
+| `IWO_JIMA_S` | 288 | 277 | 2 | 9 | 1,407 |
+| `WAKE_ISLAND_S` | 237 | 228 | 1 | 8 | 1,176 |
+| `WAKE_ISLAND_TUTORIAL` | 241 | 232 | 1 | 8 | 1,196 |
+
+Every binding on every resolved surface points to an indexed `XenonTexture`
+resource in the selected level/common archive family. Missing or ambiguous
+material keys remain explicit magenta diagnostics; the importer does not use
+last-name fuzzy matching. Texture roles, Blender node arithmetic, UV channel,
+and repeat scale remain clearly labeled preview heuristics when Xbox bytecode
+does not supply verified semantics. Each BF1943 map records one
+`unsupported_xbox_shader_bytecode` diagnostic for that narrower limitation;
+the database and its texture bindings are no longer marked unsupported.
+
+Blender 5.2.2 full-material save/reopen validation produced:
+
+| Scene | Source materials | Source images | Explicit texture failures |
+|---|---:|---:|---:|
+| Coral Sea | 71 | 91 | 1 |
+| Iwo Jima | 263 | 207 | 1 |
+
+The single failure in each scene is a referenced format-code-5
+`XenonTexture`, whose 16-bit channel layout remains unknown. Other decoded
+materials survive save/reopen with binding metadata and file-backed images.
+These results establish source-backed material identity and texture
+selection, not visual parity with the original Xbox renderer.
+
+#### Coral Sea role-correction evidence
+
+**Implemented and verified on the named BF1943 package.** A second Coral Sea
+save/reopen run checked the reported carrier, shoreline-wake, jetty, and
+skydome placements by their source enumeration rather than adding
+placement-name exceptions. The shared role rules now interpret these observed
+families as follows:
+
+| Observed binding family | Blender preview role | Evidence |
+|---|---|---|
+| Jetty `_Df` | color | All three placement `3011` surfaces retain their source diffuse graph |
+| `_Gm` | mask | The carrier's generic mask remains on its repeating byte-24 coordinate |
+| `colorpick` | palette | Carrier palette color multiplies repeating metal/wood color through byte-32 `UV2` |
+| `CombinedAOs` and infix `_AO_` | occlusion | Carrier AO uses byte-28 `UV1`; the compiled fetch swizzle selects a surface-specific packed channel, while `Jap_version_AO_01` preserves RGB color |
+| `Test_seabed2` on the wake shader | color | The source seabed repeats through byte-28 `UV1` |
+| Opaque grayscale `wake` | mask | Byte-24 `UVMap` supplies an inverted red-channel foam/opacity control; the material is renamed `BC2 Shoreline Wake` and uses dithered transparency |
+| Shared `Textures/Sky/` | environment | Carrier sky binding `261` remains metadata rather than becoming hull color |
+| Local `sky_*` outside `Textures/Sky/` | color | Placement `2546` selects `sky_CS`, the first source color, instead of the later water-noise binding |
+
+The first role-only correction still routed every carrier binding through
+byte 24 and treated `colorpick` as an unused mask. A second pass retained only
+bytes 24 and 28 and reconstructed `CombinedAOs` with `max(R,G,B)`. User
+review disproved that pass: it produced oversized atlas blocks and incorrect
+carrier/turret shading.
+
+The carrier mesh DBXs map their seven subset names exactly to `Jap_A` through
+`Jap_G` or `US_A` through `US_G`. Their entity-level `Material` fields are
+physics materials, and their `MeshShaderSet` overrides are null. The
+per-surface shader DBXs are stripped from the reduced archives, so the
+version-117 database is the detailed visual source.
+
+The linked stride-36 Xbox layout retains UV pairs at bytes `24`, `28`, and
+`32`. Xenos texture fetches distinguish the repeating base, palette, and AO
+interpolators, and the pixel programs explicitly multiply repeating base
+color by `colorpick`. The layout record does not by itself expose the linker's
+packed secondary-interpolator order. Comparative renders against the
+source-authored deck landmarks resolve byte 24 for repeating
+`Hull_Metal_02`/`wood`, normals, `US_details_512`, and `_Gm`; byte 28 for AO;
+and byte 32 for `colorpick`. This produces the continuous Japanese wood deck
+with its rising-sun marking and the US deck lettering; the opposite secondary
+assignment produces the reported broad palette bands. AO fetch swizzles
+select:
+
+| Carrier surfaces | `CombinedAOs` channel |
+|---|---|
+| `Jap_A`, `Jap_D` | blue |
+| `Jap_E`, `Jap_F`, `Jap_G` | green |
+| `US_A`, `US_B`, `US_C`, `US_D` | alpha |
+| `US_E`, `US_F`, `US_G` | red |
+| `Jap_B`, `Jap_C` using `Jap_version_AO_01` | RGB color-vector modulation |
+
+This base/palette/AO path is **implemented from compiled-program, source
+layout, and visible landmark evidence**. Blender still approximates the
+surrounding Xenos lighting, reflection, shadow, and material arithmetic, so
+the result is not a claim of complete source-renderer parity or exporter-safe
+shader reconstruction.
+
+The same follow-up covers both wake materials across all 40 placements.
+The `wake` resource has no varying source alpha, so the earlier direct-alpha
+graph was incorrect. The implemented preview derives a clamped opacity as
+`(0.75 - wake.red) * 4`, uses that control to blend repeated seabed toward
+white foam, and preserves the explicit format-code-5 conversion diagnostic
+for `mudslide_01_RGBM`. These are **implemented preview heuristics**, not
+decoded Xenos arithmetic; exact scrolling, flow, blend constants, and
+exporter-safe semantics remain unknown.
+
+### BF1943 direct character and vehicle materials
+
+**Implemented and verified on the named BF1943 package.** Direct BF1943
+mesh-set imports now use the same persistent shader-key catalog as map
+imports. The source-kind gate is limited to `XBOX360_STFS`; Xbox BC2 XGD2 and
+PS3 standalone material lookup remain disabled and unverified. Direct
+`MeshData` still has no deterministic descriptor and remains geometry-only.
+
+The Japanese infantry LOD0 descriptor resolves five source materials and 17
+source images. `_AO` texture stems are classified as `OCCLUSION`, so
+`Jap_Body_Color` and `Jap_Head_Color` provide Base Color while
+`Jap_Body_AO` and `Jap_Head_AO` multiply that color instead of replacing it.
+Bindings at or above 256 and paths under `Textures/Sky/` are retained as
+`ENVIRONMENT`, not treated as color textures. Its body uses topology-selected
+byte-32 `UVMap` plus byte-36 `UV1`; the former byte-16 choice had zero UV
+triangle area.
+
+The US Corsair direct import resolves 24 source parts, four materials, and
+seven source images while default-state visibility hides damaged, alternate,
+and blurred parts. Its verified preview routes are:
+
+| Source binding | Preview role | Physical route |
+|---|---|---|
+| `corsair_nm` (`1`) | normal | byte-16 `UVMap` |
+| `MetalPaint_t02_Nm` (`2`) | repeated normal | byte-16 `UVMap`, scale `(128, 64)` |
+| `VehicleDecals` (`3`) | decal | byte-20 `UV1` |
+| `corsair_cm` (`4`) | color | byte-16 `UVMap` |
+| `Sky_Beach_Generic_RGBA16f` (`261`) | environment | metadata/native approximation |
+| `Generic_t03_Gm` (`6`) | mask | byte-16 `UVMap` |
+
+The compact stride-32 mesh exposes bytes 16 and 20 on every audited Corsair
+LOD. The former byte-24 candidate was numerically bounded but had zero UV
+triangle area and sampled a nearly uniform region of `corsair_cm`. The roles
+and routes above are evidence-backed Blender preview behavior, not recovered
+Xenos arithmetic or an exporter-safe declaration.
 
 ## PC DX11 shader database
 
@@ -194,8 +405,9 @@ resources in the tested catalog. Direct import preserves their previous
 geometry and neutral subset materials and reports that no owning descriptor
 was found. It does not reverse-search an arbitrary map or terrain owner.
 Direct `MeshData` has the same ownership ambiguity and remains a geometry
-operation. Console rigid/tree mesh sets remain geometry-only because this
-source-material path is verified only for PC DX11 databases.
+operation. BF1943 STFS mesh sets with deterministic descriptor surfaces can
+use their indexed version-117 database; Xbox BC2 and PS3 rigid/tree mesh sets
+remain geometry-only.
 
 The save/reopen integration set spans cutscene props, layered Barrack objects,
 building pieces, a weapon pickup, textureless geometry, and vegetation:
@@ -943,9 +1155,9 @@ resolver needs to:
 - reproduce alpha-test thresholds and two-sided behavior from shader evidence;
 - reconstruct cube/environment sampling instead of preserving it as metadata
   beside a Blender-native approximation;
-- add source-backed console material lookup; current Xbox rigid, tree, and
-  skinned mesh-set imports remain geometry-only, and PS3 material behavior is
-  unvalidated;
+- extend the verified BF1943 standalone material lookup to separately
+  validated Xbox BC2 or PS3 sources; those platforms remain geometry-only and
+  PS3 material behavior is unvalidated;
 - retain variant-specific behavior instead of applying one universal graph.
 
 Shader bytecode and extracted game resources should remain local research

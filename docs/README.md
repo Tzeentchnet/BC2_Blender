@@ -45,19 +45,35 @@ The documents use these terms deliberately:
 
 ## Data path
 
-The supported read path is:
+The supported read paths are:
 
 ```text
+ZIP -> cached source member -> one of the paths below
 PC ISO9660 -> AUTORUN.DAT (MSI) -> CAB -> FbRB -> resource
 Xbox XGD2 -> XDVDFS ---------------------> FbRB -> resource
+Xbox LIVE -> STFS -----------------------> FbRB -> resource
 ```
 
-Both paths converge at the FbRB parser. The importer then catalogs active
+The native paths converge at the FbRB parser. A ZIP wrapper is materialized
+once because ISO9660, XDVDFS, and STFS require efficient random access; it
+does not change the inner platform or resource interpretation. The importer
+then catalogs active
 entries in SQLite and dispatches selected resources to mesh, texture, terrain,
 water, Granny skeleton/animation, modular entity assembly, or DBX readers.
 
-The source media is always read-only. Cached cabinets, extracted archives,
-resources, and converted DDS files are disposable derivatives.
+Complete-map assembly is enabled for PC retail sources and the verified
+BF1943 Xbox LIVE source. Both use the semantic level resolver, but archive
+selection remains platform-specific. PC uses its DX11 database; BF1943 uses
+verified version-117 Xbox material keys and texture bindings while retaining
+explicit diagnostics for undecoded Xenos shader arithmetic and physical UV
+routing. Xbox BC2 XGD2 maps remain disabled. Granny decoding likewise selects
+byte order and file-info offsets from the platform; BF1943 big-endian
+skeletons and animations are verified, while Xbox BC2 Granny compatibility
+remains unknown.
+
+The source media is always read-only. Cached ZIP source members, cabinets,
+extracted archives, resources, and converted DDS files are disposable
+derivatives.
 
 ## Implementation map
 
@@ -65,6 +81,8 @@ resources, and converted DDS files are disposable derivatives.
 |---|---|
 | ISO9660 | [`core/iso9660.py`](../bc2_frostbite_importer/core/iso9660.py) |
 | XDVDFS | [`core/xdvdfs.py`](../bc2_frostbite_importer/core/xdvdfs.py) |
+| STFS | [`core/stfs.py`](../bc2_frostbite_importer/core/stfs.py) |
+| ZIP source wrapper | [`core/zip_source.py`](../bc2_frostbite_importer/core/zip_source.py) |
 | MSI mapping | [`core/msi.py`](../bc2_frostbite_importer/core/msi.py) |
 | Platform source abstraction | [`core/source.py`](../bc2_frostbite_importer/core/source.py) |
 | FbRB | [`core/fbrb.py`](../bc2_frostbite_importer/core/fbrb.py) |
@@ -76,7 +94,7 @@ resources, and converted DDS files are disposable derivatives.
 | DBX | [`core/dbx.py`](../bc2_frostbite_importer/core/dbx.py) |
 | Character/vehicle assembly links | [`core/assembly.py`](../bc2_frostbite_importer/core/assembly.py) |
 | Level resolution | [`core/level.py`](../bc2_frostbite_importer/core/level.py) |
-| DX11 shader database | [`core/shaderdb.py`](../bc2_frostbite_importer/core/shaderdb.py) |
+| PC DX11 and BF1943 Xbox shader databases | [`core/shaderdb.py`](../bc2_frostbite_importer/core/shaderdb.py) |
 | Blender conversion | [`blender_addon.py`](../bc2_frostbite_importer/blender_addon.py) |
 | Regression fixtures | [`tests/test_core.py`](../tests/test_core.py) |
 

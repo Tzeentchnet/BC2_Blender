@@ -27,6 +27,7 @@ TERRAIN_DECAL_TYPES = (
 
 PC_CHARACTER_SHADER_ARCHIVE = "Dist/win32/levels/mp_001/level-00.fbrb"
 PC_CHARACTER_SHADER_PATH = "Levels/mp_001/shaders/Dx11_Single.res"
+SUPPORTED_MAP_SOURCE_KINDS = frozenset({"PC_ISO", "XBOX360_STFS"})
 
 
 def _unique_virtual_paths(paths: Iterable[str]) -> tuple[str, ...]:
@@ -36,18 +37,22 @@ def _unique_virtual_paths(paths: Iterable[str]) -> tuple[str, ...]:
     return tuple(unique.values())
 
 
-def discover_pc_levels(archive_paths: Iterable[str]) -> tuple[str, ...]:
+def _discover_levels(
+    archive_paths: Iterable[str],
+    platform_directory: str,
+    level_filenames: frozenset[str],
+) -> tuple[str, ...]:
     level_files: dict[str, tuple[str, set[str]]] = {}
     for archive_path in archive_paths:
         parts = archive_path.replace("\\", "/").split("/")
         if (
             len(parts) != 5
             or [part.casefold() for part in parts[:3]]
-            != ["dist", "win32", "levels"]
+            != ["dist", platform_directory, "levels"]
         ):
             continue
         filename = parts[4].casefold()
-        if filename not in {"level-00.fbrb", "terrain-00.fbrb"}:
+        if filename not in level_filenames | {"terrain-00.fbrb"}:
             continue
         key = parts[3].casefold()
         display_name, files = level_files.setdefault(
@@ -56,11 +61,40 @@ def discover_pc_levels(archive_paths: Iterable[str]) -> tuple[str, ...]:
         )
         files.add(filename)
 
-    required = {"level-00.fbrb", "terrain-00.fbrb"}
     return tuple(
         display_name
         for _, (display_name, files) in sorted(level_files.items())
-        if required <= files
+        if "terrain-00.fbrb" in files and level_filenames & files
+    )
+
+
+def discover_pc_levels(archive_paths: Iterable[str]) -> tuple[str, ...]:
+    return _discover_levels(
+        archive_paths,
+        "win32",
+        frozenset({"level-00.fbrb"}),
+    )
+
+
+def discover_xbox360_levels(
+    archive_paths: Iterable[str],
+) -> tuple[str, ...]:
+    return _discover_levels(
+        archive_paths,
+        "xenon",
+        frozenset({"reduced-level-00.fbrb"}),
+    )
+
+
+def discover_levels(archive_paths: Iterable[str]) -> tuple[str, ...]:
+    paths = tuple(archive_paths)
+    return tuple(
+        sorted(
+            {
+                *discover_pc_levels(paths),
+                *discover_xbox360_levels(paths),
+            }
+        )
     )
 
 
@@ -77,6 +111,40 @@ def pc_level_archive_paths(
         paths.append("Dist/win32/levels/sp_common/level-00.fbrb")
     paths.append("Dist/win32/levels/mp_common/level-00.fbrb")
     return tuple(paths)
+
+
+def xbox360_level_archive_paths(
+    level_name: str,
+    *,
+    include_terrain: bool = True,
+) -> tuple[str, ...]:
+    level = level_name.casefold()
+    paths = [f"Dist/xenon/levels/{level}/reduced-level-00.fbrb"]
+    if include_terrain:
+        paths.append(f"Dist/xenon/levels/{level}/terrain-00.fbrb")
+    paths.append("Dist/xenon/levels/levels-common-00.fbrb")
+    return tuple(paths)
+
+
+def level_archive_paths(
+    source_kind: str,
+    level_name: str,
+    *,
+    include_terrain: bool = True,
+) -> tuple[str, ...]:
+    if source_kind == "PC_ISO":
+        return pc_level_archive_paths(
+            level_name,
+            include_terrain=include_terrain,
+        )
+    if source_kind == "XBOX360_STFS":
+        return xbox360_level_archive_paths(
+            level_name,
+            include_terrain=include_terrain,
+        )
+    raise ExtractionError(
+        f"Whole-map import is not supported for source kind {source_kind}"
+    )
 
 
 @dataclass(frozen=True)
@@ -281,20 +349,39 @@ def split_reference(reference: str) -> tuple[str, str]:
     return partition, guid
 
 
+def index_level_archives(
+    repository: AssetRepository,
+    level_name: str,
+    progress: Callable[[int, int, str], None] | None = None,
+) -> tuple[str, ...]:
+    if repository.kind not in SUPPORTED_MAP_SOURCE_KINDS:
+        raise ExtractionError(
+            "Whole-map import currently supports PC retail ISOs and "
+            "Battlefield 1943 Xbox LIVE packages"
+        )
+    archive_paths = level_archive_paths(repository.kind, level_name)
+    for index, path in enumerate(archive_paths, 1):
+        archive = repository.catalog.archive_by_path(path)
+        if archive is None:
+            raise ExtractionError(
+                f"Required level archive is not in the source: {path}"
+            )
+        if not bool(archive["indexed"]):
+            repository.index_archive_path(path)
+        repository.materialize_archive_payload(path)
+        if progress:
+            progress(index, len(archive_paths), path)
+    return archive_paths
+
+
 def index_pc_level_archives(
     repository: AssetRepository,
     level_name: str,
     progress: Callable[[int, int, str], None] | None = None,
 ) -> tuple[str, ...]:
     if repository.kind != "PC_ISO":
-        raise ExtractionError("Whole-map import currently supports PC retail ISOs")
-    archive_paths = pc_level_archive_paths(level_name)
-    for index, path in enumerate(archive_paths, 1):
-        repository.index_archive_path(path)
-        repository.materialize_archive_payload(path)
-        if progress:
-            progress(index, len(archive_paths), path)
-    return archive_paths
+        raise ExtractionError("Expected a PC retail ISO")
+    return index_level_archives(repository, level_name, progress)
 
 
 def index_pc_character_shader_archive(
@@ -836,19 +923,50 @@ class LevelResolver:
             terrain_material_map,
             water,
         ) = self._terrain(level_document)
-        shader_path = f"Levels/{self.level_name}/shaders/Dx11_Single.res"
-        shader = self.repository.catalog.find_asset(
-            shader_path,
-            self.preferred_archives,
-        )
-        if shader is None:
-            self._issues.append(
-                LevelIssue(
-                    code="missing_shader_database",
-                    message="DX11 shader database was not found",
-                    reference=shader_path,
-                )
+        source_kind = getattr(self.repository, "kind", "PC_ISO")
+        shader = None
+        if source_kind == "PC_ISO":
+            shader_path = (
+                f"Levels/{self.level_name}/shaders/Dx11_Single.res"
             )
+            shader = self.repository.catalog.find_asset(
+                shader_path,
+                self.preferred_archives,
+            )
+            if shader is None:
+                self._issues.append(
+                    LevelIssue(
+                        code="missing_shader_database",
+                        message="DX11 shader database was not found",
+                        reference=shader_path,
+                    )
+                )
+        else:
+            shader_path = f"Levels/{self.level_name}/Shaders/Single.res"
+            shader = self.repository.catalog.find_asset(
+                shader_path,
+                self.preferred_archives,
+            )
+            if shader is None:
+                self._issues.append(
+                    LevelIssue(
+                        code="missing_shader_database",
+                        message="Xbox DX9 shader database was not found",
+                        reference=shader_path,
+                    )
+                )
+            else:
+                self._issues.append(
+                    LevelIssue(
+                        code="unsupported_xbox_shader_bytecode",
+                        message=(
+                            "Xbox material keys and texture bindings are "
+                            "decoded, but compiled shader arithmetic and "
+                            "physical UV routing remain unsupported"
+                        ),
+                        reference=shader_path,
+                    )
+                )
         if progress:
             progress(1.0, "Level graph resolved")
         return LevelScene(

@@ -12,10 +12,10 @@ the browser is not necessarily decoded.
 | FbRB type/path | Category | Current behavior |
 |---|---|---|
 | `MeshData` | Mesh | Native geometry, UV preview, and available weight groups |
-| `RigidMeshSet` | Mesh | Resolves a naming-matched LOD MeshData, preferring LOD0. PC direct imports with a same-name DBX descriptor also resolve source surfaces and DX11 materials through the shared shader-key catalog; descriptorless undergrowth remains geometry with neutral materials and an explicit warning. Console imports are geometry-only |
-| `SkinnedMeshSet` | Mesh | PC: resolves MeshData, four preserved character shader-coordinate channels with nondegenerate material routing, the DBX skeleton/default surface references, source DX11 materials, and a bound armature; console: geometry-only |
+| `RigidMeshSet` | Mesh | Resolves a naming-matched LOD MeshData, preferring LOD0. PC and BF1943 STFS direct imports with a same-name DBX descriptor resolve source surfaces through the shared shader-key catalog; PC uses DX11 materials and BF1943 uses version-117 Xbox materials. Descriptorless resources remain geometry with neutral materials and an explicit warning. Xbox BC2 and PS3 imports are geometry-only |
+| `SkinnedMeshSet` | Mesh | PC: resolves MeshData, preserved character shader-coordinate channels, the DBX skeleton/default surface references, source DX11 materials, and a bound armature. BF1943: resolves the verified Xbox Granny skeleton, topology-selected coordinates, and version-117 source materials. Xbox BC2 and PS3 remain geometry-only |
 | `CompositeMeshSet` | Mesh | Resolves LOD0 MeshData and materials; rebases verified shared index streams and separates type-2 geometry into ordered source-named part collections. A vehicle `_Mesh.res` additionally imports its complete same-name entity assembly by default only after exact primary-mesh validation |
-| `TreeMeshSet` | Mesh | Resolves MeshData. PC direct imports also resolve same-name descriptor surfaces and DX11 materials; no tree-specific wind or runtime vegetation semantics are implemented. Console imports are geometry-only |
+| `TreeMeshSet` | Mesh | Resolves MeshData. PC and BF1943 STFS direct imports can resolve same-name descriptor surfaces through their platform shader catalogs; no tree-specific wind or runtime vegetation semantics are implemented. Xbox BC2 and PS3 imports are geometry-only |
 | `WaterMesh` | Mesh | Native positions and triangle geometry |
 | `ITexture` | Texture | PC resource-to-DDS conversion |
 | `XenonTexture` | Texture | Xbox untile, byte correction, and DDS conversion |
@@ -23,10 +23,11 @@ the browser is not necessarily decoded.
 | soldier entity `.dbx` with `Meshes3p` | Level / DBX | PC: imports every linked LOD0 body/head/headgear module on one shared armature with source materials and modular collections |
 | vehicle entity `.dbx` with a composite `Mesh` | Level / DBX | Imports the linked LOD0 composite into named source-part collections with source materials; PC `TrackComponentData` records additionally instantiate their shared skinned mesh and explicit skeleton at each exact source transform |
 | other non-resource path ending `.dbx` | Level / DBX | Implemented binary DBX subset converted to an XML Text datablock for inspection; unrecognized fields are not native Blender behavior and XML-to-DBX writing is unsupported |
-| PC level DBX graph | Level / DBX | Complete static map assembly with direct/grouped placements, terrain, water, and DX11-bound materials |
+| PC/BF1943 level DBX graph | Level / DBX | Complete static map assembly with direct/grouped placements, terrain, and water; PC uses DX11 materials while BF1943 uses verified version-117 Xbox material keys and texture bindings with explicit Xenos-bytecode/UV-routing limitations |
 | `Dx11ShaderDatabase` | Other | Material keys and indexed texture bindings parsed during PC complete-map and skinned-character import |
-| `GrannyModel` | Animation | PC little-endian skeleton converted to a native armature |
-| `GrannyAnimation` | Animation | PC transform tracks converted to a Blender 5.2 Action on the matching armature |
+| BF1943 `Dx9ShaderDatabase` | Other | Big-endian version-117 section graph, material keys, source binding values, and texture paths parsed for complete-map and direct mesh-set materials; compiled Xbox bytecode and exact UV routing remain unsupported |
+| `GrannyModel` | Animation | PC little-endian or verified BF1943 big-endian skeleton converted to a native armature |
+| `GrannyAnimation` | Animation | PC or verified BF1943 transform tracks converted to a Blender 5.2 Action on the matching armature |
 
 Several parsers contain PS3-oriented recognition paths: big-endian MeshData,
 composite-part, WaterMesh, TerrainHeightfield, TerrainMaterialMap, and texture
@@ -77,7 +78,7 @@ remain XML-only or ignored.
 | Animation/model | `AimAnimation`, `AnimTreeInfo`, `DeltaAnimation`, `RagdollResource` |
 | Audio | `Wave`, `ImpulseResponse` |
 | UI/video | `SwfMovie`, `BinkMemory` |
-| Physics/other | `HavokPhysicsData`, `Dx9ShaderDatabase` |
+| Physics/other | `HavokPhysicsData` |
 | Non-resource files | `.dbmanifest`, `.xml`, and other original suffixes |
 
 Unknown type strings are retained and categorized as Other. Raw extraction

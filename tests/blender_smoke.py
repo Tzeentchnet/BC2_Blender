@@ -283,6 +283,7 @@ def _test_settings_registration(context):
 
         class SyntheticRepository:
             kind = "PC_ISO"
+            indexes_archives_during_scan = False
 
             def __init__(self):
                 self.catalog = SyntheticCatalog()
@@ -321,7 +322,7 @@ def _test_settings_registration(context):
         original_get_repository = blender_addon._get_repository
         try:
             blender_addon.AssetRepository = (
-                lambda _source_path, _cache_path: lightweight_repository
+                lambda _source_path, _cache_path, **_kwargs: lightweight_repository
             )
             lightweight_events = blender_addon.queue.Queue()
             blender_addon._scan_source_worker(
@@ -345,7 +346,7 @@ def _test_settings_registration(context):
                 "Dist/win32/levels/mp_common/level-00.fbrb",
             )
             blender_addon.AssetRepository = (
-                lambda _source_path, _cache_path: targeted_repository
+                lambda _source_path, _cache_path, **_kwargs: targeted_repository
             )
             targeted_events = blender_addon.queue.Queue()
             blender_addon._scan_source_worker(
@@ -366,7 +367,7 @@ def _test_settings_registration(context):
                 )
 
             blender_addon.AssetRepository = (
-                lambda _source_path, _cache_path: repository
+                lambda _source_path, _cache_path, **_kwargs: repository
             )
             events = blender_addon.queue.Queue()
             blender_addon._scan_source_worker(
@@ -1874,6 +1875,328 @@ def _test_reflected_material_roles():
     if atlas_output is not None:
         raise AssertionError("Decal atlas was promoted to primary color")
 
+    dock_bindings = (
+        ShaderTextureBinding(2, "Textures/Wood/PilePlanks_t03v01_Nm"),
+        ShaderTextureBinding(3, "Textures/Wood/PilePlanks_t03v01_Df"),
+        ShaderTextureBinding(4, "Textures/Masks/1024/3Channel_t01_Gm"),
+        ShaderTextureBinding(5, "Textures/Objects/Jetty_Oc"),
+    )
+    if blender_addon._binding_roles(dock_bindings) != (
+        "NORMAL",
+        "COLOR",
+        "MASK",
+        "OCCLUSION",
+    ):
+        raise AssertionError("BF1943 dock texture roles are incorrect")
+
+    carrier_surface = SurfaceShader(
+        "Jap_G",
+        "Objects/Vehicles/Beach/AircraftCarrier/Shaders/Jap_G/GUID",
+        "Objects/Vehicles/Beach/AircraftCarrier/Jap_Carrier_Mesh/"
+        "Objects/Vehicles/Beach/AircraftCarrier/Shaders/Jap_G",
+    )
+    carrier_bindings = (
+        ShaderTextureBinding(1, "Textures/Metal/MetalPaint_t02_Nm"),
+        ShaderTextureBinding(
+            2,
+            "Objects/Vehicles/Beach/AircraftCarrier/Textures/"
+            "Hull_Metal_02",
+        ),
+        ShaderTextureBinding(
+            3,
+            "Objects/Vehicles/Beach/AircraftCarrier/Textures/"
+            "colorpick_01",
+        ),
+        ShaderTextureBinding(
+            4,
+            "Objects/Vehicles/Beach/AircraftCarrier/Textures/"
+            "CombinedAOs",
+        ),
+        ShaderTextureBinding(
+            261,
+            "Textures/Sky/Sky_Beach_Generic_RGBA16f",
+        ),
+        ShaderTextureBinding(
+            6,
+            "Textures/Masks/1024/Generic_t03_Gm",
+        ),
+    )
+    carrier_roles = blender_addon._surface_binding_roles(
+        carrier_surface,
+        carrier_bindings,
+    )
+    if carrier_roles != (
+        "NORMAL",
+        "COLOR",
+        "PALETTE",
+        "OCCLUSION",
+        "ENVIRONMENT",
+        "MASK",
+    ):
+        raise AssertionError(
+            f"BF1943 carrier texture roles are incorrect: {carrier_roles}"
+        )
+    carrier_uv_maps = tuple(
+        blender_addon._surface_binding_uv_map(
+            carrier_surface,
+            binding,
+            role,
+        )
+        for binding, role in zip(carrier_bindings, carrier_roles)
+    )
+    if carrier_uv_maps != (
+        "UVMap",
+        "UVMap",
+        "UV2",
+        "UV1",
+        "UVMap",
+        "UVMap",
+    ):
+        raise AssertionError(
+            f"BF1943 carrier UV routing is incorrect: {carrier_uv_maps}"
+        )
+    carrier_detail_bindings = (
+        ShaderTextureBinding(
+            1,
+            "Objects/Vehicles/Beach/AircraftCarrier/Textures/"
+            "US_details_512",
+        ),
+        ShaderTextureBinding(
+            2,
+            "Objects/Vehicles/Beach/AircraftCarrier/Textures/"
+            "colorpick_02",
+        ),
+        ShaderTextureBinding(
+            3,
+            "Objects/Vehicles/Beach/AircraftCarrier/Textures/"
+            "CombinedAOs",
+        ),
+        ShaderTextureBinding(
+            260,
+            "Textures/Sky/Sky_Beach_Generic_RGBA16f",
+        ),
+        ShaderTextureBinding(5, "Textures/Masks/1024/Generic_t03_Gm"),
+    )
+    carrier_detail_roles = blender_addon._surface_binding_roles(
+        carrier_surface,
+        carrier_detail_bindings,
+    )
+    if carrier_detail_roles != (
+        "DETAIL",
+        "PALETTE",
+        "OCCLUSION",
+        "ENVIRONMENT",
+        "MASK",
+    ):
+        raise AssertionError(
+            "BF1943 carrier detail roles are incorrect: "
+            f"{carrier_detail_roles}"
+        )
+    carrier_detail_uv_maps = tuple(
+        blender_addon._surface_binding_uv_map(
+            carrier_surface,
+            binding,
+            role,
+        )
+        for binding, role in zip(
+            carrier_detail_bindings,
+            carrier_detail_roles,
+        )
+    )
+    if carrier_detail_uv_maps != (
+        "UVMap",
+        "UV2",
+        "UV1",
+        "UVMap",
+        "UVMap",
+    ):
+        raise AssertionError(
+            "BF1943 carrier detail routing is incorrect: "
+            f"{carrier_detail_uv_maps}"
+        )
+    carrier_material = bpy.data.materials.new("BC2 Carrier Color Graph")
+    carrier_nodes, carrier_links, _ = blender_addon._material_nodes(
+        carrier_material
+    )
+    carrier_texture_nodes = tuple(
+        (
+            binding,
+            role,
+            carrier_nodes.new("ShaderNodeTexImage"),
+        )
+        for binding, role in zip(carrier_bindings, carrier_roles)
+    )
+    carrier_output, _, carrier_model = (
+        blender_addon._layered_color_output(
+            carrier_nodes,
+            carrier_links,
+            carrier_texture_nodes,
+            carrier_surface,
+        )
+    )
+    carrier_ao_node = carrier_texture_nodes[3][2]
+    if (
+        carrier_output is None
+        or "source palette" not in carrier_model
+        or "ambient occlusion" not in carrier_model
+        or not carrier_nodes.get("BC2 color x source palette")
+        or carrier_ao_node.get("bc2_occlusion_channel") != "Green"
+        or not carrier_nodes.get("BC2 carrier AO Green")
+    ):
+        raise AssertionError(
+            "BF1943 carrier palette/AO graph is incomplete"
+        )
+    carrier_channels = {
+        name: blender_addon._bf1943_carrier_occlusion_channel(
+            SurfaceShader(
+                name,
+                "Objects/Vehicles/Beach/AircraftCarrier/Shaders/"
+                f"{name}/GUID",
+                "Objects/Vehicles/Beach/AircraftCarrier/Carrier_Mesh/"
+                "Objects/Vehicles/Beach/AircraftCarrier/Shaders/"
+                f"{name}",
+            ),
+            (
+                "jap_version_ao_01"
+                if name in {"Jap_B", "Jap_C"}
+                else "combinedaos"
+            ),
+        )
+        for name in (
+            "Jap_A",
+            "Jap_B",
+            "Jap_C",
+            "Jap_D",
+            "Jap_E",
+            "Jap_F",
+            "Jap_G",
+            "US_A",
+            "US_B",
+            "US_C",
+            "US_D",
+            "US_E",
+            "US_F",
+            "US_G",
+        )
+    }
+    if carrier_channels != {
+        "Jap_A": "Blue",
+        "Jap_B": "Color",
+        "Jap_C": "Color",
+        "Jap_D": "Blue",
+        "Jap_E": "Green",
+        "Jap_F": "Green",
+        "Jap_G": "Green",
+        "US_A": "Alpha",
+        "US_B": "Alpha",
+        "US_C": "Alpha",
+        "US_D": "Alpha",
+        "US_E": "Red",
+        "US_F": "Red",
+        "US_G": "Red",
+    }:
+        raise AssertionError(
+            f"BF1943 carrier AO channels are incorrect: {carrier_channels}"
+        )
+
+    wake_surface = SurfaceShader(
+        "TnTShader1",
+        "Objects/Beach_Objects/Wakes/Shaders/iwo_scroll/GUID",
+        "Objects/Beach_Objects/Wakes/wake_2/wake_2_Mesh/"
+        "Objects/Beach_Objects/Wakes/Shaders/iwo_scroll",
+    )
+    wake_bindings = (
+        ShaderTextureBinding(0, "Textures/Terrain/Test/Test_seabed2"),
+        ShaderTextureBinding(
+            1, "Textures/Terrain/Mud/mudslide_01_RGBM"
+        ),
+        ShaderTextureBinding(
+            2, "Objects/Beach_Objects/Wakes/textures/wake"
+        ),
+    )
+    if blender_addon._surface_binding_roles(
+        wake_surface,
+        wake_bindings,
+    ) != ("COLOR", "NOISE", "MASK"):
+        raise AssertionError("BF1943 shoreline-wake roles are incorrect")
+    wake_roles = blender_addon._surface_binding_roles(
+        wake_surface,
+        wake_bindings,
+    )
+    wake_uv_maps = tuple(
+        blender_addon._surface_binding_uv_map(
+            wake_surface,
+            binding,
+            role,
+        )
+        for binding, role in zip(wake_bindings, wake_roles)
+    )
+    if wake_uv_maps != ("UV1", "UV1", "UVMap"):
+        raise AssertionError(
+            f"BF1943 shoreline-wake UV routing is incorrect: {wake_uv_maps}"
+        )
+    wake_material = bpy.data.materials.new("BC2 Shoreline Wake Graph")
+    wake_nodes, wake_links, wake_shader = blender_addon._material_nodes(
+        wake_material
+    )
+    wake_texture_nodes = tuple(
+        (
+            binding,
+            role,
+            wake_nodes.new("ShaderNodeTexImage"),
+        )
+        for binding, role in zip(wake_bindings, wake_roles)
+    )
+    if not blender_addon._configure_verified_surface_material(
+        wake_material,
+        wake_surface,
+        wake_nodes,
+        wake_links,
+        wake_shader,
+        wake_texture_nodes,
+    ):
+        raise AssertionError("BF1943 shoreline-wake graph was not created")
+    if (
+        not wake_material.name.startswith("BC2 Shoreline Wake")
+        or wake_material.get("bc2_material_family")
+        != "BF1943 shoreline wake"
+        or wake_material.get("bc2_material_status")
+        != "resolved heuristic BF1943 shoreline wake graph"
+        or wake_material.surface_render_method != "DITHERED"
+        or not wake_shader.inputs["Base Color"].is_linked
+        or not wake_shader.inputs["Alpha"].is_linked
+        or not wake_nodes.get("BC2 shoreline wake opacity")
+    ):
+        raise AssertionError("BF1943 shoreline-wake graph is incomplete")
+
+    skydome_bindings = (
+        ShaderTextureBinding(
+            1, "Objects/Beach_Objects/skydome/textures/sky_CS"
+        ),
+        ShaderTextureBinding(2, "Textures/Water/WavesMedium_02_C"),
+    )
+    skydome_roles = blender_addon._binding_roles(skydome_bindings)
+    if skydome_roles != ("COLOR", "COLOR"):
+        raise AssertionError("BF1943 skydome texture roles are incorrect")
+    sky_material = bpy.data.materials.new("BC2 Skydome Color Graph")
+    sky_nodes, sky_links, _ = blender_addon._material_nodes(sky_material)
+    sky_texture_nodes = [
+        sky_nodes.new("ShaderNodeTexImage")
+        for _ in skydome_bindings
+    ]
+    sky_output, sky_node, _ = blender_addon._layered_color_output(
+        sky_nodes,
+        sky_links,
+        tuple(
+            zip(skydome_bindings, skydome_roles, sky_texture_nodes)
+        ),
+    )
+    if (
+        sky_output != sky_texture_nodes[0].outputs["Color"]
+        or sky_node != sky_texture_nodes[0]
+    ):
+        raise AssertionError("BF1943 skydome did not select sky_CS")
+
 
 def _test_verified_vehicle_material_graphs():
     main_surface = SurfaceShader(
@@ -2449,6 +2772,98 @@ def _test_character_material_graph():
         != (7.0, 7.0)
     ):
         raise AssertionError("Character shader UV mapping is incorrect")
+
+    bf1943_surface = SurfaceShader(
+        "Body",
+        "Characters/Beach/3P/Jap_Infantry/Shaders/"
+        "Jap_Infantry_Body/GUID",
+        "Characters/Beach/3P/Jap_Infantry/Jap_Infantry_Mesh/"
+        "Characters/Beach/3P/Jap_Infantry/Shaders/"
+        "Jap_Infantry_Body",
+    )
+    bf1943_bindings = (
+        ShaderTextureBinding(
+            1, "Characters/Beach/3P/Jap_Shared/Jap_Body_Normal"
+        ),
+        ShaderTextureBinding(
+            2, "Characters/Beach/3P/Jap_Shared/Jap_Body_AO"
+        ),
+        ShaderTextureBinding(
+            3, "Characters/Beach/3P/Jap_Shared/Jap_Body_Color"
+        ),
+        ShaderTextureBinding(
+            262, "Textures/Sky/Sky_Beach_Generic_RGBA16f"
+        ),
+    )
+    bf1943_roles = blender_addon._character_binding_roles(
+        bf1943_surface,
+        bf1943_bindings,
+    )
+    if bf1943_roles != (
+        "NORMAL",
+        "OCCLUSION",
+        "BASE_COLOR",
+        "ENVIRONMENT",
+    ):
+        raise AssertionError(
+            f"BF1943 character binding roles are incorrect: {bf1943_roles}"
+        )
+
+    corsair_surface = SurfaceShader(
+        "main",
+        "Objects/Vehicles/Beach/US_Corsair/Shaders/"
+        "corsair_main/GUID",
+        "Objects/Vehicles/Beach/US_Corsair/US_corsair_Mesh/"
+        "Objects/Vehicles/Beach/US_Corsair/Shaders/corsair_main",
+    )
+    corsair_bindings = (
+        ShaderTextureBinding(
+            1,
+            "Objects/Vehicles/Beach/US_Corsair/textures/corsair_nm",
+        ),
+        ShaderTextureBinding(2, "Textures/Metal/MetalPaint_t02_Nm"),
+        ShaderTextureBinding(
+            3, "Objects/Vehicles/Beach/Shared/VehicleDecals"
+        ),
+        ShaderTextureBinding(
+            4,
+            "Objects/Vehicles/Beach/US_Corsair/textures/corsair_cm",
+        ),
+        ShaderTextureBinding(
+            261, "Textures/Sky/Sky_Beach_Generic_RGBA16f"
+        ),
+        ShaderTextureBinding(6, "Textures/Masks/1024/Generic_t03_Gm"),
+    )
+    corsair_roles = blender_addon._surface_binding_roles(
+        corsair_surface,
+        corsair_bindings,
+    )
+    if corsair_roles != (
+        "NORMAL",
+        "NORMAL",
+        "DECAL",
+        "COLOR",
+        "ENVIRONMENT",
+        "MASK",
+    ):
+        raise AssertionError(
+            f"BF1943 Corsair binding roles are incorrect: {corsair_roles}"
+        )
+    if (
+        blender_addon._surface_binding_uv_map(
+            corsair_surface,
+            corsair_bindings[2],
+            corsair_roles[2],
+        )
+        != "UV1"
+        or blender_addon._surface_binding_uv_scale(
+            corsair_surface,
+            corsair_bindings[1],
+        )
+        != (128.0, 64.0)
+    ):
+        raise AssertionError("BF1943 Corsair fallback routing is incorrect")
+
     for surface_name, roles_to_check in (
         (
             "LegStandard",
@@ -2507,6 +2922,72 @@ def _test_character_material_graph():
         for node in nodes
     ):
         raise AssertionError("Character detail normal was not combined")
+
+
+def _test_direct_bf1943_shader_discovery():
+    class Repository:
+        def __init__(self, kind):
+            self.kind = kind
+            self.calls = []
+
+        def shader_database_candidates(
+            self,
+            material_keys,
+            preferred_archives,
+            mesh_path,
+            shader_partitions,
+        ):
+            self.calls.append(
+                (
+                    material_keys,
+                    preferred_archives,
+                    mesh_path,
+                    shader_partitions,
+                )
+            )
+            return ()
+
+    surface = SurfaceShader(
+        "main",
+        "Objects/Vehicles/Beach/US_Corsair/Shaders/"
+        "corsair_main/GUID",
+        "Objects/Vehicles/Beach/US_Corsair/US_corsair_Mesh/"
+        "Objects/Vehicles/Beach/US_Corsair/Shaders/corsair_main",
+    )
+    settings = SimpleNamespace(material_mode="FULL")
+    repository = Repository("XBOX360_STFS")
+    context = blender_addon._source_material_context(
+        repository,
+        ("Dist/xenon/levels/coral_sea/level-00.fbrb",),
+        settings,
+    )
+    blender_addon._ensure_source_shader_materials(
+        repository,
+        context,
+        (surface,),
+        mesh_path="Objects/Vehicles/Beach/US_Corsair/"
+        "US_corsair_Mesh.res",
+    )
+    if len(repository.calls) != 1:
+        raise AssertionError(
+            "Direct BF1943 mesh import did not search Xbox shader databases"
+        )
+
+    xbox_bc2_repository = Repository("XBOX360_XDVDFS")
+    xbox_bc2_context = blender_addon._source_material_context(
+        xbox_bc2_repository,
+        (),
+        settings,
+    )
+    blender_addon._ensure_source_shader_materials(
+        xbox_bc2_repository,
+        xbox_bc2_context,
+        (surface,),
+    )
+    if xbox_bc2_repository.calls:
+        raise AssertionError(
+            "Unverified Xbox BC2 direct material lookup was enabled"
+        )
 
 
 def _test_degenerate_subset_materials():
@@ -2966,6 +3447,7 @@ def main():
     _test_reflected_material_roles()
     _test_verified_vehicle_material_graphs()
     _test_character_material_graph()
+    _test_direct_bf1943_shader_discovery()
     _test_degenerate_subset_materials()
     _test_armature_and_action(bpy.context)
     print(

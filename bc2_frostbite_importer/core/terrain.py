@@ -89,7 +89,7 @@ def parse_heightfield(
         raise CorruptDataError(
             f"Terrain height samples are truncated for {resolution}x{resolution}"
         )
-    endian = "<"
+    endian = ">" if platform == "xbox360" else "<"
     target_resolution = max(2, min(int(target_resolution), 1024))
     sample_count = min(resolution, target_resolution)
     samples = [

@@ -3,7 +3,7 @@
 ## TerrainHeightfield
 
 The tested TerrainHeightfield starts with a platform-endian spatial and
-metadata header followed by little-endian height samples:
+metadata header followed by platform-specific height samples:
 
 | Offset | Type | Meaning |
 |---:|---|---|
@@ -11,22 +11,25 @@ metadata header followed by little-endian height samples:
 | `0x18` | `uint32` | square resolution |
 | `0x1C` | `uint32[5]` | LOD metadata; partially understood |
 | `0x30` | `uint8` | zero in tested resources |
-| `0x31` | little-endian `uint16[resolution * resolution]` | height samples |
+| `0x31` | `uint16[resolution * resolution]` | height samples in platform-selected byte order |
 
-Verified header byte order:
+Verified byte order:
 
-| Platform | Bounds and resolution |
-|---|---|
-| PC | little-endian |
-| Xbox 360 | big-endian |
+| Platform/sample | Header | Height samples |
+|---|---|---|
+| PC retail | little-endian | little-endian |
+| BF1943 Xbox LIVE | big-endian | big-endian |
 
-The tested Xbox resource has a 2048 x 2048 grid and little-endian height
-samples even though its bounds, resolution, and metadata are big-endian.
-Tested PC resources also use little-endian samples. Header byte order is
-selected from the known platform and validated against finite ordered bounds,
-a resolution from 2 through 8192, and the available byte length. When platform
-metadata is unavailable, both header interpretations are scored. Sample byte
-order is fixed little-endian; it is not selected by a smoothness heuristic.
+The verified BF1943 resource has a 2048 x 2048 grid whose bounds, resolution,
+metadata, and height samples are all big-endian. Tested PC resources use
+little-endian headers and samples. Header byte order is selected from the known
+platform and validated against finite ordered bounds, a resolution from 2
+through 8192, and the available byte length. When platform metadata is
+unavailable, both header interpretations are scored. The implementation uses
+big-endian samples for the `xbox360` platform based on the BF1943 evidence; the
+sample order of Xbox BC2 terrain remains **unknown** because no Xbox BC2
+heightfield was used to verify that rule. Byte order is never selected from an
+apparent smoothness score.
 
 Sample conversion is:
 
@@ -91,6 +94,17 @@ approximately `109.30..276.49` m, with a maximum adjacent edge of `39.93` m
 and maximum isolated four-neighbor deviation of `8.16` m. Correcting the
 header boundary, byte order, spacing, and quad diagonal removes the imported
 terrain spikes rather than filtering authored samples.
+
+The BF1943 Coral Sea heightfield provides separate big-endian evidence. Its
+source bounds are `(-1024, 0, -1024)` through `(1024, 250, 1024)`. Reading
+the serialized samples as little-endian produced raw adjacent-difference
+percentiles of `2,048` (p50) and `45,567` (p95); big-endian decoding produced
+`8` (p50) and `162` (p95). The former interpretation created the reported
+spiky Blender terrain even though the triangle indices were correct. A
+regenerated 512-edge preview has an observed height span of `179.770` m and
+an adjacent-height p95 of `2.457` m. The save/reopen integration now rejects
+Coral Sea when p95 exceeds 25% of the observed span. This validates the sample
+byte order for that BF1943 package, not for Xbox BC2 or PS3.
 
 The associated WaterMesh has 569 vertices and 1,013 triangles. Its unplaced
 height is approximately 130.5 through 133.25. Its triangle list uses 32-bit
@@ -172,7 +186,7 @@ name, and an enable flag. The runtime archive does not contain those PNGs.
 Instead it contains `MP_001.MaskTileAtlas.res` and `MP_001.Visual.res`.
 
 The Xbox atlas header identifies a 2048 x 1024, one-mip texture with format
-code `3` and a 1,048,576-byte block payload. That format code is not yet
+code `3` and a 1,048,576-byte BC1 block payload. Format-code-3 BC1 storage is
 implemented by the texture decoder. `VisualTerrain` retains compiled terrain
 shader paths and the runtime tile/material records, but their record
 boundaries and mapping back to the DBX mask regions are not decoded.
@@ -192,10 +206,10 @@ the mask atlas, or blend arithmetic. The importer now reports the full/group/
 spline record counts in map diagnostics rather than silently implying that
 the physical-material approximation includes them.
 
-Still unknown are format-code-3 texture decoding, `VisualTerrain` tile records,
-the exact mask-atlas region mapping, layer composition order at runtime, and
-the shader arithmetic/constants. These remain blockers for faithful terrain
-decal rendering.
+Still unknown are `VisualTerrain` tile records, the exact decoded mask-atlas
+region mapping, layer composition order at runtime, and the shader
+arithmetic/constants. These remain blockers for faithful terrain decal
+rendering.
 
 See [`terrain.py`](../../bc2_frostbite_importer/core/terrain.py).
 
@@ -390,9 +404,9 @@ normalizes its supported array names with `casefold`.
 | Vehicle entities | primary `id`/`guid`/`type` attributes with type ending in `VehicleEntityData`; `Mesh`, optional `MeshShaderSet`, and `Components[]` | Imports the main composite mesh and traverses the component graph |
 | Vehicle state components | `HealthStates[]` entries with `Health` and `MeshName`; direct complex children containing `MeshName`; nested `Components[]` | Classifies default, alternate, damaged, and destroyed source part names |
 | Vehicle tracks | component `guid`/`type` attributes with type ending in `TrackComponentData`; `Name`, 16-word `Transform`, `Mesh`, `Skeleton`, and nested `Components[]` | Creates one source-backed skinned track instance and local armature per component |
-| Direct PC map placements | level primary `Objects[]`; `Entity.ReferenceObjectData` `guid`/`type` attributes and fields `Transform`, `ReferencedObject`, optional `MeshShaderSet`, and `Enumeration` | Creates linked static mesh placements |
+| Direct PC/BF1943 map placements | level primary `Objects[]`; `Entity.ReferenceObjectData` `guid`/`type` attributes and fields `Transform`, `ReferencedObject`, optional `MeshShaderSet`, and `Enumeration` | Creates linked static mesh placements |
 | Blueprint and mesh references | blueprint `Object`; target `Name`, `Mesh`, and optional `MeshShaderSet`; mesh `ShaderSets[]` and surface fields above | Resolves the visual mesh and material variant for a placement |
-| Compact PC map groups | four implemented group instance types; `PhysicsData`, nested `Asset`, `MemberDatas[]`, `MeshEntityType`, `Mesh`, `MeshShaderSet`, `SpawnDatas[]`, `Enumeration`; companion DBX `Name`, `Transforms`, `Enums`, and `Assets` | Reconstructs Forest, Middlegrowth, Rigid, and Static grouped visual placements and validates source order |
+| Compact PC/BF1943 map groups | four implemented group instance types; `PhysicsData`, nested `Asset`, `MemberDatas[]`, `MeshEntityType`, `Mesh`, `MeshShaderSet`, `SpawnDatas[]`, `Enumeration`; companion DBX `Name`, `Transforms`, `Enums`, and `Assets` | Reconstructs Forest, Middlegrowth, Rigid, and Static grouped visual placements and validates source order |
 | Terrain links | `TerrainEntityData` fields `TerrainAsset` and `Transform`; terrain primary `MaterialMap` | Resolves heightfield/material-map/water resources, largely by resource naming after the DBX link |
 | Terrain decal inventory | instance types `TerrainFullDecal`, `TerrainGroupDecal`, and `TerrainSplineDecal` | Counts records for diagnostics only; does not render or semantically decode them |
 

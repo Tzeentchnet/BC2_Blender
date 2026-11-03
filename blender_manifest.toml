@@ -1,9 +1,9 @@
 schema_version = "1.0.0"
 
 id = "bc2_frostbite_importer"
-version = "0.7.6"
+version = "0.8.0"
 name = "Bad Company 2 Frostbite Importer"
-tagline = "Import Frostbite 1 assets, assemblies, and maps from BC2 discs"
+tagline = "Import Frostbite 1 assets and maps from BC2 and BF1943"
 maintainer = "BC2 Blender Contributors"
 type = "add-on"
 
@@ -12,7 +12,7 @@ blender_version_min = "5.2.0"
 license = ["SPDX:GPL-3.0-or-later"]
 
 [permissions]
-files = "Read disc images and write an extracted asset cache"
+files = "Read game sources/ZIPs and write an extracted asset cache"
 
 [build]
 paths_exclude_pattern = [

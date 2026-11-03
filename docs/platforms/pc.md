@@ -103,8 +103,11 @@ textures referenced by the level. Archive selection is exact and
 case-insensitive, and duplicate asset paths prefer the requested level archive
 order.
 
-Complete-map assembly is currently PC-only because it uses the PC DX11 shader
-database and has only been validated against the retail PC DBX graph. See
+PC complete-map assembly uses the level DX11 shader database for source-backed
+materials. BF1943 complete-map assembly is also implemented from its Xbox LIVE
+package; its distinct version-117 Xbox database supplies source material keys
+and texture bindings while compiled Xenos shader arithmetic and exact UV
+routing remain unsupported. See
 [Levels and complete maps](../formats/levels-and-maps.md).
 
 ## PC resource conventions

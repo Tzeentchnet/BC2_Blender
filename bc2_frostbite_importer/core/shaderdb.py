@@ -171,6 +171,29 @@ class _Block5Child:
     layout_reference: bytes
 
 
+@dataclass(frozen=True)
+class _XboxShaderRecord:
+    parameter_group_index: int
+    binding_table_index: int
+    register_table_index: int
+
+
+@dataclass(frozen=True)
+class _XboxProgram:
+    reference: bytes
+    vertex_shader_index: int
+    pixel_shader_index: int
+    vertex_parameter_group_index: int
+    parameter_group_index: int
+
+
+@dataclass(frozen=True)
+class _XboxProgramKey:
+    entry_reference: bytes
+    fragment_reference: bytes
+    layout_reference: bytes
+
+
 _VERTEX_FIELD_WIDTHS = {
     263: 6,
     258: 8,
@@ -592,7 +615,7 @@ def _block7(stream: io.BytesIO) -> dict[bytes, tuple[int, ...]]:
     return items
 
 
-def parse_shader_database(
+def _parse_pc_shader_database(
     data: bytes,
     *,
     material_keys: Iterable[str] | None = None,
@@ -815,4 +838,582 @@ def parse_shader_database(
         trailing_bytes=len(data) - stream.tell(),
         layouts=tuple(layouts.values()),
         material_keys=tuple(all_material_keys),
+    )
+
+
+def _be_u16(stream: io.BytesIO, context: str) -> int:
+    return struct.unpack(">H", read_exact(stream, 2, context))[0]
+
+
+def _be_u32(stream: io.BytesIO, context: str) -> int:
+    return struct.unpack(">I", read_exact(stream, 4, context))[0]
+
+
+def _be_count(
+    stream: io.BytesIO,
+    context: str,
+    maximum: int = 1_000_000,
+) -> int:
+    value = _be_u32(stream, context)
+    if value > maximum:
+        raise CorruptDataError(f"Unsafe {context}: {value:,}")
+    return value
+
+
+def _xbox_parameter_groups(
+    stream: io.BytesIO,
+) -> list[tuple[ShaderTextureBinding, ...]]:
+    groups = []
+    count = _be_count(stream, "Xbox shader parameter-group count")
+    for group_index in range(count):
+        start = stream.tell()
+        size = _be_u32(stream, "Xbox shader parameter-group size")
+        if size < 32:
+            raise CorruptDataError(
+                f"Xbox shader parameter group {group_index} is too short: "
+                f"{size}"
+            )
+        end = start + size
+        if end > len(stream.getbuffer()):
+            raise CorruptDataError(
+                f"Xbox shader parameter group {group_index} exceeds the "
+                "database"
+            )
+        _skip(stream, 20, "Xbox shader parameter-group header")
+        counts = read_exact(
+            stream,
+            6,
+            "Xbox shader parameter-group counts",
+        )
+        texture_count, property_count_56, property_count_40 = counts[3:6]
+        _skip(stream, 2, "Xbox shader parameter-group footer")
+        textures = []
+        for _ in range(texture_count):
+            index = struct.unpack(
+                "<I",
+                read_exact(
+                    stream,
+                    4,
+                    "Xbox shader texture binding index",
+                ),
+            )[0]
+            raw_name = read_exact(
+                stream,
+                136,
+                "Xbox shader texture binding name",
+            )
+            name = raw_name.split(b"\0", 1)[0].decode(
+                "latin-1",
+            )
+            if name:
+                textures.append(
+                    ShaderTextureBinding(index=index, path=name)
+                )
+        _skip(
+            stream,
+            property_count_56 * 56,
+            "Xbox shader 56-byte properties",
+        )
+        _skip(
+            stream,
+            property_count_40 * 40,
+            "Xbox shader 40-byte properties",
+        )
+        if stream.tell() > end:
+            raise CorruptDataError(
+                f"Xbox shader parameter group {group_index} exceeds its size"
+            )
+        _skip(
+            stream,
+            end - stream.tell(),
+            "Xbox shader parameter-group metadata",
+        )
+        groups.append(tuple(textures))
+    return groups
+
+
+def _skip_xbox_binding_tables(stream: io.BytesIO) -> int:
+    count = _be_count(stream, "Xbox shader binding-table count")
+    for _ in range(count):
+        item_count = _be_u16(
+            stream,
+            "Xbox shader binding-table item count",
+        )
+        _skip(
+            stream,
+            item_count * 4 + 2,
+            "Xbox shader binding table",
+        )
+    return count
+
+
+def _skip_xbox_register_tables(stream: io.BytesIO) -> int:
+    count = _be_count(stream, "Xbox shader register-table count")
+    for _ in range(count):
+        item_count = _be_count(
+            stream,
+            "Xbox shader register-table item count",
+        )
+        _skip(
+            stream,
+            item_count * 4,
+            "Xbox shader register table",
+        )
+    return count
+
+
+def _xbox_shader_records(
+    stream: io.BytesIO,
+    *,
+    vertex: bool,
+) -> list[_XboxShaderRecord]:
+    label = "vertex" if vertex else "pixel"
+    records = []
+    count = _be_count(
+        stream,
+        f"Xbox {label} shader count",
+        maximum=100_000,
+    )
+    for _ in range(count):
+        read_exact(stream, 16, f"Xbox {label} shader reference")
+        code_size = _be_count(
+            stream,
+            f"Xbox {label} shader code size",
+            maximum=1 << 30,
+        )
+        _skip(stream, code_size, f"Xbox {label} shader code")
+        records.append(
+            _XboxShaderRecord(
+                parameter_group_index=_be_u32(
+                    stream,
+                    f"Xbox {label} shader parameter-group index",
+                ),
+                binding_table_index=_be_u32(
+                    stream,
+                    f"Xbox {label} shader binding-table index",
+                ),
+                register_table_index=_be_u32(
+                    stream,
+                    f"Xbox {label} shader register-table index",
+                ),
+            )
+        )
+        if vertex:
+            element_count = _be_count(
+                stream,
+                "Xbox vertex declaration element count",
+                maximum=1_000,
+            )
+            _skip(
+                stream,
+                element_count * 12 + 16,
+                "Xbox vertex declaration",
+            )
+    return records
+
+
+def _xbox_programs(stream: io.BytesIO) -> list[_XboxProgram]:
+    programs = []
+    for _ in range(
+        _be_count(stream, "Xbox shader program count", maximum=100_000)
+    ):
+        raw = read_exact(stream, 48, "Xbox shader program")
+        values = struct.unpack_from(">8I", raw, 16)
+        programs.append(
+            _XboxProgram(
+                reference=raw[:16],
+                vertex_shader_index=values[4],
+                pixel_shader_index=values[5],
+                vertex_parameter_group_index=values[6],
+                parameter_group_index=values[7],
+            )
+        )
+    return programs
+
+
+def _xbox_program_keys(
+    stream: io.BytesIO,
+    expected_count: int,
+) -> list[_XboxProgramKey]:
+    count = _be_count(
+        stream,
+        "Xbox shader program-key count",
+        maximum=100_000,
+    )
+    if count != expected_count:
+        raise CorruptDataError(
+            f"Xbox shader database has {expected_count:,} programs but "
+            f"{count:,} program keys"
+        )
+    keys = []
+    for _ in range(count):
+        raw = read_exact(stream, 92, "Xbox shader program key")
+        keys.append(
+            _XboxProgramKey(
+                entry_reference=raw[:16],
+                fragment_reference=raw[16:32],
+                layout_reference=raw[32:48],
+            )
+        )
+    return keys
+
+
+def _xbox_vertex_layouts(
+    stream: io.BytesIO,
+) -> dict[bytes, ShaderVertexLayout]:
+    layouts = {}
+    count = _be_count(
+        stream,
+        "Xbox shader vertex-layout count",
+        maximum=100_000,
+    )
+    for _ in range(count):
+        raw = read_exact(stream, 89, "Xbox shader vertex layout")
+        reference = raw[:16]
+        if reference in layouts:
+            raise CorruptDataError(
+                "Xbox shader vertex-layout reference is duplicated"
+            )
+        stride = raw[85]
+        fields = []
+        semantic_index = 0
+        for element_offset in range(20, 80, 4):
+            code = raw[element_offset]
+            offset = raw[element_offset + 2]
+            if code != 6 or offset + 4 > stride:
+                continue
+            fields.append(
+                ShaderVertexField(
+                    code=code,
+                    offset=offset,
+                    size=4,
+                    semantic_index=semantic_index,
+                    semantic_components=(0, 1),
+                )
+            )
+            semantic_index += 1
+        layouts[reference] = ShaderVertexLayout(
+            reference=reference,
+            stride=stride,
+            layout_type=struct.unpack_from("<I", raw, 16)[0],
+            fields=tuple(fields),
+        )
+    return layouts
+
+
+def _xbox_named_references(
+    stream: io.BytesIO,
+    context: str,
+) -> list[tuple[str, bytes]]:
+    values = []
+    names = set()
+    count = _be_count(
+        stream,
+        f"Xbox shader {context} count",
+        maximum=200_000,
+    )
+    for _ in range(count):
+        name = _cstring(stream, f"Xbox shader {context} name")
+        normalized = name.casefold()
+        if normalized in names:
+            raise CorruptDataError(
+                f"Duplicate Xbox shader {context} name: {name}"
+            )
+        names.add(normalized)
+        values.append(
+            (
+                name,
+                read_exact(
+                    stream,
+                    16,
+                    f"Xbox shader {context} reference",
+                ),
+            )
+        )
+    return values
+
+
+def _xbox_entry_groups(
+    stream: io.BytesIO,
+) -> dict[bytes, tuple[int, ...]]:
+    groups = {}
+    count = _be_count(
+        stream,
+        "Xbox shader entry-group count",
+        maximum=200_000,
+    )
+    for _ in range(count):
+        reference = read_exact(
+            stream,
+            16,
+            "Xbox shader entry-group reference",
+        )
+        if reference in groups:
+            raise CorruptDataError(
+                "Xbox shader entry-group reference is duplicated"
+            )
+        index_count = _be_count(
+            stream,
+            "Xbox shader entry-group index count",
+            maximum=100_000,
+        )
+        groups[reference] = tuple(
+            _be_u16(stream, "Xbox shader entry-group index")
+            for _ in range(index_count)
+        )
+    return groups
+
+
+def _validate_xbox_shader_graph(
+    parameter_group_count: int,
+    binding_table_count: int,
+    register_table_count: int,
+    vertex_shaders: list[_XboxShaderRecord],
+    pixel_shaders: list[_XboxShaderRecord],
+    programs: list[_XboxProgram],
+    keys: list[_XboxProgramKey],
+    layout_references: set[bytes],
+    entries: list[tuple[str, bytes]],
+    fragments: list[tuple[str, bytes]],
+    parts: list[tuple[str, bytes]],
+    groups: dict[bytes, tuple[int, ...]],
+):
+    for shader in (*vertex_shaders, *pixel_shaders):
+        if shader.parameter_group_index >= parameter_group_count:
+            raise CorruptDataError(
+                "Xbox shader parameter-group index is out of range: "
+                f"{shader.parameter_group_index}"
+            )
+        if shader.binding_table_index >= binding_table_count:
+            raise CorruptDataError(
+                "Xbox shader binding-table index is out of range: "
+                f"{shader.binding_table_index}"
+            )
+        if shader.register_table_index >= register_table_count:
+            raise CorruptDataError(
+                "Xbox shader register-table index is out of range: "
+                f"{shader.register_table_index}"
+            )
+    program_references = set()
+    for program in programs:
+        if program.reference in program_references:
+            raise CorruptDataError(
+                "Xbox shader program reference is duplicated"
+            )
+        program_references.add(program.reference)
+        if program.vertex_shader_index >= len(vertex_shaders):
+            raise CorruptDataError(
+                "Xbox vertex shader index is out of range: "
+                f"{program.vertex_shader_index}"
+            )
+        if program.pixel_shader_index >= len(pixel_shaders):
+            raise CorruptDataError(
+                "Xbox pixel shader index is out of range: "
+                f"{program.pixel_shader_index}"
+            )
+        if (
+            program.vertex_parameter_group_index >= parameter_group_count
+            or program.parameter_group_index >= parameter_group_count
+        ):
+            raise CorruptDataError(
+                "Xbox material parameter-group index is out of range: "
+                f"{program.vertex_parameter_group_index}, "
+                f"{program.parameter_group_index}"
+            )
+
+    entry_references = {reference for _, reference in entries}
+    if len(entry_references) != len(entries):
+        raise CorruptDataError("Xbox shader entry reference is duplicated")
+    if set(groups) != entry_references:
+        raise CorruptDataError(
+            "Xbox shader entries and entry groups do not match"
+        )
+
+    assigned_programs = set()
+    for reference, indices in groups.items():
+        for index in indices:
+            if index >= len(programs):
+                raise CorruptDataError(
+                    f"Xbox shader program index is out of range: {index}"
+                )
+            if index in assigned_programs:
+                raise CorruptDataError(
+                    f"Xbox shader program {index} belongs to multiple entries"
+                )
+            assigned_programs.add(index)
+            if keys[index].entry_reference != reference:
+                raise CorruptDataError(
+                    "Xbox shader program key names a different entry"
+                )
+    if assigned_programs != set(range(len(programs))):
+        raise CorruptDataError(
+            "Xbox shader entry groups do not cover every program"
+        )
+
+    fragment_references = {reference for _, reference in fragments}
+    zero_reference = bytes(16)
+    for key in keys:
+        if (
+            key.fragment_reference != zero_reference
+            and key.fragment_reference not in fragment_references
+        ):
+            raise CorruptDataError(
+                "Xbox shader program key names an unknown fragment"
+            )
+        if key.layout_reference not in layout_references:
+            raise CorruptDataError(
+                "Xbox shader program key names an unknown vertex layout"
+            )
+    if any(reference not in layout_references for _, reference in parts):
+        raise CorruptDataError(
+            "Xbox shader mesh part names an unknown vertex layout"
+        )
+
+
+def _parse_xbox_shader_database(
+    data: bytes,
+    *,
+    material_keys: Iterable[str] | None = None,
+    shader_partitions: Iterable[str] = (),
+) -> ShaderDatabase:
+    if len(data) < 32:
+        raise CorruptDataError("Xbox shader database is too short")
+    stream = io.BytesIO(data)
+    version = _be_u32(stream, "Xbox shader database version")
+    if version != 117:
+        raise CorruptDataError(
+            f"Unsupported Xbox shader database version: {version}"
+        )
+    flag = read_exact(stream, 1, "Xbox shader database flag")[0]
+    if flag != 0:
+        raise CorruptDataError(
+            f"Unsupported Xbox shader database flag: {flag}"
+        )
+
+    parameter_groups = _xbox_parameter_groups(stream)
+    binding_table_count = _skip_xbox_binding_tables(stream)
+    register_table_count = _skip_xbox_register_tables(stream)
+    vertex_shaders = _xbox_shader_records(stream, vertex=True)
+    pixel_shaders = _xbox_shader_records(stream, vertex=False)
+    programs = _xbox_programs(stream)
+    keys = _xbox_program_keys(stream, len(programs))
+    layouts = _xbox_vertex_layouts(stream)
+    entries = _xbox_named_references(stream, "entry")
+    fragments = _xbox_named_references(stream, "fragment")
+    parts = _xbox_named_references(stream, "mesh-part")
+    groups = _xbox_entry_groups(stream)
+
+    _validate_xbox_shader_graph(
+        len(parameter_groups),
+        binding_table_count,
+        register_table_count,
+        vertex_shaders,
+        pixel_shaders,
+        programs,
+        keys,
+        set(layouts),
+        entries,
+        fragments,
+        parts,
+        groups,
+    )
+
+    selected_keys = (
+        None
+        if material_keys is None
+        else {
+            key.replace("\\", "/").strip("/").casefold()
+            for key in material_keys
+        }
+    )
+    selected_partitions = tuple(
+        dict.fromkeys(
+            partition.replace("\\", "/").strip("/").casefold()
+            for partition in shader_partitions
+            if partition.strip("/\\")
+        )
+    )
+
+    def selected(key: str) -> bool:
+        if selected_keys is None:
+            return True
+        normalized = key.replace("\\", "/").strip("/").casefold()
+        return normalized in selected_keys or any(
+            normalized == partition
+            or normalized.endswith("/" + partition)
+            for partition in selected_partitions
+        )
+
+    materials = []
+    all_material_keys = []
+    for key, reference in entries:
+        all_material_keys.append(key)
+        if not selected(key):
+            continue
+        textures = []
+        seen_textures = set()
+        variants = []
+        for program_index in groups[reference]:
+            program = programs[program_index]
+            program_key = keys[program_index]
+            variants.append(
+                ShaderVariant(
+                    table_index=program_index,
+                    vertex_shader_index=program.vertex_shader_index,
+                    pixel_shader_index=program.pixel_shader_index,
+                    parameter_group_index=program.parameter_group_index,
+                    layout=layouts.get(program_key.layout_reference),
+                )
+            )
+            parameter_group_index = programs[
+                program_index
+            ].parameter_group_index
+            for texture in parameter_groups[parameter_group_index]:
+                identity = (texture.index, texture.path.casefold())
+                if identity not in seen_textures:
+                    seen_textures.add(identity)
+                    textures.append(texture)
+        materials.append(
+            ShaderMaterial(
+                key=key,
+                textures=tuple(textures),
+                variants=tuple(variants),
+            )
+        )
+
+    return ShaderDatabase(
+        materials=tuple(materials),
+        trailing_bytes=len(data) - stream.tell(),
+        layouts=tuple(layouts.values()),
+        material_keys=tuple(all_material_keys),
+    )
+
+
+def parse_shader_database(
+    data: bytes,
+    *,
+    material_keys: Iterable[str] | None = None,
+    shader_partitions: Iterable[str] = (),
+    platform: str | None = None,
+    asset_type: str | None = None,
+) -> ShaderDatabase:
+    normalized_platform = (platform or "").casefold()
+    normalized_type = (asset_type or "").casefold()
+    if normalized_platform in {"xbox360", "xenon"} and (
+        not normalized_type or normalized_type == "dx9shaderdatabase"
+    ):
+        return _parse_xbox_shader_database(
+            data,
+            material_keys=material_keys,
+            shader_partitions=shader_partitions,
+        )
+    if normalized_type == "dx9shaderdatabase":
+        raise CorruptDataError(
+            "Xbox DX9 shader database parsing requires Xbox 360 platform "
+            "metadata"
+        )
+    return _parse_pc_shader_database(
+        data,
+        material_keys=material_keys,
+        shader_partitions=shader_partitions,
     )

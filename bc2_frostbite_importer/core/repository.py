@@ -29,13 +29,25 @@ CancelCallback = Callable[[], bool]
 
 
 class AssetRepository:
-    def __init__(self, image_path: str, cache_root: str | os.PathLike[str]):
+    def __init__(
+        self,
+        image_path: str,
+        cache_root: str | os.PathLike[str],
+        *,
+        source_progress: ProgressCallback | None = None,
+        cancelled: CancelCallback | None = None,
+    ):
         self.image_path = str(Path(image_path).resolve())
         self.cache_root = Path(cache_root).resolve()
         self.fingerprint = source_fingerprint(self.image_path)
         self.source_cache = self.cache_root / self.fingerprint[:20]
         self.source_cache.mkdir(parents=True, exist_ok=True)
-        self.source: DiscSource = detect_source(self.image_path, self.source_cache)
+        self.source: DiscSource = detect_source(
+            self.image_path,
+            self.source_cache,
+            progress=source_progress,
+            cancelled=cancelled,
+        )
         self.catalog = AssetCatalog(self.source_cache / "catalog.sqlite3")
         self._archive_info_cache = {}
         self._payload_path_cache = {}
@@ -51,6 +63,10 @@ class AssetRepository:
     @property
     def kind(self) -> str:
         return self.source.kind
+
+    @property
+    def indexes_archives_during_scan(self) -> bool:
+        return self.source.index_archives_during_scan
 
     def close(self):
         self.catalog.close()
@@ -74,7 +90,7 @@ class AssetRepository:
         archive_ids: list[int] = []
         for archive in archives:
             archive_ids.append(self.catalog.upsert_archive(archive))
-        if self.kind != "XBOX360_ISO":
+        if not self.indexes_archives_during_scan:
             if progress:
                 progress(len(archives), len(archives), "PC archive catalog ready")
             return []
@@ -118,7 +134,16 @@ class AssetRepository:
         mesh_path: str | None = None,
         shader_partitions: tuple[str, ...] = (),
     ):
-        databases = self.catalog.shader_database_assets()
+        source_kind = getattr(
+            getattr(self, "source", None),
+            "kind",
+            None,
+        )
+        databases = (
+            self.catalog.shader_database_assets(include_dx9=True)
+            if source_kind == "XBOX360_STFS"
+            else self.catalog.shader_database_assets()
+        )
         by_archive: dict[str, list[object]] = {}
         by_id = {}
         for asset in databases:
@@ -210,6 +235,8 @@ class AssetRepository:
             raw,
             material_keys=normalized_keys,
             shader_partitions=normalized_partitions,
+            platform=str(asset["platform"]),
+            asset_type=str(asset["asset_type"]),
         )
         if not self.catalog.shader_database_recorded(asset_id):
             self.catalog.record_shader_database(

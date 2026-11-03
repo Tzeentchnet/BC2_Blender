@@ -6,11 +6,13 @@ This document was audited on 2026-11-02 against the current implementation,
 the complete test inventory, and the named integration-runner assertions.
 
 - `python -m compileall -q bc2_frostbite_importer` completed successfully.
-- All 66 dependency-free tests in `tests/test_core.py` passed.
-- The Blender smoke test and optional retail-media integrations were reviewed
-  but not rerun during this documentation audit. Their results below remain
-  recorded evidence from the named Blender 5.2/5.2.2 runs, not results inferred
-  from the unit suite.
+- All 88 dependency-free tests in `tests/test_core.py` passed.
+- The Blender 5.2.2 factory-startup smoke test passed.
+- The BF1943 package-wide mesh/UV audit, seven-database/five-map shader audit,
+  direct Japanese-infantry/Corsair imports, Coral Sea full-material
+  integration, and sampled-animation retail-media integration were rerun.
+  Other optional retail integrations below remain recorded evidence from
+  their named runs, not results inferred from the unit suite.
 
 Synthetic regression coverage, Blender-hosted validation, recorded retail-media
 observations, implemented preview policy, heuristics, and unknowns are kept
@@ -23,7 +25,7 @@ The implementation has been exercised read-only against supplied PC and Xbox
 360 retail images. The measurements in this section are recorded outputs from
 those bounded runs; the dependency-free unit suite does not recreate them.
 
-### Xbox catalog
+### BC2 Xbox catalog
 
 | Category | Active assets |
 |---|---:|
@@ -40,6 +42,186 @@ those bounded runs; the dependency-free unit suite does not recreate them.
 
 The disc contained 630 FbRB archives and 384,241 total metadata records when
 deleted entries were included.
+
+### Battlefield 1943 Xbox LIVE package
+
+One legally owned, extensionless Xbox LIVE Arcade package was inspected
+read-only. It is 586,448,896 bytes, has title ID `0x5841097E`, and contains a
+LIVE/PIRS-style STFS filesystem. No package or extracted game payload is part
+of the repository.
+
+The implemented STFS reader and production repository scan reported:
+
+| Measurement | Result |
+|---|---:|
+| STFS files / directories | 90 / 24 |
+| Consecutive / fragmented files | 90 / 0 |
+| FbRB archives / indexing failures | 85 / 0 |
+| Compressed-payload archives | 81 |
+| Active / deleted FbRB records | 29,850 / 0 |
+| Mesh | 2,902 |
+| Texture | 1,515 |
+| Terrain | 49 |
+| Animation | 1,105 |
+| Audio | 12,828 |
+| UI / video | 69 |
+| Level / DBX | 9,212 |
+| Other data / other resource types | 1,583 / 587 |
+
+Package-wide bounded resource checks produced:
+
+- all 1,209 MeshData resources parsed;
+- 2,492,266 decoded vertices and 1,851,115 nondegenerate triangles;
+- the post-fix UV audit retained those exact package-wide totals while the
+  Japanese infantry LOD0 body changed to offsets `32, 36` and the Corsair
+  LOD0 main frame changed to `16, 20`;
+- all observed mesh types `0`, `1`, `2`, and `4`, including type-5 triangle
+  strips, payload-flag-1 32-bit indices, and full-float skinned declarations;
+- 1,505 of 1,510 XenonTexture resources converted: 986 DXT1, 425 DXT5,
+  48 ARGB8888, and 46 L8;
+- the five texture failures are all format code `5`, whose 16-bit channel
+  masks remain unknown;
+- all five TerrainHeightfield, TerrainMaterialMap, and WaterMesh map resources
+  parsed;
+- ten binary DBX samples selected across distinct archives parsed;
+- all five complete level graphs resolved;
+- all seven version-117 `Dx9ShaderDatabase` resources parsed to exact EOF,
+  recovering 2,565 material entries and 11,727 deduplicated material binding
+  records;
+- all 31 GrannyModel and all 787 GrannyAnimation catalog records parsed.
+
+These results verify container access, cataloging, and broad resource parsing
+for that sample. They do not verify exact Xenos shader arithmetic, physical
+UV routing, source-renderer parity, other title updates/regions, Xbox BC2 map
+or Granny compatibility, fragmented STFS files, PIRS game packages, or STFS
+cryptographic authenticity.
+
+### Battlefield 1943 complete maps
+
+The map picker found five complete `reduced-level-00`/`terrain-00` pairs. Each
+was prepared with the shared `levels-common-00` archive and resolved through
+the production semantic graph:
+
+| Level | Placements | Mesh variants | Heightfields | Water meshes |
+|---|---:|---:|---:|---:|
+| `CORAL_SEA` | 2,889 | 29 | 1 | 1 |
+| `GUADAL_CANAL` | 5,265 | 102 | 13 | 1 |
+| `IWO_JIMA_S` | 3,672 | 110 | 13 | 1 |
+| `WAKE_ISLAND_S` | 4,328 | 97 | 1 | 1 |
+| `WAKE_ISLAND_TUTORIAL` | 4,419 | 100 | 1 | 1 |
+
+All five resolve a terrain material map and a per-level
+`Dx9ShaderDatabase`. The platform-aware parser exposes each database path
+without routing Xbox bytecode through the PC DX11 analyzer. The all-map
+production audit reported:
+
+| Level | Unique surface keys | Exact keys | Unique full-partition suffix | Missing/ambiguous | Resolved bindings | Missing texture resources |
+|---|---:|---:|---:|---:|---:|---:|
+| `CORAL_SEA` | 79 | 78 | 0 | 1 | 352 | 0 |
+| `GUADAL_CANAL` | 257 | 253 | 0 | 4 | 1,307 | 0 |
+| `IWO_JIMA_S` | 288 | 277 | 2 | 9 | 1,407 | 0 |
+| `WAKE_ISLAND_S` | 237 | 228 | 1 | 8 | 1,176 | 0 |
+| `WAKE_ISLAND_TUTORIAL` | 241 | 232 | 1 | 8 | 1,196 | 0 |
+
+Missing or ambiguous keys are preserved as source diagnostics; no
+last-name-only fuzzy match is used.
+
+Two Blender 5.2.2 integrations used 128-edge terrain previews and full source
+materials/textures, then saved and reopened:
+
+| Scene | Placements | Linked variants | Unique MeshData | Terrain tiles | Water | Source materials | Source images |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Coral Sea | 2,889 | 29 | 28 | 1 | 1 | 71 | 91 |
+| Iwo Jima | 3,672 | 110 | 109 | 13 | 1 | 263 | 207 |
+
+Both retained linked instancing, nonempty terrain/water geometry, and the
+explicit `unsupported_xbox_shader_bytecode` diagnostic. Each retained one
+explicit texture-conversion failure for the still-unknown format code `5`.
+Iwo Jima additionally retained one source `missing_surface_shaders`
+diagnostic and two corresponding unresolved subset assignments. These runs
+verify static scene construction, source material identity, texture
+selection, and persistence, not visual parity or exporter-safe Xbox shader
+semantics.
+
+A corrective Blender 5.2.2 run regenerated the three requested visual scenes:
+
+| Scene | Corrective evidence |
+|---|---|
+| Japanese infantry | 5 mesh objects, 147 bones, 5 source materials, and 17 packed source images; body/head color maps are Base Color, `_AO` maps are occlusion, and the LOD0 body uses byte-32/36 coordinates |
+| US Corsair | 24 source-part objects with default-state visibility, 4 materials, and 7 packed source images; `corsair_cm` uses byte-16 `UVMap`, decals use byte-20 `UV1`, and the repeated metal normal uses scale `(128, 64)` |
+| Coral Sea | 2,889 placements, 29 linked variants, 71 materials, 91 packed source images, and one 512-edge terrain tile; observed terrain span `179.770` m and adjacent-height p95 `2.457` m |
+
+All three files saved and reopened with their source images packed. Separate
+material-lit character/vehicle renders and a solid terrain overview were
+inspected locally. The Corsair atlas/insignia and Japanese uniform/skin
+textures are visibly mapped, and Coral Sea no longer has the byte-swapped
+spike field. These checks verify the named preview behavior; they do not claim
+source-renderer parity.
+
+A second 512-edge Coral Sea correction eliminated the previous 20
+`resolved bindings without color graph` states, but subsequent user review
+showed that role assignment alone was insufficient: every carrier binding
+still used byte 24, packed AO was read as red-only, and the opaque grayscale
+`wake` texture was incorrectly treated as RGBA color. A follow-up two-UV pass
+then routed palette and AO together through byte 28 and reconstructed
+`CombinedAOs` with `max(R,G,B)`; user review also disproved that pass.
+
+The current save/reopen run records 55 general resolved material graphs,
+14 `resolved verified BF1943 carrier graph` materials, and two
+`resolved heuristic BF1943 shoreline wake graph` materials. Persisted
+assertions and focused local previews verify:
+
+- every Japanese/US carrier subset retains byte-24/28/32 coordinates from its
+  linked stride-36 layout;
+- repeating color, normal, `US_details_512`, and generic-mask inputs use byte
+  24; AO uses byte 28; and `colorpick` uses byte 32;
+- `CombinedAOs` uses the exact blue/green/alpha/red channel selected by each
+  compiled surface program, while Japanese surfaces B/C preserve
+  `Jap_version_AO_01` as RGB color-vector modulation;
+- carrier `colorpick` multiplies source metal/wood color, matching the
+  compiled pixel-program arithmetic;
+- both shoreline meshes and all 40 placements use repeated byte-28 seabed,
+  byte-24 wake control, derived dithered opacity, and the descriptive
+  `BC2 Shoreline Wake` material name;
+- jetty placement `3011` routes every `_Df` binding as source color; and
+- skydome placement `2546` routes `sky_CS`, not `WavesMedium_02_C`, to Base
+  Color.
+
+Side-by-side local renders show why the packed secondary-interpolator order
+cannot be inferred from layout-record order alone. Byte-28 `colorpick`
+produces the reported broad palette bands. Byte-32 `colorpick` with byte-28
+AO restores the continuous Japanese wood deck and rising-sun marking plus the
+US deck lettering visible in source references. The packed AO atlas is no
+longer sampled with palette coordinates or collapsed with a channel maximum.
+The packed scene retained 2,889 placements, 29 linked mesh variants, 91
+source images, terrain adjacent-height p95 `2.457` m, and height span
+`179.770` m. This verifies the documented carrier coordinate/fetch path and
+implemented wake behavior on the named sample, not complete Xenos
+arithmetic, scrolling/flow behavior, exporter-safe semantics, or full
+source-renderer parity.
+
+### Battlefield 1943 Granny
+
+The verified big-endian Granny v7 audit found:
+
+| Measurement | Result |
+|---|---:|
+| GrannyModel records parsed | 31 of 31 |
+| Bone-count range / total decoded bones | 3-147 / 620 |
+| GrannyAnimation records parsed | 787 of 787 |
+| Xbox wrapper component-count occurrences | 291 x 1, 5 x 2, 4 x 6 |
+| `DaKeyframes32f` curve occurrences | 135 |
+
+Observed wrapper records preserve a bone index plus variable-length lower and
+upper range values. Their runtime meaning remains unknown. The animation
+audit also exercised the documented constant, identity, uncompressed, and
+8-/16-bit packed quaternion and translation codecs.
+
+A representative stationary-HMG resource resolved its DBX-referenced
+nine-bone skeleton and created a 61-sample Blender Action. Three decoded pose
+samples agreed with the source hierarchy within `7.5e-9`; the armature and
+Action survived save/reopen. This validates the direct BF1943 Action path but
+does not reconstruct game animation state machines.
 
 ### PC catalog
 
@@ -465,8 +647,10 @@ Current tests cover:
 - the declared four-channel little-endian stride-64 skinned coordinate layout
   including constant declared channels, plus nondegenerate routing for
   LegStandard, MOLLE, and pouches;
-- bounded PC Granny wrapper, section, relocation, skeleton, additive bone-index,
-  constant-curve, quadratic-boundary, and degree-3 `D3I1K32fC32f` fixtures;
+- bounded PC and big-endian Xbox Granny wrappers, sections, relocations, and
+  skeletons; PC additive bone indices; Xbox 1/2/6-component wrapper ranges;
+  constant curves; BF1943 `DaKeyframes32f`; quadratic boundaries; and a
+  degree-3 `D3I1K32fC32f` fixture;
 - PC L8-to-DDS conversion;
 - generated L8 DDS output for decoded material-index images;
 - Xbox tiled L8 conversion;
@@ -493,7 +677,11 @@ Current tests cover:
 - full and targeted archive indexing, per-archive failure recording, and
   cancellation between archives;
 - one-time materialization and direct reuse of compressed FbRB payloads;
-- synthetic XDVDFS -> FbRB -> MeshData end-to-end import.
+- synthetic direct and deflated-ZIP XDVDFS -> FbRB -> MeshData end-to-end
+  import, including reuse of the materialized ZIP member;
+- synthetic direct and deflated-ZIP extensionless STFS -> FbRB -> MeshData
+  end-to-end import, plus progress, cancellation cleanup, cache reuse, and
+  ambiguous ZIP member rejection.
 
 See [`tests/test_core.py`](../tests/test_core.py).
 
@@ -533,8 +721,9 @@ recording for both full and targeted indexing.
 Direct mesh-set dispatch coverage verifies that PC rigid/tree resources with a
 same-name descriptor use the shared source-material path, direct composites
 retain their modular path, descriptorless PC rigid resources retain neutral
-geometry with a warning, console rigid resources remain geometry-only with a
-PC-support warning, and direct `MeshData` does not guess an owner.
+geometry with a warning, Xbox BC2 rigid resources remain geometry-only, direct
+BF1943 STFS material discovery reaches its version-117 shader catalog, and
+direct `MeshData` does not guess an owner.
 
 Related-animation smoke coverage verifies exact-folder discovery, explicit
 animation-tree clip lists, additive-base composition metadata, deduplication,
@@ -742,11 +931,23 @@ These behaviors are useful but need broader format research:
 - Topology- and normalized-range-based coordinate selection for unknown PC
   composite declarations. The resolver is surveyed across 62 vehicle LOD0
   resources, but coordinate meaning remains shader-specific.
+- Topology- and range-based BF1943 big-endian UV selection. Four-byte-aligned
+  candidates with fewer than 25% nondegenerate sampled UV triangles are
+  rejected. The complete 1,209-resource package parses and the named Japanese
+  infantry/Corsair corrections are visually verified. The carrier is a
+  narrower exception whose three UV fields and routes are verified from its
+  linked layout and compiled programs; general big-endian layouts remain
+  heuristic.
 - Skinned vertex influence offsets.
 - PC Granny field locations and curve codecs outside the documented human and
   Raven v7 samples.
 - PC additive animation wrapper semantics outside the four verified
   `ske01` facial-delta samples.
+- BF1943 Xbox animation wrapper-range semantics. The variable-length records
+  are structurally decoded and preserved, but their runtime purpose is
+  unknown.
+- Xbox BC2 Granny wrapper, file-info, and curve-layout compatibility with the
+  verified BF1943 variant.
 - Related-animation discovery outside exact folders and explicitly linked
   character/shared trees. The current bounded selection and 64-clip safety
   limit are implemented preview policy, not reconstruction of the runtime
@@ -781,15 +982,19 @@ naive alternative choose incorrectly.
   semantics for topology-resolved composite coordinate layouts.
 - Complete shader arithmetic, constants, swizzles, UV sources, and all texture
   semantics.
-- Xbox whole-map assembly and source-backed console mesh-set materials,
-  skeletons, and Actions. Current console rigid, tree, and skinned mesh-set
-  imports are geometry-only.
+- Xbox BC2 whole-map assembly and source-backed Xbox BC2/PS3 mesh-set
+  materials. BF1943 whole maps and direct descriptor-backed mesh sets use
+  their verified version-117 material keys and texture bindings. The BF1943
+  carrier has a verified base/palette/AO fetch path; complete Xenos arithmetic
+  and general physical UV routing remain unsupported.
 - PS3 disc/source support and texture validation. Recognizing the
   `Ps3Texture` type name is not verified native support.
-- Xbox 360/PS3 Granny skeleton/model and animation conversion.
+- Xbox BC2 and PS3 Granny skeleton/model and animation conversion. BF1943 Xbox
+  Granny conversion is implemented only for the documented package evidence.
 - Granny arrays, objects, track groups, or transform tracks outside section 0;
-  vector tracks; time-varying or nondecomposable scale/shear; and unimplemented
-  curve codecs.
+  vector tracks; time-varying scale/shear outside BF1943
+  `DaKeyframes32f`; nondecomposable scale/shear; and unimplemented curve
+  codecs.
 - Complete animation state-machine semantics, runtime clip phase/rate control,
   and automatic import of the hundreds of clips reachable from shared human
   graphs.

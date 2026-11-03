@@ -6,21 +6,25 @@ import json
 import os
 import subprocess
 import tempfile
+import zipfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import BinaryIO, Iterator
+from typing import BinaryIO, Callable, Iterator
 
 from .errors import ExtractionError, PlatformRequirementError, UnsupportedSourceError
 from .io import RangeReader, safe_cache_name
 from .iso9660 import Iso9660Image
 from .msi import read_installer_files
 from .records import ArchiveDescriptor
+from .stfs import StfsPackage
 from .xdvdfs import XdvdfsImage
+from .zip_source import materialize_zip_source
 
 
 class DiscSource:
     kind = "UNKNOWN"
     platform = "unknown"
+    index_archives_during_scan = False
 
     def __init__(self, image_path: str, cache_directory: str | os.PathLike[str]):
         self.image_path = str(Path(image_path).resolve())
@@ -38,6 +42,7 @@ class DiscSource:
 class Xbox360Source(DiscSource):
     kind = "XBOX360_ISO"
     platform = "xbox360"
+    index_archives_during_scan = True
 
     def __init__(self, image_path: str, cache_directory: str | os.PathLike[str]):
         super().__init__(image_path, cache_directory)
@@ -62,6 +67,47 @@ class Xbox360Source(DiscSource):
     def open_archive(self, locator: dict) -> Iterator[BinaryIO]:
         reader = RangeReader(
             self.image_path, int(locator["offset"]), int(locator["size"])
+        )
+        try:
+            yield reader
+        finally:
+            reader.close()
+
+
+class Xbox360StfsSource(DiscSource):
+    kind = "XBOX360_STFS"
+    platform = "xbox360"
+    index_archives_during_scan = True
+
+    def __init__(self, image_path: str, cache_directory: str | os.PathLike[str]):
+        super().__init__(image_path, cache_directory)
+        self.package = StfsPackage(self.image_path)
+
+    def list_archives(self) -> list[ArchiveDescriptor]:
+        archives = []
+        for entry in self.package.files().values():
+            if entry.is_directory or not entry.path.casefold().endswith(".fbrb"):
+                continue
+            archives.append(
+                ArchiveDescriptor(
+                    path=entry.path,
+                    size=entry.size,
+                    platform=self.platform,
+                    locator={
+                        "start_block": entry.metadata["start_block"],
+                        "size": entry.size,
+                        "consecutive": entry.metadata["consecutive"],
+                    },
+                )
+            )
+        return sorted(archives, key=lambda archive: archive.path.casefold())
+
+    @contextmanager
+    def open_archive(self, locator: dict) -> Iterator[BinaryIO]:
+        reader = self.package.open_blocks(
+            int(locator["start_block"]),
+            int(locator["size"]),
+            consecutive=bool(locator["consecutive"]),
         )
         try:
             yield reader
@@ -192,12 +238,11 @@ class PcIsoSource(DiscSource):
             yield stream
 
 
-def detect_source(
-    image_path: str, cache_directory: str | os.PathLike[str]
+def _detect_source_file(
+    path: Path, cache_directory: str | os.PathLike[str]
 ) -> DiscSource:
-    path = Path(image_path)
-    if not path.is_file():
-        raise UnsupportedSourceError(f"Disc image does not exist: {path}")
+    if StfsPackage.probe(path):
+        return Xbox360StfsSource(str(path), cache_directory)
     descriptor = XdvdfsImage.find_descriptor(path, scan=False)
     if descriptor is not None:
         return Xbox360Source(str(path), cache_directory)
@@ -212,5 +257,36 @@ def detect_source(
     if descriptor is not None:
         return Xbox360Source(str(path), cache_directory)
     raise UnsupportedSourceError(
-        "The selected file is neither a supported BC2 PC ISO nor an Xbox 360 XDVDFS image"
+        "The selected file is neither a supported PC ISO, Xbox 360 XDVDFS image, "
+        "nor Xbox LIVE STFS package"
     )
+
+
+def detect_source(
+    image_path: str,
+    cache_directory: str | os.PathLike[str],
+    *,
+    progress: Callable[[int, int, str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> DiscSource:
+    path = Path(image_path)
+    if not path.is_file():
+        raise UnsupportedSourceError(f"Source file does not exist: {path}")
+    if zipfile.is_zipfile(path):
+        materialized = materialize_zip_source(
+            path,
+            Path(cache_directory) / "sources",
+            progress=progress,
+            cancelled=cancelled,
+        )
+        try:
+            return _detect_source_file(materialized.path, cache_directory)
+        except UnsupportedSourceError as exc:
+            raise UnsupportedSourceError(
+                f"ZIP member {materialized.member_name!r}: {exc}"
+            ) from exc
+    if path.suffix.casefold() == ".zip":
+        raise UnsupportedSourceError(
+            f"The selected .zip file is not a valid ZIP archive: {path}"
+        )
+    return _detect_source_file(path, cache_directory)

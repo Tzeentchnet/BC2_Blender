@@ -141,7 +141,7 @@ def _parsed_mesh(
                     "objects/vehicles/"
                 )
             ),
-            pc_declared_uv_offsets_by_stride=shader_uv_offsets.get(
+            declared_uv_offsets_by_stride=shader_uv_offsets.get(
                 definition.mesh_data_path.casefold(),
             ),
         )

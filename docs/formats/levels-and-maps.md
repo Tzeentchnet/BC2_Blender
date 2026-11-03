@@ -2,24 +2,91 @@
 
 ## Scope
 
-The implemented whole-map path targets the **PC retail** build. Resolver,
-MeshData, material, and terrain-material-map coverage has been audited across
-all 33 discovered level/terrain archive pairs. The strict Blender scene
-save/reopen integration remains `MP_001`. The path imports the verified static
-visual foundation:
+The implemented whole-map path targets both the **PC retail** build and the
+verified **Battlefield 1943 Xbox LIVE** package. PC resolver, MeshData,
+material, and terrain-material-map coverage has been audited across all 33
+discovered level/terrain archive pairs; its strict Blender scene save/reopen
+integration remains `MP_001`. All five BF1943 level graphs resolve, and
+representative one-tile and 13-tile maps pass Blender construction and
+save/reopen validation.
+
+Both paths import the verified static visual foundation:
 
 - direct blueprint placements;
 - Forest, Middlegrowth, Rigid, and Static compact model groups;
 - all indexed terrain heightfields;
 - the level WaterMesh;
-- mesh surface sets and texture bindings from the level DX11 shader database.
+- PC mesh surface sets and texture bindings from the level DX11 shader
+  database;
+- BF1943 mesh surface keys and texture bindings from the level version-117
+  Xbox shader database.
 
 Dynamic game logic, effects, weather, collision, AI, destruction state, audio,
 and runtime culling are not reconstructed as Blender scene behavior.
 
+BF1943 material reconstruction is intentionally narrower than PC. Its
+per-level `Dx9ShaderDatabase` supplies verified material keys, source binding
+values, and texture paths. Complete-map import uses those records and reports
+`unsupported_xbox_shader_bytecode` because compiled Xenos arithmetic,
+reflected parameter names/dimensions, physical UV routing, and exact channel
+semantics remain unknown. Geometry, placement transforms, terrain,
+physical-material maps, water, material identity, and texture selection are
+source-backed; Blender role assignment and node arithmetic remain preview
+heuristics and are not exporter-safe.
+
 Composite membership is independently verified from BC2 retail data, but it
 remains mesh-local. It does not establish a level placement matrix, compact
 group, blueprint, instance record, runtime parent, or pivot.
+
+## BF1943 archive and map evidence
+
+**Verified sample scope:** one extensionless BF1943 Xbox LIVE package. The
+source kind is `XBOX360_STFS`; Xbox BC2 XGD2 whole-map behavior has not been
+verified and remains disabled.
+
+For a selected BF1943 map, preparation materializes and indexes:
+
+```text
+Dist/xenon/levels/<level>/reduced-level-00.fbrb
+Dist/xenon/levels/<level>/terrain-00.fbrb
+Dist/xenon/levels/levels-common-00.fbrb
+```
+
+Discovery requires both the per-level `reduced-level-00.fbrb` and
+`terrain-00.fbrb`. Each root DBX is `Levels/<LEVEL>.dbx` with primary type
+`GameSharedResources.LevelData`, so the same semantic placement resolver is
+used after source-specific archive selection.
+
+| BF1943 level | Placements | Mesh/material variants | Heightfields |
+|---|---:|---:|---:|
+| `CORAL_SEA` | 2,889 | 29 | 1 |
+| `GUADAL_CANAL` | 5,265 | 102 | 13 |
+| `IWO_JIMA_S` | 3,672 | 110 | 13 |
+| `WAKE_ISLAND_S` | 4,328 | 97 | 1 |
+| `WAKE_ISLAND_TUTORIAL` | 4,419 | 100 | 1 |
+
+All five graphs also resolve one terrain material map and one WaterMesh.
+These are structural resolver results, not five claims of visual parity.
+
+Two Blender 5.2.2 factory-startup runs used 128-edge terrain previews and
+**Materials and Textures**, then saved and reopened the scenes:
+
+| BF1943 validation scene | Placements | Linked mesh variants | Terrain tiles | Water | Source materials | Source images |
+|---|---:|---:|---:|---:|---:|---:|
+| `CORAL_SEA` | 2,889 | 29 | 1 | 1 | 71 | 91 |
+| `IWO_JIMA_S` | 3,672 | 110 | 13 | 1 | 263 | 207 |
+
+The Coral Sea result used 28 unique MeshData paths; Iwo Jima used 109.
+Collection membership, linked mesh reuse, nonempty terrain/water geometry,
+material binding metadata, file-backed source images, diagnostics, and
+persistence after reopen were checked. Iwo Jima retains one
+`missing_surface_shaders` source limitation and two corresponding unresolved
+subset assignments. Both scenes retain the explicit
+`unsupported_xbox_shader_bytecode` diagnostic and one format-code-5 texture
+failure. The reduced terrain setting validates scene construction and tile
+placement, not full-resolution terrain fidelity. See
+[Shaders and materials](../shaders-and-materials.md#bf1943-map-material-coverage)
+for all-five-map key and binding coverage.
 
 ## Modular entity assembly versus map placement
 
@@ -517,6 +584,10 @@ The saved validation scene reopens with these collection counts:
   `MP_001` harbor. Its material is an explicit approximation.
 - Shader binding recovery does not yet recover every shader constant,
   arithmetic operation, UV source, swizzle, or permutation.
+- BF1943 Xbox shader databases provide verified material identity and texture
+  selection. Compiled Xenos arithmetic, physical UV routing, reflected
+  parameter semantics, and original-renderer parity remain unsupported;
+  Blender node roles and UV choices are explicit preview heuristics.
 - Static cull trees are visibility structures and are not required for the
   verified placement set; importing them as visibility metadata is optional
   future work.

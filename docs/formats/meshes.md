@@ -33,7 +33,7 @@ Each subset begins with a NUL-terminated Latin-1 name, followed by:
 | `index_offset` | `uint32` | first index, not byte offset |
 | `vertex_offset` | `uint32` | byte offset into the shared vertex buffer |
 | `stride` | `uint8` | bytes per vertex |
-| `primitive_type` | `uint8` | `3` for supported triangle lists |
+| `primitive_type` | `uint8` | `3` for triangle lists; `5` for triangle strips |
 | `bones_per_vertex` | `uint8` | influence-layout hint |
 | `palette_count` | `uint8` | bone palette entries |
 | `palette_count_2` | `uint16` | duplicate count; must agree |
@@ -50,12 +50,13 @@ integers:
 ```text
 vertex_buffer_size
 index_buffer_size
-reserved == 0
+index_format              # 0 = uint16, 1 = uint32
 ```
 
 A candidate is accepted only when:
 
 ```text
+index_format in {0, 1}
 candidate + 12 + vertex_buffer_size + index_buffer_size == resource_size
 ```
 
@@ -64,8 +65,14 @@ is a strong structural check but still a heuristic; a writer needs the actual
 intermediate metadata schema.
 
 The index buffer follows the vertex buffer and contains platform-endian
-`uint16` indices. Supported primitives are triangle lists, so each primitive
-uses three indices.
+`uint16` or `uint32` indices according to `index_format`. Primitive type `3`
+is a triangle list and consumes three indices per primitive. Primitive type
+`5` is a triangle strip and consumes `primitive_count + 2` indices; winding
+alternates and degenerate connector triangles are omitted.
+
+**Verified:** the BF1943 Xbox LIVE sample uses 32-bit indices for reusable
+edge-model MeshData and type-5 strips for tree foliage/shadow subsets. These
+variants are implemented and covered by synthetic regression fixtures.
 
 ## Vertex decoding
 
@@ -81,9 +88,13 @@ usable Blender preview:
 - UV0 is a half-float pair selected by declaration rules or a stride-aware
   heuristic. General candidate scanning starts at byte 16 so packed
   normal/tangent fields at earlier offsets are not misread as plausible UVs.
-  Tested preferred offsets include 16, 20, 24, 28, and 32 bytes depending on
-  stride. Unknown little-endian type-2 composite declarations use the more
-  constrained topology resolver documented below.
+  Tested preferred offsets include 16, 20, 24, 28, 32, and 36 bytes depending
+  on stride. Unknown little-endian type-2 composite declarations use the more
+  constrained topology resolver documented below. Big-endian fallback
+  candidates are scanned on four-byte boundaries and tested against decoded
+  triangle topology: a candidate must give nonzero UV area on at least 25% of
+  sampled triangles. This prevents a numerically plausible selector, bone
+  field, or repeated part ID from outranking a real texture coordinate.
 - The common retail PC 48-byte static declaration stores
   `R16G16B16A16_FLOAT` inputs at bytes 24 and 32. The inspected vertex shaders
   consume their `.zw` halves as the object and repeating coordinates, while
@@ -258,8 +269,9 @@ usable Blender preview:
   byte-44 `UV2`. That channel is nondegenerate and removes the visible zigzag
   corruption.
 - For tested type-1 skinned layouts with a palette, four byte-sized palette
-  indices are stored at vertex offset `8` and four byte weights at offset
-  `12`.
+  indices and four byte weights immediately follow the position declaration.
+  Half-float positions use index/weight offsets `8/12`; full-float positions
+  use offsets `12/16`.
 - `bones_per_vertex == 1` in that skinned layout still uses the first
   per-vertex palette-index byte. A subset palette can contain multiple rigid
   attachment bones; assigning every such vertex to palette entry zero is
@@ -270,6 +282,82 @@ usable Blender preview:
   they do not use the validated skinned vertex declaration. The parser
   preserves its conservative first-palette-entry fallback instead of treating
   packed static vertex data as a bone index.
+
+The full-float `12/16` layout is verified on BF1943 Xbox weapon MeshData.
+Across the supplied package, all 1,209 MeshData resources parse after applying
+the index-width, strip-topology, and full-float skin rules. This is importer
+evidence, not a guarantee that every Frostbite 1 build uses the same
+declarations.
+
+The package-wide parser audit was repeated after adding topology-aware Xbox UV
+selection. All 1,209 resources still parsed to the unchanged totals of
+2,492,266 vertices and 1,851,115 nondegenerate triangles. Two corrective
+samples establish why numeric range and span alone are insufficient:
+
+| BF1943 Xbox sample | Vertex stride | Imported offsets | Structural evidence |
+|---|---:|---:|---|
+| Japanese infantry LOD0 body | 48 | `32, 36` | Byte 32 has nonzero UV-triangle area; the former byte-16 candidate is topologically degenerate |
+| US Corsair LOD0 main frame | 32 | `16, 20` | Byte 16 spans the source atlas with nonzero UV-triangle area; the former byte-24 candidate has zero UV-triangle area |
+
+All four audited Japanese infantry LODs select byte 32 for their primary
+coordinate and retain byte 36 on body subsets where it is structurally usable.
+All four Corsair LODs select bytes 16 and 20 on their compact main, propeller,
+and glass subsets. These are **implemented preview heuristics** backed by
+topology and the named visual samples; they are not a decoded Xenos vertex
+declaration or an exporter-safe claim about every big-endian MeshData layout.
+
+A later Coral Sea audit established semantic use for retained coordinates on
+two additional big-endian families. Each coordinate is one four-byte pair of
+big-endian binary16 values:
+
+| BF1943 Coral Sea family | Stride | Retained offsets | Verified or implemented routing |
+|---|---:|---|---|
+| Japanese and US aircraft carriers | 36 | `24, 28, 32` | byte-24 `UVMap`: repeating metal/wood color, normal, US details, and generic mask; byte-28 `UV1`: packed/grayscale AO; byte-32 `UV2`: `colorpick` |
+| `wake_1` and `wake_2` shoreline strips | 32 | `24, 28` | byte-24 `UVMap`: normalized `0..1` opaque wake control; byte-28 `UV1`: repeated seabed and still-unknown format-code-5 flow/noise input |
+
+All seven subsets on each carrier retain offsets `24, 28, 32`. The
+stride-36 shader-layout record contains code-6 elements at those physical
+offsets, and the linked Xenos vertex programs export all three pairs.
+Representative pixel-program texture fetches then establish the route shown
+above: base/normal/detail use one interpolator, `colorpick` and AO use two
+distinct secondary interpolators, and packed AO uses a surface-specific
+channel. The layout record alone does not identify the linker's packed
+interpolator order. Comparative reconstruction against the source-authored
+deck landmarks resolves byte 28 as AO and byte 32 as `colorpick`: this mapping
+restores the continuous Japanese wood deck and rising-sun marking plus the US
+deck lettering. Routing `colorpick` through byte 28 instead produces the
+disproved broad palette bands.
+
+Across the representative Japanese carrier, byte 24 reaches
+approximately `-1.68..2.49`, while byte 28 remains approximately
+`0.003..0.999` on the large atlas-backed subsets. `US_details_512` uses byte
+24 rather than either atlas coordinate.
+
+Both shoreline meshes retain offsets `24, 28`; byte 24 spans `0..1`, while
+byte 28 repeats approximately `-7.016..6.965`. Shoreline routing remains an
+**implemented preview heuristic** because its complete Xenos arithmetic is
+not decoded.
+
+The carrier offsets, distinct compiled fetches, packed AO channels, and
+visible route assignment are **verified on the named package** from the
+linked layout, Xenos programs, and Japanese/US deck landmarks. This does not
+make the partial Xbox declaration parser exporter-safe: unknown non-UV
+fields, complete lighting arithmetic, and general routing outside the
+documented carrier family remain unsupported.
+
+The seven BF1943 version-117 shader databases also contain 89-byte vertex
+layout records linked by 16-byte references from program keys and named mesh
+parts. The five level databases contain 44, 55, 61, 55, and 56 records
+respectively; 65 layout references are unique across all seven databases.
+The stream count is big-endian, while fields inside each retained 89-byte
+record use the same mixed/little-endian blob representation seen in PC
+records. The Xbox sample includes element codes not understood by the current PC
+layout-width table. The shader parser exposes only verified code-6 UV elements
+with their physical offsets and the declared stride, and retains the linked
+Xbox shader variants. Other elements remain opaque. This is deliberate:
+guessing widths or semantics for unknown codes would create false exporter
+claims. The verified carrier layout can therefore add byte-32 `UV2` without
+presenting the rest of the 89-byte record as a complete declaration.
 
 ### Type-2 composite index streams and part IDs
 
@@ -410,8 +498,8 @@ prefers LOD0, and prefers a resource in the same FbRB. Composite payloads are
 also scanned for ordered `lod0|PartName` records and their 18-float
 bounds/bind-transform payloads used by the type-2 split path.
 
-For a direct PC rigid or tree mesh-set import, the implemented material path
-looks up only the same-partition DBX descriptor:
+For a direct PC or BF1943 STFS rigid/tree mesh-set import, the implemented
+material path looks up only the same-partition DBX descriptor:
 
 ```text
 Objects/Example/Prop_Mesh.res
@@ -420,12 +508,14 @@ Objects/Example/Prop_Mesh.dbx
 
 The descriptor's primary mesh instance and `MeshShaderSetAsset` references
 supply source surfaces; the persistent shader-key catalog supplies candidate
-DX11 databases. This does not decode material assignments from the mesh-set
-binary itself. Direct `MeshData` has no deterministic owning descriptor and
-therefore remains a geometry import rather than reverse-searching an arbitrary
-owner. In the tested PC retail catalog, 120 descriptorless rigid mesh sets
-were undergrowth; they preserve neutral subset materials and report the
-limitation. Console rigid/tree mesh sets remain geometry-only.
+PC DX11 or BF1943 version-117 databases. This does not decode material
+assignments from the mesh-set binary itself. Direct `MeshData` has no
+deterministic owning descriptor and therefore remains a geometry import rather
+than reverse-searching an arbitrary owner. In the tested PC retail catalog,
+120 descriptorless rigid mesh sets were undergrowth; they preserve neutral
+subset materials and report the limitation. BF1943 direct material lookup is
+limited to the verified `XBOX360_STFS` source family. Xbox BC2 XGD2 and PS3
+rigid/tree mesh sets remain geometry-only.
 
 For robust multi-LOD or export support, continue decoding the mesh-set resource
 and retain its explicit references, runtime pivots, skeleton linkage, and
